@@ -220,6 +220,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView>
 
     void SetWindow(CoreWindow const & window)
     {
+        // Game Vault: the whole screen, not the Xbox's TV-safe area (by default an app is drawn with a border
+        // round it, which left the picture smaller than the screen; xemu and Game Vault ask the same)
+        winrt::Windows::UI::ViewManagement::ApplicationView::GetForCurrentView().SetDesiredBoundsMode(
+            winrt::Windows::UI::ViewManagement::ApplicationViewBoundsMode::UseCoreWindow);
         window.CharacterReceived({this, &App::OnCharacterReceived});
     }
 };
