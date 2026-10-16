@@ -4,7 +4,10 @@
 #include "xenia/cpu/xex_module.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
+#include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/xex2_info.h"
+#include "xenia/kernel/xam/profile_manager.h"
+#include "xenia/kernel/xam/xam_state.h"
 #include "xenia/vfs/devices/disc_image_device.h"
 #include "xenia/vfs/entry.h"
 #include "xenia/vfs/file.h"
@@ -121,11 +124,29 @@ winrt::fire_and_forget PickFileAsync(
 
 bool HasGamePath() { return m_game_path != ""; }
 
-void SelectGameFromWinRT(xe::Emulator* emu) { 
+bool EnsureProfile(xe::Emulator* emu) {
+  if (!emu || !emu->kernel_state() || !emu->kernel_state()->xam_state()) {
+    return false;
+  }
+  auto* profiles = emu->kernel_state()->xam_state()->profile_manager();
+  if (!profiles) {
+    return false;
+  }
+  if (profiles->GetAccountCount() > 0) {
+    return true;
+  }
+  bool made = profiles->CreateProfile("Player", true, false);
+  XELOGI("Game Vault: no profile yet, made \"Player\": {}", made ? "yes" : "no");
+  return made;
+}
+
+void SelectGameFromWinRT(xe::Emulator* emu) {
   if (m_game_path == "")
     PickGame(emu);
-  else
+  else {
+    EnsureProfile(emu);
     emu->LaunchPath(m_game_path);
+  }
 }
 
 void SelectFolder(std::function<void(std::string)> callback) {

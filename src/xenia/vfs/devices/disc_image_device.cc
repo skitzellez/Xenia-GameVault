@@ -39,7 +39,7 @@ bool DiscImageDevice::Initialize() {
     XELOGE("Disc image could not be opened");
     return false;
   }
-  image_size_ = std::filesystem::file_size(host_path_);
+  image_size_ = filesystem::FileSizeShared(host_path_);
   XELOGFS("DiscImageDevice::Initialize");
 #else
   mmap_ = MappedMemory::Open(host_path_, MappedMemory::Mode::kRead);

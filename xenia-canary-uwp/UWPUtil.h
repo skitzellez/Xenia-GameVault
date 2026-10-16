@@ -36,6 +36,9 @@ struct UnityGameMetadata {
 };
 
 void SelectGameFromWinRT(xe::Emulator* emu);
+// Game Vault: no profile yet -> one called "Player" is made and signed in, so games can save without the player
+// meeting the "No Profiles Found" box first. True when there is a profile now.
+bool EnsureProfile(xe::Emulator* emu);
 bool HasGamePath();
 void SelectFolder(std::function<void(std::string)> callback);
 void SelectFile(std::function<void(std::string)> callback);

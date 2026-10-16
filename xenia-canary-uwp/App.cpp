@@ -1,6 +1,7 @@
 #define NOMINMAX
 
 #include <windows.h>
+#include <unknwn.h>
 
 #include <iostream>
 #include <fstream> 
@@ -22,7 +23,10 @@
 #include <winrt/windows.graphics.display.core.h>
 
 #include <Gamingdeviceinformation.h>
+#include <thread>
+#include <winrt/Windows.ApplicationModel.DataTransfer.h>
 
+#include "xenia/base/filesystem.h"
 #include "XeniaUWP.h"
 #include "UWPUtil.h"
 #include "WinRTKeyboard.h"
@@ -37,6 +41,12 @@ using namespace Windows::UI::Core;
 using namespace Windows::UI::Composition;
 using namespace winrt::Windows::Storage;
 using namespace winrt::Windows::Storage::Pickers;
+
+// IStorageItemHandleAccess (WindowsStorageCOM.h, which does not build for apps here): a Win32 handle to a
+// StorageFile. Declared as the SDK has it.
+struct __declspec(uuid("5CA296B2-2C25-4D22-B785-B885C8201E6A")) GvStorageItemHandleAccess : ::IUnknown {
+    virtual HRESULT __stdcall Create(DWORD access, DWORD sharing, DWORD options, void* oplock, HANDLE* handle) = 0;
+};
 
 struct App : implements<App, IFrameworkViewSource, IFrameworkView>
 {
@@ -110,11 +120,41 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView>
         }
     }
 
+    // Game Vault (Xenia for Game Vault): the launcher shares the game file through the console and sends the
+    // token with the link. Opened here, Xenia reads the game through that handle (xe::filesystem shared file):
+    // opening a USB drive's file by path can wait for good on a permission question the console never shows.
+    // Runs on a thread of its own: blocking on WinRT calls is not allowed on this one.
+    static void ShareFromGameVault(const std::string& path, const winrt::hstring& token) {
+        HANDLE handle = nullptr;
+        std::thread([&] {
+            winrt::init_apartment();
+            try {
+                auto file = winrt::Windows::ApplicationModel::DataTransfer::SharedStorageAccessManager::
+                    RedeemTokenForFileAsync(token).get();
+                GvStorageItemHandleAccess* access = nullptr;
+                if (SUCCEEDED(static_cast<::IUnknown*>(winrt::get_abi(file))
+                                  ->QueryInterface(__uuidof(GvStorageItemHandleAccess), (void**)&access))) {
+                    HANDLE h = nullptr;
+                    if (SUCCEEDED(access->Create(0x120089 /* read */, 0x1 | 0x2 /* share read, write */, 0, nullptr, &h))) {
+                        handle = h;
+                    }
+                    access->Release();
+                }
+            } catch (...) {
+            }
+            winrt::uninit_apartment();
+        }).join();
+        if (handle) {
+            xe::filesystem::SetSharedFile(std::filesystem::path(winrt::to_hstring(path).c_str()), handle);
+        }
+    }
+
     void OnActivate(
         const winrt::Windows::ApplicationModel::Core::CoreApplicationView& v,
         const winrt::Windows::ApplicationModel::Activation::IActivatedEventArgs&
             args) {
         std::stringstream filePath;
+        winrt::hstring disctoken;
 
         if (args.Kind() ==
             Windows::ApplicationModel::Activation::ActivationKind::Protocol) {
@@ -145,11 +185,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView>
             } else if (arg.Name() == winrt::hstring(L"launchOnExit")) {
               // For if we want to return to a frontend
               m_launchOnExit = arg.Value();
+            } else if (arg.Name() == winrt::hstring(L"disctoken")) {
+              // Game Vault: the game file, shared through the console
+              disctoken = arg.Value();
             }
           }
         }
 
         std::string gamePath = filePath.str();
+        if (!gamePath.empty() && !disctoken.empty()) {
+          ShareFromGameVault(gamePath, disctoken);
+        }
         if (!gamePath.empty() && gamePath != "") {
           UWP::SetAutomaticLaunch(gamePath);
         }

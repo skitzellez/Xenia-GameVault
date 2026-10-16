@@ -56,6 +56,15 @@ bool CreateEmptyFile(const std::filesystem::path& path);
 // This behaves like fopen and the returned handle can be used with stdio.
 FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode);
 
+// Game Vault (Xenia for Game Vault): a game file the launcher shared with us (its token came with the launch
+// link), already open for reading. On an Xbox the console's file broker may never answer for a USB drive, so
+// the game is read through this handle instead of being opened by path. Reads only.
+void SetSharedFile(const std::filesystem::path& path, void* handle);
+// A new read-only handle to that file when path names it, else nullptr. The caller closes it.
+void* DuplicateSharedFile(const std::filesystem::path& path);
+// The size of the shared file when path names it; otherwise std::filesystem::file_size(path).
+uint64_t FileSizeShared(const std::filesystem::path& path);
+
 // Wrapper for the 64-bit version of fseek, returns true on success.
 bool Seek(FILE* file, int64_t offset, int origin);
 

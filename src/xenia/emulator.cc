@@ -460,7 +460,7 @@ Emulator::FileSignatureType GetFileSignature(
     return Emulator::FileSignatureType::Unknown;
   }
 
-  const uint64_t file_size = std::filesystem::file_size(path);
+  const uint64_t file_size = xe::filesystem::FileSizeShared(path);
   constexpr int64_t header_size = 4;
 
   if (file_size < header_size) {

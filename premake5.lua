@@ -341,9 +341,6 @@ workspace("xenia")
       "src/xenia/base/app_win32.manifest"
     })
     removefatalwarnings("All")
-    removeflags({
-      "FatalWarnings"
-    })
   end
 
   include("src/xenia")
