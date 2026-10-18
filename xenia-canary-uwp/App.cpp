@@ -197,6 +197,21 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView>
         }
 
         std::string gamePath = filePath.str();
+        // Game Vault: on App type "App" (Dev Home) Xenia gets only 1 GB, and a game stops at once ("Couldn't
+        // allocate context", "Failed to create the EDRAM buffer"; an update can set it back to App). Back to Game
+        // Vault, which says on the TV what to change, instead of a crash.
+        // "apptype-test.txt" in LocalState: acts as App type "App" on a console set to Game (a test)
+        std::wstring testFile =
+            std::wstring(winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path()) + L"\\apptype-test.txt";
+        bool lowTest = GetFileAttributesW(testFile.c_str()) != INVALID_FILE_ATTRIBUTES;
+        if (!gamePath.empty() && m_launchOnExit.size() >= 10 &&
+            std::wstring_view(m_launchOnExit).substr(0, 10) == L"gamevault:" &&
+            (lowTest || winrt::Windows::System::MemoryManager::AppMemoryUsageLimit() < (2048ull << 20))) {
+          winrt::Windows::System::Launcher::LaunchUriAsync(
+              winrt::Windows::Foundation::Uri(L"gamevault:?from=lowmem-xenia"))
+              .Completed([](auto const&, auto) { CoreApplication::Exit(); });
+          return;
+        }
         if (!gamePath.empty() && !disctoken.empty()) {
           ShareFromGameVault(gamePath, disctoken);
         }
