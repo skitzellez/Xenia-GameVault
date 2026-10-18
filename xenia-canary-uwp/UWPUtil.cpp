@@ -133,6 +133,13 @@ bool EnsureProfile(xe::Emulator* emu) {
     return false;
   }
   if (profiles->GetAccountCount() > 0) {
+    // a profile from before, but nobody signed in (no logged_profile_slot_0_xuid in the config): games then say
+    // "You are not signed in" and cannot save (GTA IV on the owner console). The first one is signed in.
+    if (!profiles->IsAnyProfileSignedIn()) {
+      uint64_t xuid = profiles->GetAccounts()->begin()->first;
+      profiles->Login(xuid, 0);
+      XELOGI("Game Vault: signed in profile {:016X}", xuid);
+    }
     return true;
   }
   bool made = profiles->CreateProfile("Player", true, false);

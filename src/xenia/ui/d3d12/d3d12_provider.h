@@ -50,6 +50,8 @@ class D3D12Provider : public GraphicsProvider {
     return graphics_analysis_;
   }
   ID3D12Device* GetDevice() const { return device_; }
+  // Game Vault: after the device was lost, what DRED recorded (d3d12_dred)
+  void LogDeviceRemovedData() const;
   ID3D12CommandQueue* GetDirectQueue() const { return direct_queue_; }
 
   uint32_t GetDescriptorSize(D3D12_DESCRIPTOR_HEAP_TYPE type) const {

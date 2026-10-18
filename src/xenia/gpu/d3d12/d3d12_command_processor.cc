@@ -3297,6 +3297,9 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
   HRESULT device_removed_reason = device->GetDeviceRemovedReason();
   if (FAILED(device_removed_reason)) {
     device_removed_ = true;
+    XELOGE("Game Vault: graphics device lost, reason {:08X}",
+           uint32_t(device_removed_reason));
+    GetD3D12Provider().LogDeviceRemovedData();
     graphics_system_->OnHostGpuLossFromAnyThread(device_removed_reason !=
                                                  DXGI_ERROR_DEVICE_REMOVED);
     return false;

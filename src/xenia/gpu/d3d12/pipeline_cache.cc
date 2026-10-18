@@ -3235,8 +3235,26 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   // Create the D3D12 pipeline state object.
   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
   ID3D12PipelineState* state;
-  if (FAILED(device->CreateGraphicsPipelineState(&state_desc,
-                                                 IID_PPV_ARGS(&state)))) {
+  HRESULT create_result =
+      device->CreateGraphicsPipelineState(&state_desc, IID_PPV_ARGS(&state));
+  if (FAILED(create_result)) {
+    // Game Vault: why (GTA IV on the Xbox failed the same 3 pipelines on every
+    // console, then lost the device): the result, whether the device was
+    // already removed, and what kind of pipeline it was
+    XELOGE(
+        "Game Vault: pipeline creation result {:08X}, device removed reason "
+        "{:08X}; VS {} bytes, PS {} bytes, GS {} bytes, HS {}, DS {}, "
+        "topology type {}, {} render targets ({} {} {} {}), DSV {}, samples "
+        "{}, cull {}",
+        uint32_t(create_result), uint32_t(device->GetDeviceRemovedReason()),
+        state_desc.VS.BytecodeLength, state_desc.PS.BytecodeLength,
+        state_desc.GS.BytecodeLength, state_desc.HS.BytecodeLength,
+        state_desc.DS.BytecodeLength,
+        uint32_t(state_desc.PrimitiveTopologyType), state_desc.NumRenderTargets,
+        uint32_t(state_desc.RTVFormats[0]), uint32_t(state_desc.RTVFormats[1]),
+        uint32_t(state_desc.RTVFormats[2]), uint32_t(state_desc.RTVFormats[3]),
+        uint32_t(state_desc.DSVFormat), state_desc.SampleDesc.Count,
+        uint32_t(state_desc.RasterizerState.CullMode));
     if (runtime_description.pixel_shader != nullptr) {
       XELOGE("Failed to create graphics pipeline with VS {:016X}, PS {:016X}",
              runtime_description.vertex_shader->shader().ucode_data_hash(),
