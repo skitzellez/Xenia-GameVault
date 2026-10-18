@@ -30,6 +30,7 @@
 #include "XeniaUWP.h"
 #include "UWPUtil.h"
 #include "WinRTKeyboard.h"
+#include "NetGame.h"
 
 using namespace winrt;
 
@@ -154,7 +155,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView>
         const winrt::Windows::ApplicationModel::Activation::IActivatedEventArgs&
             args) {
         std::stringstream filePath;
-        winrt::hstring disctoken;
+        winrt::hstring disctoken, netcred;
 
         if (args.Kind() ==
             Windows::ApplicationModel::Activation::ActivationKind::Protocol) {
@@ -188,6 +189,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView>
             } else if (arg.Name() == winrt::hstring(L"disctoken")) {
               // Game Vault: the game file, shared through the console
               disctoken = arg.Value();
+            } else if (arg.Name() == winrt::hstring(L"netcred")) {
+              // Game Vault: the sign-in for a game played from the network
+              netcred = arg.Value();
             }
           }
         }
@@ -195,6 +199,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView>
         std::string gamePath = filePath.str();
         if (!gamePath.empty() && !disctoken.empty()) {
           ShareFromGameVault(gamePath, disctoken);
+        }
+        if (gamePath.rfind("smb://", 0) == 0) {
+          // Game Vault: a game on a PC's shared folder or a NAS, read over the network (NetGame.cpp)
+          gamePath = NetGame::Open(gamePath, winrt::to_string(netcred));
         }
         if (!gamePath.empty() && gamePath != "") {
           UWP::SetAutomaticLaunch(gamePath);

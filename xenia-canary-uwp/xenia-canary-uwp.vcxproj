@@ -298,6 +298,7 @@
     <ClCompile Include="..\src\xenia\app\profile_dialogs.cc" />
     <ClCompile Include="..\src\xenia\app\xenia_main.cc" />
     <ClCompile Include="App.cpp" />
+    <ClCompile Include="NetGame.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
@@ -310,6 +311,12 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
+    <None Include="smb2.dll">
+      <DeploymentContent>true</DeploymentContent>
+    </None>
+    <None Include="libsmb2-LICENCE-LGPL-2.1.txt">
+      <DeploymentContent>true</DeploymentContent>
+    </None>
     <None Include="PropertySheet.props" />
     <None Include="xenia-canary-uwp_TemporaryKey.pfx" />
     <Text Include="readme.txt">

@@ -65,6 +65,21 @@ void* DuplicateSharedFile(const std::filesystem::path& path);
 // The size of the shared file when path names it; otherwise std::filesystem::file_size(path).
 uint64_t FileSizeShared(const std::filesystem::path& path);
 
+// Game Vault (Xenia for Game Vault 1.1.7.112 on): a game played straight from a PC's shared folder or a NAS,
+// with no copy on the console first. The app reads it over the network itself (apps on the Xbox may not open
+// \\PC\share paths) and registers the reader under a stand-in path; FileSizeShared and FileHandle::OpenExisting
+// read the game through it. Reads only.
+class NetFile {
+ public:
+  virtual ~NetFile() = default;
+  virtual uint64_t size() const = 0;
+  // the whole range or false
+  virtual bool Read(uint64_t offset, void* buffer, size_t length) = 0;
+};
+void SetNetFile(const std::filesystem::path& path, std::shared_ptr<NetFile> file);
+// the reader when path names the network game, else nullptr
+std::shared_ptr<NetFile> GetNetFile(const std::filesystem::path& path);
+
 // Wrapper for the 64-bit version of fseek, returns true on success.
 bool Seek(FILE* file, int64_t offset, int origin);
 

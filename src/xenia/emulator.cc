@@ -454,9 +454,12 @@ X_STATUS Emulator::MountPath(const std::filesystem::path& path,
 
 Emulator::FileSignatureType GetFileSignature(
     const std::filesystem::path& path) {
-  FILE* file = xe::filesystem::OpenFile(path, "rb");
+  // Game Vault: a game played from the network has no FILE*; its first and
+  // last bytes come through its reader (xe::filesystem::NetFile)
+  auto net = xe::filesystem::GetNetFile(path);
+  FILE* file = net ? nullptr : xe::filesystem::OpenFile(path, "rb");
 
-  if (!file) {
+  if (!net && !file) {
     return Emulator::FileSignatureType::Unknown;
   }
 
@@ -464,16 +467,24 @@ Emulator::FileSignatureType GetFileSignature(
   constexpr int64_t header_size = 4;
 
   if (file_size < header_size) {
+    if (file) {
+      fclose(file);
+    }
     return Emulator::FileSignatureType::Unknown;
   }
 
   char file_magic[header_size];
-  fread(file_magic, sizeof(file_magic), 1, file);
+  if (net) {
+    if (!net->Read(0, file_magic, header_size)) {
+      return Emulator::FileSignatureType::Unknown;
+    }
+  } else {
+    fread(file_magic, sizeof(file_magic), 1, file);
+    fclose(file);
+  }
 
   fourcc_t magic_value =
       make_fourcc(file_magic[0], file_magic[1], file_magic[2], file_magic[3]);
-
-  fclose(file);
 
   switch (magic_value) {
     case xe::cpu::kXEX1Signature:
@@ -500,10 +511,16 @@ Emulator::FileSignatureType GetFileSignature(
     return Emulator::FileSignatureType::EXE;
   }
 
-  file = xe::filesystem::OpenFile(path, "rb");
-  xe::filesystem::Seek(file, -header_size, SEEK_END);
-  fread(file_magic, 1, header_size, file);
-  fclose(file);
+  if (net) {
+    if (!net->Read(file_size - header_size, file_magic, header_size)) {
+      return Emulator::FileSignatureType::Unknown;
+    }
+  } else {
+    file = xe::filesystem::OpenFile(path, "rb");
+    xe::filesystem::Seek(file, -header_size, SEEK_END);
+    fread(file_magic, 1, header_size, file);
+    fclose(file);
+  }
 
   magic_value =
       make_fourcc(file_magic[0], file_magic[1], file_magic[2], file_magic[3]);
