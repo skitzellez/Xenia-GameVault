@@ -31,6 +31,9 @@
 #include "xenia/base/string.h"
 #include "xenia/base/system.h"
 #include "xenia/base/threading.h"
+#if XE_PLATFORM_WINRT
+#include "xenia-canary-uwp/UWPUtil.h"
+#endif
 
 // TODO(benvanik): generic API? logging_win.cc?
 #if XE_PLATFORM_ANDROID
@@ -99,8 +102,31 @@ FileLogSink::~FileLogSink() {
 }
 
 void FileLogSink::Write(const char* buf, size_t size) {
-  if (file_) {
+  if (!file_) {
+    return;
+  }
+  if (!limit_ || written_ + size <= limit_) {
     fwrite(buf, 1, size, file_);
+    written_ += size;
+    return;
+  }
+  // Game Vault: the log goes with the player's problem reports, so it is kept small; what went wrong (warnings
+  // "w>", errors "!>") is usually at the end, so those lines are still written
+  if (!cut_) {
+    cut_ = true;
+    static const char note[] =
+        "i> -------- Game Vault: log size limit reached, only warnings and errors from here on --------\n";
+    fwrite(note, 1, sizeof(note) - 1, file_);
+    written_ += sizeof(note) - 1;
+  }
+  for (size_t at = 0; at < size && written_ < 2 * limit_;) {
+    const char* end = static_cast<const char*>(memchr(buf + at, '\n', size - at));
+    size_t len = end ? size_t(end - (buf + at)) + 1 : size - at;
+    if (buf[at] == '!' || buf[at] == 'w') {
+      fwrite(buf + at, 1, len, file_);
+      written_ += len;
+    }
+    at += len;
   }
 }
 
@@ -446,7 +472,22 @@ void InitializeLogging(const std::string_view app_name) {
   }
 #else
   FILE* log_file = nullptr;
+  size_t log_limit = 0;
+#if XE_PLATFORM_WINRT
+  // Game Vault: the log of the last run goes where Game Vault picks up the logs it sends with a problem report
+  // (the "games" folder shared by the publisher's apps, "logs"), 4 MB of it at most
   if (cvars::log_file.empty()) {
+    std::string games = UWP::GetPublisherGames();
+    if (!games.empty()) {
+      auto file_path = std::filesystem::path(xe::to_path(games)) / "logs" / "Xenia (Xbox 360).log";
+      xe::filesystem::CreateParentFolder(file_path);
+      log_file = xe::filesystem::OpenFile(file_path, "wt");
+      log_limit = 4_MiB;
+    }
+  }
+#endif
+  if (log_file) {
+  } else if (cvars::log_file.empty()) {
     // Default to app name.
     auto file_name = fmt::format("{}.log", app_name);
     auto file_path = xe::filesystem::GetExecutableFolder() / file_name;
@@ -455,7 +496,7 @@ void InitializeLogging(const std::string_view app_name) {
     xe::filesystem::CreateParentFolder(cvars::log_file);
     log_file = xe::filesystem::OpenFile(cvars::log_file, "wt");
   }
-  logger_->AddLogSink(std::make_unique<FileLogSink>(log_file, true));
+  logger_->AddLogSink(std::make_unique<FileLogSink>(log_file, true, log_limit));
 
   if (cvars::log_to_stdout) {
     logger_->AddLogSink(std::make_unique<FileLogSink>(stdout, false));

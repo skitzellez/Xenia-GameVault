@@ -51,8 +51,9 @@ class LogSink {
 
 class FileLogSink final : public LogSink {
  public:
-  explicit FileLogSink(FILE* file, bool own_file)
-      : file_(file), owns_file_(own_file) {}
+  // limit (Game Vault): past this many bytes only warnings and errors are kept, up to twice as many; 0 = none
+  explicit FileLogSink(FILE* file, bool own_file, size_t limit = 0)
+      : file_(file), owns_file_(own_file), limit_(limit) {}
   ~FileLogSink();
 
   void Write(const char* buf, size_t size) override;
@@ -61,6 +62,8 @@ class FileLogSink final : public LogSink {
  private:
   FILE* file_;
   bool owns_file_;
+  size_t limit_ = 0, written_ = 0;
+  bool cut_ = false;
 };
 
 class DebugPrintLogSink final : public LogSink {

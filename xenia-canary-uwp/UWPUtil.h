@@ -46,6 +46,8 @@ void SelectFiles(std::function<void(std::vector<std::string>)> callback);
 bool TestPathPermissions(std::string path);
 std::string GetLocalCache();
 std::string GetLocalState();
+// Game Vault: the "games" folder the publisher's apps share (Game Vault reads its "logs"); "" when missing
+std::string GetPublisherGames();
 int GetCoreDPI();
 void SetAutomaticLaunch(std::string game_path);
 void SetDPI(int DPI);

@@ -181,6 +181,16 @@ std::string GetLocalState() {
       winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path());
 }
 
+std::string GetPublisherGames() {
+  try {
+    return winrt::to_string(winrt::Windows::Storage::ApplicationData::Current()
+                                .GetPublisherCacheFolder(L"games")
+                                .Path());
+  } catch (...) {
+    return "";
+  }
+}
+
 int GetCoreDPI() { return m_DPI; }
 
 void SetAutomaticLaunch(std::string game_path) { m_game_path = game_path; }
