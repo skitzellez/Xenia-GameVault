@@ -170,6 +170,14 @@ struct BuiltInGameConfig {
 const BuiltInGameConfig kBuiltInGameConfigs[] = {
     // WWE 2K17: freezes when a match starts (xenia-canary issue 235).
     {"545408BA", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},
+    // Naruto: The Broken Bond (+ demo): black, stretched textures
+    // (xenia-canary game-compatibility issue 87, xenia-canary issue 906).
+    {"55530825",
+     "[GPU]\nclear_memory_page_state = true\n"
+     "gpu_allow_invalid_upload_range = true\n"},
+    {"5553882E",
+     "[GPU]\nclear_memory_page_state = true\n"
+     "gpu_allow_invalid_upload_range = true\n"},
 };
 
 void ApplyBuiltInGameConfig(const std::string_view title_id) {
