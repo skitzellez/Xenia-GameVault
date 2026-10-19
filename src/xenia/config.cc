@@ -168,8 +168,11 @@ struct BuiltInGameConfig {
   const char* toml;
 };
 const BuiltInGameConfig kBuiltInGameConfigs[] = {
-    // WWE 2K17: freezes when a match starts (xenia-canary issue 235).
-    {"545408BA", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},
+    // WWE 2K17: freezes when a match starts (xenia-canary issue 235); custom wrestlers' pictures (drawn by the
+    // game, then read back) are garbled without resolve read-back (same engine: game-compatibility issue 32).
+    {"545408BA",
+     "[Memory]\nignore_offset_for_ranged_allocations = true\n"
+     "[GPU]\nreadback_resolve = \"fast\"\n"},
     // Naruto: The Broken Bond (+ demo): black, stretched textures
     // (xenia-canary game-compatibility issue 87, xenia-canary issue 906).
     {"55530825",
