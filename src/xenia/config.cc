@@ -181,6 +181,9 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     {"5553882E",
      "[GPU]\nclear_memory_page_state = true\n"
      "gpu_allow_invalid_upload_range = true\n"},
+    // Blur: 3D far too bright without resolve read-back (its brightness adaptation reads the picture back; xenia-canary
+    // game-compatibility issue 549, label gpu-readback). A player's Blur also lost the graphics device (2026-10-19).
+    {"41560845", "[GPU]\nreadback_resolve = \"fast\"\n"},
 };
 
 void ApplyBuiltInGameConfig(const std::string_view title_id) {
