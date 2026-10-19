@@ -71,6 +71,9 @@
 #include "xenia/hid/winkey/winkey_hid.h"
 #endif
 #include "xenia/hid/xinput/xinput_hid.h"
+#if XE_PLATFORM_WINRT
+#include "xenia/hid/xinput/gamevault_wheel_driver.h"
+#endif
 #endif  // XE_PLATFORM_WIN32
 
 #if XE_PLATFORM_WIN32
@@ -460,6 +463,10 @@ std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
     Factory<hid::InputDriver, ui::Window*, size_t> factory;
 #if XE_PLATFORM_WIN32 || XE_PLATFORM_WINRT
     factory.Add("xinput", xe::hid::xinput::Create);
+#if XE_PLATFORM_WINRT
+    // Game Vault: racing wheels as a pad, after the XInput pads (gamevault_wheel_driver.cc)
+    factory.Add("gvwheel", xe::hid::xinput::CreateGameVaultWheel);
+#endif  // XE_PLATFORM_WINRT
 #endif  // XE_PLATFORM_WIN32 || XE_PLATFORM_WINRT
 #if !XE_PLATFORM_ANDROID && !XE_PLATFORM_WINRT
     factory.Add("sdl", xe::hid::sdl::Create);
