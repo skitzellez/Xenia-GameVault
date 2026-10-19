@@ -6740,7 +6740,9 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           auto c_ignore_offset = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("ignore_offset_for_ranged_allocations")
                   ->second);
-          if (ImGui::Checkbox("Ignore Offset",
+          // Game Vault: games that need it (WWE 2K17) get it by themselves (config.cc kBuiltInGameConfigs); this box
+          // turns it on for every game
+          if (ImGui::Checkbox("Ignore Offset (all games - WWE 2K17 gets it by itself)",
                               c_ignore_offset->current_value())) {
             c_ignore_offset->SetConfigValue(
                 !c_ignore_offset->GetTypedConfigValue());

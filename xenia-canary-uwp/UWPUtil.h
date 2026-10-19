@@ -48,6 +48,10 @@ std::string GetLocalCache();
 std::string GetLocalState();
 // Game Vault: the "games" folder the publisher's apps share (Game Vault reads its "logs"); "" when missing
 std::string GetPublisherGames();
+// Game Vault: the profiles and their saves (content\<xuid>) are copied to the shared folder ("xbox 360 saves"),
+// which outlives an uninstall of Xenia and which Game Vault copies to the USB drive. A fresh install (no profile)
+// gets them back. Called once at start, before the profiles are read.
+void SavesAtStart(const std::filesystem::path& content_root);
 int GetCoreDPI();
 void SetAutomaticLaunch(std::string game_path);
 void SetDPI(int DPI);

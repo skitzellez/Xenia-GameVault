@@ -13,6 +13,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "third_party/fmt/include/fmt/std.h"
@@ -47,6 +48,8 @@ class LogSink {
 
   virtual void Write(const char* buf, size_t size) = 0;
   virtual void Flush() = 0;
+  // Game Vault: called by the log writer about once a minute, seconds since the start
+  virtual void Heartbeat(uint64_t seconds) {}
 };
 
 class FileLogSink final : public LogSink {
@@ -58,12 +61,22 @@ class FileLogSink final : public LogSink {
 
   void Write(const char* buf, size_t size) override;
   void Flush() override;
+  void Heartbeat(uint64_t seconds) override;
 
  private:
+  // one whole line (prefix, text and newline): the size limit and the repeat filter decide per line
+  void WriteLine(const char* line, size_t size);
+  void Put(const char* text, size_t size);
+
   FILE* file_;
   bool owns_file_;
   size_t limit_ = 0, written_ = 0;
   bool cut_ = false;
+  std::string pending_;  // the start of a line whose end has not come yet
+  // Game Vault (limited logs only): how often each message came, numbers left out ("Allocation failed: 0AB00000"
+  // and "...0AA00000" count as one); after kRepeatKeep copies the rest are counted, not written
+  std::unordered_map<uint64_t, uint32_t> seen_;
+  uint64_t lines_ = 0, lines_at_beat_ = 0, repeats_ = 0, repeats_at_beat_ = 0;
 };
 
 class DebugPrintLogSink final : public LogSink {

@@ -94,6 +94,15 @@ thread_local char thread_log_buffer_[64_KiB];
 
 FileLogSink::~FileLogSink() {
   if (file_) {
+    if (!pending_.empty()) {
+      pending_ += '\n';
+      WriteLine(pending_.data(), pending_.size());
+    }
+    if (repeats_) {
+      std::string note = fmt::format("i> -------- Game Vault: {} repeated lines were counted, not written --------\n",
+                                     repeats_);
+      Put(note.data(), note.size());
+    }
     fflush(file_);
     if (owns_file_) {
       fclose(file_);
@@ -105,29 +114,100 @@ void FileLogSink::Write(const char* buf, size_t size) {
   if (!file_) {
     return;
   }
-  if (!limit_ || written_ + size <= limit_) {
+  if (!limit_) {
     fwrite(buf, 1, size, file_);
-    written_ += size;
+    return;
+  }
+  // Game Vault: the writer hands over a line in pieces (prefix, text, newline), so the pieces are joined first;
+  // judging each piece on its own kept the "!> " prefixes but dropped their text once the limit was reached
+  for (size_t at = 0; at < size;) {
+    const char* end = static_cast<const char*>(memchr(buf + at, '\n', size - at));
+    size_t len = end ? size_t(end - (buf + at)) + 1 : size - at;
+    if (!end) {
+      pending_.append(buf + at, len);
+    } else if (pending_.empty()) {
+      WriteLine(buf + at, len);
+    } else {
+      pending_.append(buf + at, len);
+      WriteLine(pending_.data(), pending_.size());
+      pending_.clear();
+    }
+    at += len;
+  }
+}
+
+void FileLogSink::Put(const char* text, size_t size) {
+  fwrite(text, 1, size, file_);
+  written_ += size;
+}
+
+void FileLogSink::WriteLine(const char* line, size_t size) {
+  lines_++;
+  // Game Vault: one message repeated thousands of times (WWE 2K17: "MmAllocatePhysicalMemoryEx: Allocation
+  // failed" 16,000 times) filled the whole log; the thread id and all numbers are left out of the comparison
+  constexpr uint32_t kRepeatKeep = 20;
+  // only log messages ("w> 00001AB0 ..."); blocks like the settings list or the module header stay whole
+  bool prefixed = size > 12 && line[1] == '>' && line[2] == ' ';
+  if (!prefixed) {
+    if (written_ + size <= limit_) Put(line, size);
+    return;
+  }
+  uint64_t key = 14695981039346656037ull;
+  for (size_t i = 12; i < size; i++) {
+    char c = line[i];
+    bool number = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
+    if (number && i > 0) {
+      char p = line[i - 1];
+      if ((p >= '0' && p <= '9') || (p >= 'A' && p <= 'F')) continue;  // a run of digits counts as one
+    }
+    key = (key ^ uint8_t(number ? '#' : c)) * 1099511628211ull;
+  }
+  if (seen_.size() > 20000) seen_.clear();
+  uint32_t count = ++seen_[key];
+  if (count > kRepeatKeep) {
+    repeats_++;
+    return;
+  }
+  if (count == kRepeatKeep) {
+    Put(line, size);
+    static const char note[] =
+        "i> -------- Game Vault: the line above came 20 times; more copies are counted, not written --------\n";
+    Put(note, sizeof(note) - 1);
+    return;
+  }
+  if (written_ + size <= limit_) {
+    Put(line, size);
     return;
   }
   // Game Vault: the log goes with the player's problem reports, so it is kept small; what went wrong (warnings
-  // "w>", errors "!>") is usually at the end, so those lines are still written
+  // "w>", errors "!>", fatal "x>") is usually at the end, so those lines are still written, up to twice the size
   if (!cut_) {
     cut_ = true;
     static const char note[] =
         "i> -------- Game Vault: log size limit reached, only warnings and errors from here on --------\n";
-    fwrite(note, 1, sizeof(note) - 1, file_);
-    written_ += sizeof(note) - 1;
+    Put(note, sizeof(note) - 1);
   }
-  for (size_t at = 0; at < size && written_ < 2 * limit_;) {
-    const char* end = static_cast<const char*>(memchr(buf + at, '\n', size - at));
-    size_t len = end ? size_t(end - (buf + at)) + 1 : size - at;
-    if (buf[at] == '!' || buf[at] == 'w') {
-      fwrite(buf + at, 1, len, file_);
-      written_ += len;
-    }
-    at += len;
+  if ((line[0] == '!' || line[0] == 'w' || line[0] == 'x') && written_ + size <= 2 * limit_) {
+    Put(line, size);
   }
+}
+
+void FileLogSink::Heartbeat(uint64_t seconds) {
+  if (!file_ || !limit_) {
+    return;
+  }
+  // Game Vault: a log that stops tells nothing about why; these lines show whether Xenia was still running (and
+  // still logging) when the report was made, and how much the repeat filter held back
+  std::string note = fmt::format("i> -------- Game Vault: Xenia running {} min, {} lines in the last minute",
+                                 seconds / 60, lines_ - lines_at_beat_);
+  if (repeats_ != repeats_at_beat_) {
+    note += fmt::format(" ({} repeats not written)", repeats_ - repeats_at_beat_);
+  }
+  note += " --------\n";
+  lines_at_beat_ = lines_;
+  repeats_at_beat_ = repeats_;
+  Put(note.data(), note.size());
+  fflush(file_);
 }
 
 void FileLogSink::Flush() {
@@ -315,7 +395,18 @@ class Logger {
     dp::sequence_t last_sequence = -1;
 
     size_t desired_count = 1;
+    const auto started = std::chrono::steady_clock::now();
+    uint64_t next_beat = 60;
     while (true) {
+      uint64_t seconds = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                                      std::chrono::steady_clock::now() - started)
+                                      .count());
+      if (seconds >= next_beat) {
+        next_beat = seconds + 60;
+        for (const auto& sink : sinks_) {
+          sink->Heartbeat(seconds);
+        }
+      }
       // We want one block to find out how many blocks we need or we know how
       // many blocks needed for at least one log line.
       auto next_range = dp::sequence_range(next_sequence, desired_count);

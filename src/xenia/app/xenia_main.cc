@@ -33,6 +33,9 @@
 #include "xenia/ui/windowed_app_context.h"
 #include "xenia/vfs/devices/host_path_device.h"
 
+#if XE_PLATFORM_WINRT
+#include "xenia-canary-uwp/UWPUtil.h"
+#endif
 #if !XE_PLATFORM_WINRT
 #include "xenia/app/discord/discord_presence.h"
 #endif
@@ -522,6 +525,10 @@ bool EmulatorApp::OnInitialize() {
   }
   content_root = std::filesystem::absolute(content_root);
   XELOGI("Content root: {}", content_root);
+#if XE_PLATFORM_WINRT
+  // Game Vault: saves come back after a reinstall, and are copied out while Xenia runs
+  UWP::SavesAtStart(content_root);
+#endif
 
   std::filesystem::path cache_root = cvars::cache_root;
   if (cache_root.empty()) {
