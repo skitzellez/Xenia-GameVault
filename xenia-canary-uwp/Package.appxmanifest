@@ -3,10 +3,10 @@
   <Identity
     Name="GamerDad.XeniaForGameVault"
     Publisher="CN=GamerDad"
-    Version="1.1.7.126" />
+    Version="1.1.7.127" />
   <mp:PhoneIdentity PhoneProductId="b605b27a-eb39-440e-ac90-bbfb71bbbed4" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
   <Properties>
-    <DisplayName>Xenia for Game Vault</DisplayName>
+    <DisplayName>Game Vault · Xbox 360 (Xenia)</DisplayName>
     <PublisherDisplayName>Skitzelles</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -18,7 +18,7 @@
   </Resources>
   <Applications>
     <Application Id="App" Executable="$targetnametoken$.exe" EntryPoint="xenia_canary_uwp.App">
-      <uap:VisualElements DisplayName="Xenia for Game Vault" Description="Xenia Canary (Xbox 360), DanP's Xbox port, built for Game Vault by Skitzelles. Xbox is a trademark of Microsoft. Xenia is not affiliated with Microsoft."
+      <uap:VisualElements DisplayName="Game Vault · Xbox 360 (Xenia)" Description="Xenia Canary (Xbox 360), built for Game Vault by Skitzelles. Xbox is a trademark of Microsoft. Xenia is not affiliated with Microsoft."
         Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" BackgroundColor="transparent">
         <uap:SplashScreen Image="Assets\SplashScreen.png" />
         <uap:DefaultTile/>
