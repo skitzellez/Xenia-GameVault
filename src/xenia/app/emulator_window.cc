@@ -2949,6 +2949,11 @@ xe::X_STATUS EmulatorWindow::RunTitle(
 
     if (!path_to_file.empty() && !titleExists) {
       log_msg.append(fmt::format("\nProvided Path: {}", path_to_file));
+      // Game Vault: whether the network game / shared file was registered at all
+      log_msg.append(fmt::format(
+          "\nGame Vault: network game here: {}, shared or network file: {}",
+          xe::filesystem::GetNetFile(path_to_file) != nullptr,
+          xe::filesystem::IsGameVaultFile(path_to_file)));
     }
 
     if (ec) {
