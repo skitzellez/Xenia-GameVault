@@ -465,7 +465,7 @@ void EmulatorWindow::OnEmulatorInitialized() {
   screen_scraper_service();
   UWP::RegisterInputSystem(emulator_->input_system());
   dsu_ = std::make_unique<DsuIntegration>(*this);
-  UWP::SetCompanionTick([this]() { if (dsu_) dsu_->Tick(); });
+  UWP::SetCompanionTick([this]() { CompanionTick(); });
   UWP::SetHostGuideAction([this]() { ShowHostGuide(); });
   emulator_->on_terminate.AddListener([this]() {
     app_context_.CallInUIThread([this]() {
@@ -3225,6 +3225,21 @@ void EmulatorWindow::BeginTitleClose(
                                   [this]() { return emulator_->ResetTitle(); });
 }
 
+// Game Vault: the player opened Game Vault from the guide while a game ran here and picked another game. The link
+// only brings Xenia back to the front, so the new game would wait unseen behind the running one: the running game
+// is closed (as Quit Game does) and the new one started.
+void EmulatorWindow::CompanionTick() {
+  if (dsu_) {
+    dsu_->Tick();
+  }
+  if (emulator_->is_title_open() && !title_close_result_.valid() &&
+      UWP::HasGamePath()) {
+    XELOGI("Game Vault: another game was sent while a game runs; closing this one first");
+    game_switch_pending_ = true;
+    BeginTitleClose(std::nullopt);
+  }
+}
+
 void EmulatorWindow::WaitForTitleClose() {
   if (title_close_result_.valid()) title_close_result_.wait();
 }
@@ -3255,7 +3270,7 @@ void EmulatorWindow::CompleteTitleClose() {
   disable_hotkeys_ = false;
   UWP::RegisterInputSystem(emulator_->input_system());
   dsu_ = std::make_unique<DsuIntegration>(*this);
-  UWP::SetCompanionTick([this]() { if (dsu_) dsu_->Tick(); });
+  UWP::SetCompanionTick([this]() { CompanionTick(); });
   if (restart) {
     auto xam = emulator_->kernel_state()->GetKernelModule<kernel::xam::XamModule>(
         "xam.xex");
@@ -3263,6 +3278,14 @@ void EmulatorWindow::CompleteTitleClose() {
     xam->loader_data() = std::move(*restart);
     const auto launch_result = RunTitle(host_path);
     XELOGI("Restart Game completed in process: {:08X}", launch_result);
+    xe::FlushLog();
+    return;
+  }
+  if (std::exchange(game_switch_pending_, false) && UWP::HasGamePath()) {
+    const auto launch_result =
+        RunTitle(std::filesystem::u8path(UWP::ConsumeGamePath()));
+    XELOGI("Game Vault: switched to the game Game Vault sent: {:08X}",
+           launch_result);
     xe::FlushLog();
     return;
   }

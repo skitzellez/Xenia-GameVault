@@ -39,17 +39,22 @@ DEFINE_bool(logging, false, "Log Network Activity & Stats", "Live");
 DEFINE_bool(log_mask_ips, true, "Do not include P2P IPs inside the log",
             "Live");
 
-DEFINE_int32(network_mode, 2,
+// Game Vault: offline by default. With Xbox Live on and its server out of reach, a game's Live questions wait for
+// the network to time out, and loading screens took minutes (WWE 2K17, 2026-10-24); Game Vault offers no 360 online
+// play. Configs saved with the old default 2 are moved to 0 once.
+DEFINE_int32(network_mode, 0,
              "Network mode types: 0 - Offline, 1 - Systemlink, 2 - Xbox Live.",
              "Live");
+UPDATE_from_int32(network_mode, 2026, 10, 24, 12, 2);
 
 DEFINE_bool(bind_interface, false,
             "Useful for network Tunnels/VPNs e.g. XLink Kai.", "Live");
 
-DEFINE_bool(xstorage_backend, true,
+DEFINE_bool(xstorage_backend, false,
             "Request XStorage content from backend and fallback locally, "
             "otherwise only use local content.",
             "Live");
+UPDATE_from_bool(xstorage_backend, 2026, 10, 24, 13, true);
 
 DEFINE_bool(
     xstorage_user_data_backend, false,

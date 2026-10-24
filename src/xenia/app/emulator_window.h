@@ -332,6 +332,8 @@ class EmulatorWindow {
   void BeginTitleClose(
       std::optional<kernel::xam::LoaderData> restart = std::nullopt);
   void CompleteTitleClose();
+  // Every UI frame: the DSU link, and Game Vault's "another game while one runs" (see the .cc)
+  void CompanionTick();
   void ShowHostGuide();
   void HostGuideClosed(WinRTHostGuideDialog* dialog);
   void HostGuideOpenPage(WinRTHostGuideDialog* dialog, HostGuideAction action);
@@ -614,6 +616,8 @@ class EmulatorWindow {
   std::unique_ptr<ScreenScraperFrontend> screenscraper_;
   std::future<X_STATUS> title_close_result_;
   std::optional<kernel::xam::LoaderData> title_restart_data_;
+  // Game Vault: the running game is closing because Game Vault sent another one
+  bool game_switch_pending_ = false;
   std::unique_ptr<WinRTHostGuideDialog> host_guide_;
   std::shared_ptr<int> host_guide_lifetime_ = std::make_shared<int>(0);
 #endif
