@@ -44,6 +44,9 @@
 #include "xenia/ui/windowed_app_context.h"
 #include "xenia/vfs/devices/host_path_device.h"
 
+#if XE_PLATFORM_WINRT
+#include "xenia-canary-uwp/UWPUtil.h"
+#endif
 #if !XE_PLATFORM_WINRT
 #include "xenia/app/discord/discord_presence.h"
 #endif
@@ -84,6 +87,9 @@
 #include "xenia/hid/keyboard/keyboard_hid.h"
 #endif
 #include "xenia/hid/xinput/xinput_hid.h"
+#if XE_PLATFORM_WINRT
+#include "xenia/hid/xinput/gamevault_wheel_driver.h"
+#endif
 #endif  // XE_PLATFORM_WIN32
 
 #if XE_PLATFORM_WIN32
@@ -476,6 +482,10 @@ std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
     Factory<hid::InputDriver, ui::Window*, size_t> factory;
 #if XE_PLATFORM_WIN32 || XE_PLATFORM_WINRT
     factory.Add("xinput", xe::hid::xinput::Create);
+#if XE_PLATFORM_WINRT
+    // Game Vault: racing wheels as a pad, after the XInput pads (gamevault_wheel_driver.cc)
+    factory.Add("gvwheel", xe::hid::xinput::CreateGameVaultWheel);
+#endif  // XE_PLATFORM_WINRT
 #endif  // XE_PLATFORM_WIN32 || XE_PLATFORM_WINRT
 #if !XE_PLATFORM_ANDROID && !XE_PLATFORM_WINRT
     factory.Add("sdl", xe::hid::sdl::Create);
@@ -543,6 +553,10 @@ bool EmulatorApp::OnInitialize() {
   }
   content_root = std::filesystem::absolute(content_root);
   XELOGI("Content root: {}", content_root);
+#if XE_PLATFORM_WINRT
+  // Game Vault: saves come back after a reinstall, and are copied out while Xenia runs
+  UWP::SavesAtStart(content_root);
+#endif
 
   std::filesystem::path cache_root = cvars::cache_root;
   if (cache_root.empty()) {

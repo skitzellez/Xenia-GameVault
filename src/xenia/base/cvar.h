@@ -53,6 +53,8 @@ class IConfigVar : virtual public ICommandVar {
   virtual std::string config_value() const = 0;
   virtual void LoadConfigValue(const toml::node* result) = 0;
   virtual void LoadGameConfigValue(const toml::node* result) = 0;
+  // Drops the value of the last game's config (a new game is starting).
+  virtual void ResetGameConfigValue() = 0;
   virtual void ResetConfigValueToDefault() = 0;
 };
 
@@ -105,6 +107,7 @@ class ConfigVar : public CommandVar<T>, virtual public IConfigVar {
   std::unique_ptr<T> config_value_ = nullptr;
   std::unique_ptr<T> game_config_value_ = nullptr;
   void UpdateValue() override;
+  void ResetGameConfigValue() override;
   void ResetConfigValueToDefault() override;
 };
 
@@ -306,6 +309,12 @@ void ConfigVar<T>::OverrideConfigValue(T val) {
   // config load, however, may still change it.
   game_config_value_.reset();
   this->commandline_value_.reset();
+  UpdateValue();
+}
+template <class T>
+void ConfigVar<T>::ResetGameConfigValue() {
+  if (!game_config_value_) return;
+  game_config_value_.reset();
   UpdateValue();
 }
 template <class T>

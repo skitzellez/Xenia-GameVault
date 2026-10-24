@@ -9,6 +9,8 @@
 
 #include "xenia/ui/d3d12/d3d12_provider.h"
 
+#include <algorithm>
+
 #include <cstdlib>
 
 #include "xenia/base/cvar.h"
@@ -23,6 +25,10 @@ DEFINE_bool(d3d12_break_on_error, false,
             "Break on Direct3D 12 validation errors.", "D3D12");
 DEFINE_bool(d3d12_break_on_warning, false,
             "Break on Direct3D 12 validation warnings.", "D3D12");
+DEFINE_bool(d3d12_dred, false,
+            "Game Vault: record the GPU's last commands and page faults "
+            "(DRED) and log them when the graphics device is lost. Slower.",
+            "D3D12");
 DEFINE_int32(d3d12_adapter, -1,
              "Index of the DXGI adapter to use. "
              "-1 for any physical adapter, -2 for WARP software rendering.",
@@ -320,6 +326,22 @@ bool D3D12Provider::Initialize() {
     }
   }
 
+  // Game Vault: D3D12's device-removed recorder, before the device is made
+  // (GTA IV lost the device with DXGI_ERROR_DRIVER_INTERNAL_ERROR on the Xbox)
+  if (cvars::d3d12_dred) {
+    ID3D12DeviceRemovedExtendedDataSettings* dred_settings;
+    if (SUCCEEDED(
+            pfn_d3d12_get_debug_interface_(IID_PPV_ARGS(&dred_settings)))) {
+      dred_settings->SetAutoBreadcrumbsEnablement(
+          D3D12_DRED_ENABLEMENT_FORCED_ON);
+      dred_settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+      dred_settings->Release();
+      XELOGI("Game Vault: DRED on");
+    } else {
+      XELOGW("Game Vault: DRED not available here");
+    }
+  }
+
   // Create the Direct3D 12 device.
   ID3D12Device* device;
   if (FAILED(pfn_d3d12_create_device_(adapter, D3D_FEATURE_LEVEL_11_0,
@@ -587,6 +609,58 @@ void D3D12Provider::LogD3D12DebugMessages() const {
 
   info_queue->ClearStoredMessages();
   info_queue->Release();
+void D3D12Provider::LogDeviceRemovedData() const {
+  ID3D12DeviceRemovedExtendedData* dred;
+  if (!cvars::d3d12_dred || !device_ ||
+      FAILED(device_->QueryInterface(IID_PPV_ARGS(&dred)))) {
+    return;
+  }
+  // the command lists the GPU had not finished: their last operations (op
+  // numbers are D3D12_AUTO_BREADCRUMB_OP: 3 draw, 4 draw indexed, 6 dispatch,
+  // 7-11 copies / resolve, 12-14 clears, 15 barrier...)
+  D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT crumbs = {};
+  if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&crumbs))) {
+    uint32_t list = 0;
+    for (const D3D12_AUTO_BREADCRUMB_NODE* node =
+             crumbs.pHeadAutoBreadcrumbNode;
+         node && list < 256; node = node->pNext, ++list) {
+      uint32_t done =
+          node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+      if (done >= node->BreadcrumbCount) {
+        continue;
+      }
+      XELOGE("Game Vault: DRED: command list {} stopped at operation {} of {}",
+             list, done, node->BreadcrumbCount);
+      uint32_t from = done > 12 ? done - 12 : 0;
+      uint32_t to = std::min(node->BreadcrumbCount, done + 3);
+      for (uint32_t i = from; i < to; ++i) {
+        XELOGE("Game Vault: DRED: {} {} op {}", i == done ? "->" : "  ", i,
+               uint32_t(node->pCommandHistory[i]));
+      }
+    }
+  }
+  D3D12_DRED_PAGE_FAULT_OUTPUT fault = {};
+  if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&fault))) {
+    uint32_t existing = 0, freed = 0;
+    for (auto* a = fault.pHeadExistingAllocationNode; a && existing < 1000;
+         a = a->pNext) {
+      if (existing++ < 4) {
+        XELOGE("Game Vault: DRED: allocation at the fault: type {}",
+               uint32_t(a->AllocationType));
+      }
+    }
+    for (auto* a = fault.pHeadRecentFreedAllocationNode; a && freed < 1000;
+         a = a->pNext) {
+      if (freed++ < 4) {
+        XELOGE("Game Vault: DRED: recently freed allocation: type {}",
+               uint32_t(a->AllocationType));
+      }
+    }
+    XELOGE("Game Vault: DRED: page fault at {:016X} ({} allocations there, {} "
+           "recently freed)",
+           uint64_t(fault.PageFaultVA), existing, freed);
+  }
+  dred->Release();
 }
 
 }  // namespace d3d12

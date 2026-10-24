@@ -7,9 +7,11 @@
  ******************************************************************************
  */
 
+#include <fcntl.h>
 #include <io.h>
 #include <shlobj.h>
 
+#include <mutex>
 #include <string>
 
 #undef CreateFile
@@ -88,7 +90,105 @@ bool CreateEmptyFile(const std::filesystem::path& path) {
   return true;
 }
 
+// Game Vault: the one game file the launcher shared (see filesystem.h).
+static std::mutex shared_file_lock_;
+static std::filesystem::path shared_file_path_;
+static HANDLE shared_file_handle_ = INVALID_HANDLE_VALUE;
+
+static bool IsSharedFile(const std::filesystem::path& path) {
+  if (shared_file_handle_ == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+  std::wstring a = path.lexically_normal().wstring();
+  std::wstring b = shared_file_path_.wstring();
+  return a.size() == b.size() &&
+         CompareStringOrdinal(a.c_str(), int(a.size()), b.c_str(),
+                              int(b.size()), TRUE) == CSTR_EQUAL;
+}
+
+void SetSharedFile(const std::filesystem::path& path, void* handle) {
+  std::lock_guard<std::mutex> lock(shared_file_lock_);
+  if (shared_file_handle_ != INVALID_HANDLE_VALUE) {
+    CloseHandle(shared_file_handle_);
+  }
+  shared_file_path_ = path.lexically_normal();
+  shared_file_handle_ = handle ? HANDLE(handle) : INVALID_HANDLE_VALUE;
+}
+
+void* DuplicateSharedFile(const std::filesystem::path& path) {
+  std::lock_guard<std::mutex> lock(shared_file_lock_);
+  if (!IsSharedFile(path)) {
+    return nullptr;
+  }
+  HANDLE dup = nullptr;
+  if (!DuplicateHandle(GetCurrentProcess(), shared_file_handle_,
+                       GetCurrentProcess(), &dup, 0, FALSE,
+                       DUPLICATE_SAME_ACCESS)) {
+    return nullptr;
+  }
+  return dup;
+}
+
+// Game Vault: the one network game (see filesystem.h)
+static std::mutex net_file_lock_;
+static std::filesystem::path net_file_path_;
+static std::shared_ptr<NetFile> net_file_;
+
+void SetNetFile(const std::filesystem::path& path, std::shared_ptr<NetFile> file) {
+  std::lock_guard<std::mutex> lock(net_file_lock_);
+  net_file_path_ = path.lexically_normal();
+  net_file_ = std::move(file);
+}
+
+std::shared_ptr<NetFile> GetNetFile(const std::filesystem::path& path) {
+  std::lock_guard<std::mutex> lock(net_file_lock_);
+  if (!net_file_) {
+    return nullptr;
+  }
+  std::wstring a = path.lexically_normal().wstring();
+  std::wstring b = net_file_path_.wstring();
+  if (a.size() != b.size() ||
+      CompareStringOrdinal(a.c_str(), int(a.size()), b.c_str(), int(b.size()),
+                           TRUE) != CSTR_EQUAL) {
+    return nullptr;
+  }
+  return net_file_;
+}
+
+uint64_t FileSizeShared(const std::filesystem::path& path, std::error_code& error) {
+  if (auto net = GetNetFile(path)) {
+    error.clear();
+    return net->size();
+  }
+  {
+    std::lock_guard<std::mutex> lock(shared_file_lock_);
+    LARGE_INTEGER size;
+    if (IsSharedFile(path) && GetFileSizeEx(shared_file_handle_, &size)) {
+      error.clear();
+      return uint64_t(size.QuadPart);
+    }
+  }
+  return std::filesystem::file_size(path, error);
+}
+
 FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {
+  // Game Vault: the shared game file, read through a copy of its handle,
+  // rewound so it starts at the beginning like a newly opened file
+  if (mode.find_first_of("wa+") == std::string_view::npos) {
+    if (HANDLE dup = HANDLE(DuplicateSharedFile(path))) {
+      int fd = _open_osfhandle(intptr_t(dup), _O_RDONLY | _O_BINARY);
+      if (fd >= 0) {
+        FILE* file = _wfdopen(fd, L"rb");
+        if (file) {
+          _fseeki64(file, 0, SEEK_SET);
+          return file;
+        }
+        _close(fd);
+      } else {
+        CloseHandle(dup);
+      }
+    }
+  }
   // Dumb, but OK.
   const auto wmode = xe::to_utf16(mode);
   return _wfopen(path.c_str(), reinterpret_cast<const wchar_t*>(wmode.c_str()));
@@ -131,12 +231,19 @@ class Win32FileHandle : public FileHandle {
   bool Read(size_t file_offset, void* buffer, size_t buffer_length,
             size_t* out_bytes_read) override {
     *out_bytes_read = 0;
-    OVERLAPPED overlapped{};
+    // Game Vault: a handle the console's broker made (a shared game file) can
+    // be asynchronous; such a read is waited for here, with an event of this
+    // thread's own, before the OVERLAPPED on the stack goes away
+    thread_local HANDLE read_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    OVERLAPPED overlapped = {};
     overlapped.Pointer = (PVOID)file_offset;
-    overlapped.hEvent = NULL;
+    overlapped.hEvent = read_event;
     DWORD bytes_read = 0;
     BOOL read = ReadFile(handle_, buffer, (DWORD)buffer_length, &bytes_read,
                          &overlapped);
+    if (!read && GetLastError() == ERROR_IO_PENDING) {
+      read = GetOverlappedResult(handle_, &overlapped, &bytes_read, TRUE);
+    }
     if (read) {
       *out_bytes_read = bytes_read;
       return true;
@@ -183,6 +290,33 @@ class Win32FileHandle : public FileHandle {
   HANDLE handle_ = nullptr;
 };
 
+// Game Vault: the network game, read through its reader (see filesystem.h)
+class NetFileHandle : public FileHandle {
+ public:
+  NetFileHandle(const std::filesystem::path& path, std::shared_ptr<NetFile> file)
+      : FileHandle(path), file_(std::move(file)) {}
+  bool Read(size_t file_offset, void* buffer, size_t buffer_length,
+            size_t* out_bytes_read) override {
+    *out_bytes_read = 0;
+    if (file_offset > file_->size()) {
+      return false;
+    }
+    size_t length = size_t(std::min<uint64_t>(buffer_length,
+                                               file_->size() - file_offset));
+    if (!file_->Read(file_offset, buffer, length)) {
+      return false;
+    }
+    *out_bytes_read = length;
+    return length == buffer_length;
+  }
+  bool Write(size_t, const void*, size_t, size_t*) override { return false; }
+  bool SetLength(size_t) override { return false; }
+  void Flush() override {}
+
+ private:
+  std::shared_ptr<NetFile> file_;
+};
+
 std::unique_ptr<FileHandle> FileHandle::OpenExisting(
     const std::filesystem::path& path, uint32_t desired_access) {
   DWORD open_access = 0;
@@ -206,6 +340,15 @@ std::unique_ptr<FileHandle> FileHandle::OpenExisting(
   }
   if (desired_access & FileAccess::kFileAppendData) {
     open_access |= FILE_APPEND_DATA;
+  }
+  // Game Vault: the shared game file (reads only)
+  if (!(open_access & ~(GENERIC_READ | FILE_READ_DATA))) {
+    if (auto net = GetNetFile(path)) {
+      return std::make_unique<NetFileHandle>(path, std::move(net));
+    }
+    if (HANDLE dup = HANDLE(DuplicateSharedFile(path))) {
+      return std::make_unique<Win32FileHandle>(path, dup);
+    }
   }
   DWORD share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
   // We assume we've already created the file in the caller.

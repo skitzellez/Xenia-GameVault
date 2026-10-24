@@ -40,7 +40,7 @@ bool DiscImageDevice::Initialize() {
     return false;
   }
   std::error_code size_error;
-  image_size_ = std::filesystem::file_size(host_path_, size_error);
+  image_size_ = filesystem::FileSizeShared(host_path_, size_error);
   if (size_error) {
     XELOGE("Disc image size could not be read: {}", size_error.message());
     return false;

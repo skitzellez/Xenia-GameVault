@@ -55,6 +55,9 @@ struct UnityGameMetadata {
 };
 
 void SelectGameFromWinRT(xe::Emulator* emu);
+// Game Vault: no profile yet -> one called "Player" is made and signed in, so games can save without the player
+// meeting the "No Profiles Found" box first. True when there is a profile now.
+bool EnsureProfile(xe::Emulator* emu);
 bool HasGamePath();
 std::string ConsumeGamePath();
 void SelectFolder(std::function<void(std::string)> callback);
@@ -70,6 +73,12 @@ std::string GetLocalCache();
 std::string GetLocalState();
 // Installed package version as "major.minor.build.revision".
 std::string GetPackageVersion();
+// Game Vault: the "games" folder the publisher's apps share (Game Vault reads its "logs"); "" when missing
+std::string GetPublisherGames();
+// Game Vault: the profiles and their saves (content\<xuid>) are copied to the shared folder ("xbox 360 saves"),
+// which outlives an uninstall of Xenia and which Game Vault copies to the USB drive. A fresh install (no profile)
+// gets them back. Called once at start, before the profiles are read.
+void SavesAtStart(const std::filesystem::path& content_root);
 int GetCoreDPI();
 void SetAutomaticLaunch(std::string game_path);
 void SetDPI(int DPI);

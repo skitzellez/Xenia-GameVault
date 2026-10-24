@@ -166,6 +166,49 @@ void ReadGameConfig(const std::filesystem::path& file_path) {
   XELOGI("Loaded game config: {}", file_path);
 }
 
+// Game Vault: settings a game needs that are off by default, so the player does not have to find them. Applied
+// only when the player has no <title id>.config.toml of their own. Kept as game values: never written to the
+// player's main config file.
+struct BuiltInGameConfig {
+  const char* title_id;
+  const char* toml;
+};
+const BuiltInGameConfig kBuiltInGameConfigs[] = {
+    // WWE 2K17: freezes when a match starts (xenia-canary issue 235); custom wrestlers' pictures (drawn by the
+    // game, then read back) are garbled without resolve read-back (same engine: game-compatibility issue 32).
+    {"545408BA",
+     "[Memory]\nignore_offset_for_ranged_allocations = true\n"
+     "[GPU]\nreadback_resolve = \"fast\"\n"},
+    // Naruto: The Broken Bond (+ demo): black, stretched textures
+    // (xenia-canary game-compatibility issue 87, xenia-canary issue 906).
+    {"55530825",
+     "[GPU]\nclear_memory_page_state = true\n"
+     "gpu_allow_invalid_upload_range = true\n"},
+    {"5553882E",
+     "[GPU]\nclear_memory_page_state = true\n"
+     "gpu_allow_invalid_upload_range = true\n"},
+    // Blur: 3D far too bright without resolve read-back (its brightness adaptation reads the picture back; xenia-canary
+    // game-compatibility issue 549, label gpu-readback). A player's Blur also lost the graphics device (2026-10-19).
+    {"41560845", "[GPU]\nreadback_resolve = \"fast\"\n"},
+};
+
+void ApplyBuiltInGameConfig(const std::string_view title_id) {
+  for (const auto& game : kBuiltInGameConfigs) {
+    if (title_id == game.title_id) {
+      const auto config = toml::parse(game.toml);
+      for (auto& it : *cvar::ConfigVars) {
+        auto config_var = static_cast<cvar::IConfigVar*>(it.second);
+        const auto node = config.at_path(
+            toml::path(config_var->category() + "." + config_var->name()));
+        if (node) {
+          config_var->LoadGameConfigValue(node.node());
+        }
+      }
+      XELOGI("Loaded built-in game config: {}", title_id);
+    }
+  }
+}
+
 void SaveConfig() {
   if (config_path.empty()) {
     return;
@@ -306,11 +349,20 @@ void SetupConfig(const std::filesystem::path& config_folder) {
 }
 
 void LoadGameConfig(const std::string_view title_id) {
+  if (!cvar::ConfigVars) {
+    return;
+  }
+  // Nothing built in for the previous game carries over.
+  for (auto& it : *cvar::ConfigVars) {
+    static_cast<cvar::IConfigVar*>(it.second)->ResetGameConfigValue();
+  }
   const auto game_config_folder = config_folder / "config";
   const auto game_config_path =
       game_config_folder / (std::string(title_id) + game_config_suffix);
   if (std::filesystem::exists(game_config_path)) {
     ReadGameConfig(game_config_path);
+  } else {
+    ApplyBuiltInGameConfig(title_id);
   }
 }
 

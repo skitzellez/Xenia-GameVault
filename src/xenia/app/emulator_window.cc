@@ -3694,6 +3694,10 @@ void EmulatorWindow::WinRTFrontendDialog::DrawNoProfilePrompt(ImGuiIO& io) {
   }
 
   no_profile_prompt_dismissed_ = true;
+  // Game Vault: a profile is made for the player instead of asking first
+  if (UWP::EnsureProfile(emulator)) {
+    return;
+  }
   new NoProfileDialog(imgui_drawer(), &emulator_window_);
 }
 

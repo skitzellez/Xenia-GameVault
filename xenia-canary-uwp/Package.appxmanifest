@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities" IgnorableNamespaces="uap mp rescap">
   <Identity
-    Name="27d6ba69-e4f1-4b69-b391-8238bab5a431"
-    Publisher="CN=DanP142"
-    Version="0.6.0.2" />
-  <mp:PhoneIdentity PhoneProductId="27d6ba69-e4f1-4b69-b391-8238bab5a431" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
+    Name="GamerDad.XeniaForGameVault"
+    Publisher="CN=GamerDad"
+    Version="1.1.8.0" />
+  <mp:PhoneIdentity PhoneProductId="b605b27a-eb39-440e-ac90-bbfb71bbbed4" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
   <Properties>
-    <DisplayName>Xenia Netplay</DisplayName>
-    <PublisherDisplayName>DanP142</PublisherDisplayName>
+    <DisplayName>Game Vault · Xbox 360 (Xenia)</DisplayName>
+    <PublisherDisplayName>Skitzelles</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
   <Dependencies>
@@ -18,7 +18,7 @@
   </Resources>
   <Applications>
     <Application Id="App" Executable="$targetnametoken$.exe" EntryPoint="xenia_canary_uwp.App">
-      <uap:VisualElements DisplayName="Xenia Netplay" Description="The Xenia project on UWP! Xbox is a trademark of Microsoft. Xenia is not affiliated with Microsoft."
+      <uap:VisualElements DisplayName="Game Vault · Xbox 360 (Xenia)" Description="Xenia Canary (Xbox 360), built for Game Vault by Skitzelles. Xbox is a trademark of Microsoft. Xenia is not affiliated with Microsoft."
         Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" BackgroundColor="transparent">
         <uap:SplashScreen Image="Assets\SplashScreen.png" />
         <uap:DefaultTile/>
@@ -39,17 +39,24 @@
           </uap:FileTypeAssociation>
         </uap:Extension>
         <uap:Extension Category="windows.protocol">
-          <uap:Protocol Name="xeniacanary">
-            <uap:DisplayName>Xenia Netplay</uap:DisplayName>
+          <uap:Protocol Name="gamevault-xenia">
+            <uap:DisplayName>Xenia for Game Vault</uap:DisplayName>
           </uap:Protocol>
         </uap:Extension>
       </Extensions>
     </Application>
   </Applications>
+  <Extensions>
+    <!-- Game Vault's shared folder (same publisher): Xbox 360 games it unpacked from a .7z or .rar -->
+    <Extension Category="windows.publisherCacheFolders">
+      <PublisherCacheFolders>
+        <Folder Name="games" />
+      </PublisherCacheFolders>
+    </Extension>
+  </Extensions>
   <Capabilities>
     <Capability Name="internetClientServer" />
     <Capability Name="privateNetworkClientServer" />
-	  <rescap:Capability Name="runFullTrust"/>
 	  <rescap:Capability Name="broadFileSystemAccess" />
 	  <uap:Capability Name="removableStorage"/>
 	  <Capability Name="codeGeneration"/>

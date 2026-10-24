@@ -431,6 +431,8 @@ class D3D12CommandProcessor final : public CommandProcessor {
   // as when there are unfinished graphics pipeline creation requests that would
   // need to be fulfilled before actually submitting the command list.
   bool CanEndSubmissionImmediately() const;
+  // Game Vault: after d3d12_hang_locator seconds, sends this draw or copy and waits for it (names a lost device)
+  void HangLocatorStep(const char* what, uint64_t vs, uint64_t ps, uint32_t count, uint32_t primitive);
   bool AwaitAllQueueOperationsCompletion() {
     CheckSubmissionCompletion(GetCurrentSubmission());
     return GetCompletedSubmission() + 1u >= GetCurrentSubmission();
@@ -537,6 +539,10 @@ class D3D12CommandProcessor final : public CommandProcessor {
   void RecordZPDResolveBatch();
 
   bool device_removed_ = false;
+  // Game Vault hang locator (d3d12_hang_locator): when it started counting, whether it waits now, steps waited
+  uint64_t hang_locator_start_ = 0;
+  bool hang_locator_active_ = false;
+  uint64_t hang_locator_steps_ = 0;
 
   bool cache_clear_requested_ = false;
 

@@ -1171,6 +1171,13 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
   // internally before the failure according to Jesse Natalie from the DirectX
   // Discord server.
   paint_context_.present_completion_timeline->SignalAndAdvance(direct_queue);
+  if (present_result == DXGI_ERROR_DEVICE_REMOVED ||
+      present_result == DXGI_ERROR_DEVICE_RESET) {
+    // Game Vault: the reason and what DRED recorded (d3d12_dred)
+    XELOGE("Game Vault: graphics device lost on present, reason {:08X}",
+           uint32_t(provider_.GetDevice()->GetDeviceRemovedReason()));
+    provider_.LogDeviceRemovedData();
+  }
   switch (present_result) {
     case DXGI_ERROR_DEVICE_REMOVED:
       return PaintResult::kGpuLostExternally;

@@ -1,12 +1,15 @@
 #define NOMINMAX
 
 #include <windows.h>
+#include <unknwn.h>
 
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include <winrt/Windows.ApplicationModel.Activation.h>
+#include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -22,11 +25,13 @@
 
 #include <Gamingdeviceinformation.h>
 
+#include "NetGame.h"
 #include "UWPUtil.h"
 #include "WinRTKeyboard.h"
 #include "XeniaUWP.h"
 #include "app_launch_state.h"
 #include "protocol_activation.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/config.h"
 #include "xenia/ui/imgui_dialog.h"
@@ -42,8 +47,43 @@ using namespace winrt::Windows::UI::Composition;
 using namespace winrt::Windows::Storage;
 using namespace winrt::Windows::Storage::Pickers;
 
+// IStorageItemHandleAccess (WindowsStorageCOM.h, which does not build for apps here): a Win32 handle to a
+// StorageFile. Declared as the SDK has it.
+struct __declspec(uuid("5CA296B2-2C25-4D22-B785-B885C8201E6A")) GvStorageItemHandleAccess : ::IUnknown {
+  virtual HRESULT __stdcall Create(DWORD access, DWORD sharing, DWORD options, void* oplock, HANDLE* handle) = 0;
+};
+
 namespace {
 UWP::AppLaunchState launch_state;
+
+// Game Vault (Xenia for Game Vault): the launcher shares the game file through the console and sends the
+// token with the link. Opened here, Xenia reads the game through that handle (xe::filesystem shared file):
+// opening a USB drive's file by path can wait for good on a permission question the console never shows.
+// Runs on a thread of its own: blocking on WinRT calls is not allowed on this one.
+void ShareFromGameVault(const std::string& path, const winrt::hstring& token) {
+  HANDLE handle = nullptr;
+  std::thread([&] {
+    winrt::init_apartment();
+    try {
+      auto file = winrt::Windows::ApplicationModel::DataTransfer::SharedStorageAccessManager::
+          RedeemTokenForFileAsync(token).get();
+      GvStorageItemHandleAccess* access = nullptr;
+      if (SUCCEEDED(static_cast<::IUnknown*>(winrt::get_abi(file))
+                        ->QueryInterface(__uuidof(GvStorageItemHandleAccess), (void**)&access))) {
+        HANDLE h = nullptr;
+        if (SUCCEEDED(access->Create(0x120089 /* read */, 0x1 | 0x2 /* share read, write */, 0, nullptr, &h))) {
+          handle = h;
+        }
+        access->Release();
+      }
+    } catch (...) {
+    }
+    winrt::uninit_apartment();
+  }).join();
+  if (handle) {
+    xe::filesystem::SetSharedFile(std::filesystem::path(winrt::to_hstring(path).c_str()), handle);
+  }
+}
 std::string restart_activation_arguments;
 constexpr auto kRestartContext = L"TitleRestartContext";
 
@@ -243,13 +283,43 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
       auto query = protocol_args.Uri().QueryParsed();
       std::vector<std::pair<std::string, std::string>> arguments;
       arguments.reserve(query.Size());
+      winrt::hstring disctoken, netcred;
       for (const auto& argument : query) {
         arguments.emplace_back(winrt::to_string(argument.Name()),
                                winrt::to_string(argument.Value()));
+        if (argument.Name() == L"disctoken") {
+          // Game Vault: the game file, shared through the console
+          disctoken = argument.Value();
+        } else if (argument.Name() == L"netcred") {
+          // Game Vault: the sign-in for a game played from the network
+          netcred = argument.Value();
+        }
       }
       auto activation = UWP::ParseProtocolActivation(arguments);
+      std::string game_path = activation.game_path.value_or(std::string{});
+      // Game Vault: on App type "App" (Dev Home) Xenia gets only 1 GB, and a game stops at once ("Couldn't
+      // allocate context", "Failed to create the EDRAM buffer"; an update can set it back to App). Back to Game
+      // Vault, which says on the TV what to change, instead of a crash.
+      // "apptype-test.txt" in LocalState: acts as App type "App" on a console set to Game (a test)
+      std::wstring test_file =
+          std::wstring(ApplicationData::Current().LocalFolder().Path()) + L"\\apptype-test.txt";
+      bool low_test = GetFileAttributesW(test_file.c_str()) != INVALID_FILE_ATTRIBUTES;
+      if (!game_path.empty() && activation.launch_on_exit.rfind("gamevault:", 0) == 0 &&
+          (low_test || winrt::Windows::System::MemoryManager::AppMemoryUsageLimit() < (2048ull << 20))) {
+        winrt::Windows::System::Launcher::LaunchUriAsync(
+            winrt::Windows::Foundation::Uri(L"gamevault:?from=lowmem-xenia"))
+            .Completed([](auto const&, auto) { CoreApplication::Exit(); });
+        return;
+      }
+      if (!game_path.empty() && !disctoken.empty()) {
+        ShareFromGameVault(game_path, disctoken);
+      }
+      if (game_path.rfind("smb://", 0) == 0) {
+        // Game Vault: a game on a PC's shared folder or a NAS, read over the network (NetGame.cpp)
+        game_path = NetGame::Open(game_path, winrt::to_string(netcred));
+      }
       launch_state.ActivateProtocol(std::move(activation.launch_on_exit));
-      UWP::SetAutomaticLaunch(activation.game_path.value_or(std::string{}));
+      UWP::SetAutomaticLaunch(game_path);
     } else if (args.Kind() == winrt::Windows::ApplicationModel::Activation::
                                   ActivationKind::Launch) {
       restart_activation_arguments =
@@ -277,6 +347,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
   }
 
   void SetWindow(CoreWindow const& window) {
+    // Game Vault: the whole screen, not the Xbox's TV-safe area (by default an app is drawn with a border
+    // round it, which left the picture smaller than the screen; xemu and Game Vault ask the same)
+    winrt::Windows::UI::ViewManagement::ApplicationView::GetForCurrentView().SetDesiredBoundsMode(
+        winrt::Windows::UI::ViewManagement::ApplicationViewBoundsMode::UseCoreWindow);
     window.CharacterReceived({this, &App::OnCharacterReceived});
     // Key events feed the caret keys of the ImGui text input.
     window.KeyDown([](CoreWindow const&,

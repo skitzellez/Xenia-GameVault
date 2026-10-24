@@ -9,6 +9,7 @@ add_executable(xenia-uwp WIN32
   windowed_app_context_uwp.cc
   file_picker_uwp.cc
   menu_item_uwp.cc
+  NetGame.cpp
   Package.appxmanifest
   ${PROJECT_SOURCE_DIR}/src/xenia/app/xenia_main.cc
 )
@@ -66,6 +67,16 @@ foreach(asset IN LISTS _uwp_assets)
 endforeach()
 target_sources(xenia-uwp PRIVATE ${_uwp_assets})
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${_uwp_assets})
+
+# Game Vault: libsmb2 (LGPL-2.1, loaded at run time by NetGame.cpp for games on a PC's shared folder or a NAS)
+# and its licence go in the package root.
+foreach(_gv_file smb2.dll libsmb2-LICENCE-LGPL-2.1.txt)
+  set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/${_gv_file}" PROPERTIES
+    VS_DEPLOYMENT_CONTENT 1
+    VS_DEPLOYMENT_LOCATION "."
+  )
+  target_sources(xenia-uwp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/${_gv_file}")
+endforeach()
 
 # Ship the license for the TLS dependency used by the UWP package.
 set(_uwp_tls_license "${PROJECT_SOURCE_DIR}/third_party/wolfssl/COPYING")

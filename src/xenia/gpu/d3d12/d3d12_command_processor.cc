@@ -8,6 +8,7 @@
  */
 
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
+#include <cstdlib>
 #include <cstring>
 #include "xenia/apu/audio_system.h"
 #include "xenia/base/assert.h"
@@ -33,6 +34,20 @@ DEFINE_bool(d3d12_bindless, true,
             "Use bindless resources where available - may improve performance, "
             "but may make debugging more complicated.",
             "D3D12");
+
+// Game Vault: finds the draw that hangs or crashes the GPU (GTA IV lost the device on the console's AMD GPU at the
+// end of its opening cutscene, 2026-10-24). Off by default; very slow while active.
+DEFINE_int32(d3d12_hang_locator, 0,
+             "Game Vault debugging: after this many seconds, every draw and copy is sent to the GPU and waited for on "
+             "its own, and the one the GPU did not finish (or that took over 500 ms) is named in the log. 0 = off.",
+             "D3D12");
+
+// Game Vault: skips every draw that uses this vertex shader (hex ucode hash from the hang locator), to see whether the
+// game goes on without it (GTA IV: VS D4DD2464AB7D672C hung the console's GPU, 2026-10-24). Empty = off.
+DEFINE_string(d3d12_skip_vertex_shader, "",
+              "Game Vault debugging: hex hash of a vertex shader whose draws are skipped (from the hang locator). "
+              "Empty = off.",
+              "D3D12");
 
 DEFINE_bool(d3d12_submit_on_primary_buffer_end, true,
             "Submit the command list when a PM4 primary buffer ends if it's "
@@ -2609,7 +2624,9 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
   if (edram_mode == xenos::EdramMode::kCopy) {
     // Special copy handling.
-    return IssueCopy();
+    bool copied = IssueCopy();
+    HangLocatorStep("copy", 0, 0, 0, 0);
+    return copied;
   }
 
   if (regs.Get<reg::RB_SURFACE_INFO>().surface_pitch == 0) {
@@ -2624,6 +2641,17 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   if (!vertex_shader) {
     // Always need a vertex shader.
     return false;
+  }
+  if (!cvars::d3d12_skip_vertex_shader.empty()) {
+    static const uint64_t skip_hash = std::strtoull(cvars::d3d12_skip_vertex_shader.c_str(), nullptr, 16);
+    if (vertex_shader->ucode_data_hash() == skip_hash) {
+      static bool skip_logged = false;
+      if (!skip_logged) {
+        skip_logged = true;
+        XELOGI("Game Vault: skipping draws with vertex shader {:016X} (d3d12_skip_vertex_shader)", skip_hash);
+      }
+      return true;
+    }
   }
   pipeline_cache_->AnalyzeShaderUcode(*vertex_shader);
 
@@ -3144,7 +3172,37 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     }
   }
 
+  HangLocatorStep("draw", vertex_shader->ucode_data_hash(), pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+                  index_count, uint32_t(primitive_type));
   return true;
+}
+
+void D3D12CommandProcessor::HangLocatorStep(const char* what, uint64_t vs, uint64_t ps, uint32_t count,
+                                            uint32_t primitive) {
+  if (cvars::d3d12_hang_locator <= 0 || device_removed_) {
+    return;
+  }
+  uint64_t now = GetTickCount64();
+  if (!hang_locator_start_) {
+    hang_locator_start_ = now;
+  }
+  if (now - hang_locator_start_ < uint64_t(cvars::d3d12_hang_locator) * 1000) {
+    return;
+  }
+  if (!hang_locator_active_) {
+    hang_locator_active_ = true;
+    XELOGI("Game Vault hang locator: on (every draw waited for)");
+  }
+  ++hang_locator_steps_;
+  AwaitAllQueueOperationsCompletion();
+  uint64_t took = GetTickCount64() - now;
+  HRESULT removed = GetD3D12Provider().GetDevice()->GetDeviceRemovedReason();
+  if (FAILED(removed) || took > 500) {
+    XELOGE("Game Vault hang locator: {} #{} {} after {} ms (device {:08X}): VS {:016X} PS {:016X}, {} indices, "
+           "primitive {}",
+           what, hang_locator_steps_, FAILED(removed) ? "LOST THE DEVICE" : "was slow", took, uint32_t(removed), vs,
+           ps, count, primitive);
+  }
 }
 
 void D3D12CommandProcessor::InitializeTrace() {
@@ -3582,6 +3640,9 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
   HRESULT device_removed_reason = device->GetDeviceRemovedReason();
   if (FAILED(device_removed_reason)) {
     device_removed_ = true;
+    XELOGE("Game Vault: graphics device lost, reason {:08X}",
+           uint32_t(device_removed_reason));
+    GetD3D12Provider().LogDeviceRemovedData();
     graphics_system_->OnHostGpuLossFromAnyThread(device_removed_reason !=
                                                  DXGI_ERROR_DEVICE_REMOVED);
     return false;
