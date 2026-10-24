@@ -279,6 +279,8 @@ std::string GetPackageVersion() {
       winrt::Windows::ApplicationModel::Package::Current().Id().Version();
   return fmt::format("{}.{}.{}.{}", version.Major, version.Minor,
                      version.Build, version.Revision);
+}
+
 std::string GetPublisherGames() {
   try {
     return winrt::to_string(winrt::Windows::Storage::ApplicationData::Current()

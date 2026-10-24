@@ -609,6 +609,8 @@ void D3D12Provider::LogD3D12DebugMessages() const {
 
   info_queue->ClearStoredMessages();
   info_queue->Release();
+}
+
 void D3D12Provider::LogDeviceRemovedData() const {
   ID3D12DeviceRemovedExtendedData* dred;
   if (!cvars::d3d12_dred || !device_ ||
