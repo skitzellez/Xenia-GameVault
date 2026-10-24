@@ -2937,7 +2937,10 @@ xe::X_STATUS EmulatorWindow::RunTitle(
   if (title_close_result_.valid()) return X_STATUS_UNSUCCESSFUL;
 #endif
   std::error_code ec = {};
-  bool titleExists = std::filesystem::exists(path_to_file, ec);
+  // Game Vault: the game it shared or a network game is there without a look at the drive (a network game's
+  // stand-in path is on no drive at all)
+  bool titleExists = xe::filesystem::IsGameVaultFile(path_to_file) ||
+                     std::filesystem::exists(path_to_file, ec);
 
   if (path_to_file.empty() || !titleExists) {
     std::string log_msg =

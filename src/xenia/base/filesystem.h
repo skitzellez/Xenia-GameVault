@@ -65,6 +65,8 @@ FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode);
 void SetSharedFile(const std::filesystem::path& path, void* handle);
 // A new read-only handle to that file when path names it, else nullptr. The caller closes it.
 void* DuplicateSharedFile(const std::filesystem::path& path);
+// True when path names the shared game file or a network game (it then needs no check on the drive).
+bool IsGameVaultFile(const std::filesystem::path& path);
 // The size of the shared file when path names it; otherwise std::filesystem::file_size(path).
 uint64_t FileSizeShared(const std::filesystem::path& path, std::error_code& error);
 

@@ -115,6 +115,14 @@ void SetSharedFile(const std::filesystem::path& path, void* handle) {
   shared_file_handle_ = handle ? HANDLE(handle) : INVALID_HANDLE_VALUE;
 }
 
+bool IsGameVaultFile(const std::filesystem::path& path) {
+  if (GetNetFile(path)) {
+    return true;
+  }
+  std::lock_guard<std::mutex> lock(shared_file_lock_);
+  return IsSharedFile(path);
+}
+
 void* DuplicateSharedFile(const std::filesystem::path& path) {
   std::lock_guard<std::mutex> lock(shared_file_lock_);
   if (!IsSharedFile(path)) {
