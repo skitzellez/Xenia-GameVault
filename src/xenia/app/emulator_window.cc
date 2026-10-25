@@ -2935,6 +2935,9 @@ xe::X_STATUS EmulatorWindow::RunTitle(
     const std::filesystem::path& path_to_file) {
 #if XE_PLATFORM_WINRT
   if (title_close_result_.valid()) return X_STATUS_UNSUCCESSFUL;
+  // Game Vault's "Show frame rate": the counter in the corner (fps=1 in the link that sent this game)
+  app_context_.CallInUIThread(
+      [this]() { imgui_drawer_->SetFpsOverlay(UWP::GetShowFps()); });
 #endif
   std::error_code ec = {};
   // Game Vault: the game it shared or a network game is there without a look at the drive (a network game's

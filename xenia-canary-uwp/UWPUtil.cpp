@@ -453,6 +453,9 @@ bool IsUIOpen() {
   return UIInputCaptureState::IsOpen(m_ui_input_capture.snapshot());
 }
 void SetUIOpen(bool is_open) { m_ui_input_capture.SetOpen(is_open); }
+static std::atomic<bool> s_show_fps = false;
+void SetShowFps(bool on) { s_show_fps = on; }
+bool GetShowFps() { return s_show_fps; }
 uint64_t GetUIInputCaptureState() { return m_ui_input_capture.snapshot(); }
 
 winrt::fire_and_forget LaunchUriAsync(std::string url) {

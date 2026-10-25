@@ -84,6 +84,9 @@ void SetAutomaticLaunch(std::string game_path);
 void SetDPI(int DPI);
 bool IsUIOpen();
 void SetUIOpen(bool is_open);
+// Game Vault's "Show frame rate" option (fps=1 in its link): the FPS counter in the corner
+void SetShowFps(bool on);
+bool GetShowFps();
 uint64_t GetUIInputCaptureState();
 void LaunchUri(const std::string& url);
 void DownloadAndExtractZip(const std::string& url,

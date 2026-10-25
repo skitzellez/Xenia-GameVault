@@ -71,6 +71,8 @@ DEFINE_int32(
 namespace xe {
 namespace ui {
 
+std::atomic<uint64_t> guest_frames_presented{0};
+
 void Presenter::FatalErrorHostGpuLossCallback(
     [[maybe_unused]] bool is_responsible,
     [[maybe_unused]] bool statically_from_ui_thread) {
@@ -353,6 +355,7 @@ bool Presenter::RefreshGuestOutput(
     uint32_t frontbuffer_width, uint32_t frontbuffer_height,
     uint32_t display_aspect_ratio_x, uint32_t display_aspect_ratio_y,
     std::function<bool(GuestOutputRefreshContext& context)> refresher) {
+  guest_frames_presented.fetch_add(1, std::memory_order_relaxed);
   GuestOutputProperties& writable_properties =
       guest_output_properties_[guest_output_mailbox_writable_];
   writable_properties.frontbuffer_width = frontbuffer_width;

@@ -943,14 +943,14 @@ void ImGuiDrawer::SetPresenter(Presenter* new_presenter) {
     if (presenter_ == new_presenter) {
       return;
     }
-    if (!dialogs_.empty() || !notifications_.empty()) {
+    if (!dialogs_.empty() || !notifications_.empty() || fps_overlay_) {
       presenter_->RemoveUIDrawerFromUIThread(this);
     }
     ImGuiIO& io = GetIO();
   }
   presenter_ = new_presenter;
   if (presenter_) {
-    if (!dialogs_.empty() || !notifications_.empty()) {
+    if (!dialogs_.empty() || !notifications_.empty() || fps_overlay_) {
       presenter_->AddUIDrawerFromUIThread(this, z_order_);
     }
   }
@@ -1009,7 +1009,7 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
 #if XE_PLATFORM_WINRT
   UWP::SetUIOpen(!dialogs_.empty());
 #endif
-  if (dialogs_.empty() && notifications_.empty()) {
+  if (dialogs_.empty() && notifications_.empty() && !fps_overlay_) {
     return;
   }
 
@@ -1084,6 +1084,10 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
     }
   }
 
+  if (fps_overlay_) {
+    DrawFpsOverlay();
+  }
+
   ImGui::Render();
   ImDrawData* draw_data = ImGui::GetDrawData();
   if (draw_data) {
@@ -1103,6 +1107,52 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
   if (!dialogs_.empty() || !notifications_.empty()) {
     presenter_->RequestUIPaintFromUIThread();
   }
+}
+
+void ImGuiDrawer::SetFpsOverlay(bool on) {
+  if (fps_overlay_ == on) {
+    return;
+  }
+  bool attached = !dialogs_.empty() || !notifications_.empty() || fps_overlay_;
+  fps_overlay_ = on;
+  fps_ticks_ = 0;
+  fps_text_[0] = 0;
+  if (on && !attached && presenter_) {
+    presenter_->AddUIDrawerFromUIThread(this, z_order_);
+  }
+  if (!on) {
+    DetachIfLastWindowRemoved();
+  }
+}
+
+// The game's frames per second (frames it sent to the screen, as in xemu's counter), measured over half a
+// second, small in the top left corner over the game. Drawn on the foreground list: no window, so the
+// controller stays with the game.
+void ImGuiDrawer::DrawFpsOverlay() {
+  uint64_t now = Clock::QueryHostTickCount();
+  uint64_t frames = guest_frames_presented.load(std::memory_order_relaxed);
+  if (!fps_ticks_) {
+    fps_ticks_ = now, fps_frames_ = frames;
+  } else if (double(now - fps_ticks_) >= 0.5 * frame_time_tick_frequency_) {
+    double fps = double(frames - fps_frames_) * frame_time_tick_frequency_ /
+                 double(now - fps_ticks_);
+    snprintf(fps_text_, sizeof(fps_text_), "%.0f FPS", fps);
+    fps_ticks_ = now, fps_frames_ = frames;
+  }
+  if (!fps_text_[0]) {
+    return;
+  }
+  ImDrawList* list = ImGui::GetForegroundDrawList();
+  ImFont* font = ImGui::GetFont();
+  float size = ImGui::GetFontSize();   // about 30 pixels high on a 1080p TV
+  ImVec2 text = font->CalcTextSizeA(size, FLT_MAX, 0.0f, fps_text_);
+  ImVec2 at(ImGui::GetIO().DisplaySize.x * 0.02f,
+            ImGui::GetIO().DisplaySize.y * 0.03f);
+  float pad = size * 0.3f;
+  list->AddRectFilled(ImVec2(at.x - pad, at.y - pad * 0.5f),
+                      ImVec2(at.x + text.x + pad, at.y + text.y + pad * 0.5f),
+                      IM_COL32(0, 0, 0, 150), pad);
+  list->AddText(font, size, at, IM_COL32(255, 255, 255, 235), fps_text_);
 }
 
 void ImGuiDrawer::SetIgnoreInput(bool ignore) {
@@ -1544,7 +1594,8 @@ void ImGuiDrawer::DetachIfLastWindowRemoved() {
   // only dialog, then adding a dialog, from within a dialog's Draw function,
   // re-registering the ImGuiDrawer may result in ImGui being drawn multiple
   // times in the current frame.
-  if (!dialogs_.empty() || !notifications_.empty() || IsDrawingDialogs()) {
+  if (!dialogs_.empty() || !notifications_.empty() || fps_overlay_ ||
+      IsDrawingDialogs()) {
     return;
   }
   if (presenter_) {

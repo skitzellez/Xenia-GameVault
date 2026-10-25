@@ -284,6 +284,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
       std::vector<std::pair<std::string, std::string>> arguments;
       arguments.reserve(query.Size());
       winrt::hstring disctoken, netcred;
+      bool show_fps = false;
       for (const auto& argument : query) {
         arguments.emplace_back(winrt::to_string(argument.Name()),
                                winrt::to_string(argument.Value()));
@@ -293,8 +294,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } else if (argument.Name() == L"netcred") {
           // Game Vault: the sign-in for a game played from the network
           netcred = argument.Value();
+        } else if (argument.Name() == L"fps") {
+          // Game Vault: its "Show frame rate" option is on
+          show_fps = argument.Value() == L"1";
         }
       }
+      UWP::SetShowFps(show_fps);
       auto activation = UWP::ParseProtocolActivation(arguments);
       std::string game_path = activation.game_path.value_or(std::string{});
       // Game Vault: on App type "App" (Dev Home) Xenia gets only 1 GB, and a game stops at once ("Couldn't

@@ -76,6 +76,8 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
 
   void ClearDialogs();
   void EnableNotifications(bool enable) { are_notifications_enabled_ = enable; }
+  // Game Vault's "Show frame rate": the game's frames per second in the top left corner. UI thread.
+  void SetFpsOverlay(bool on);
 
   std::unique_ptr<ImmediateTexture> LoadImGuiIcon(
       std::span<const uint8_t> data);
@@ -188,6 +190,11 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
 
   bool ignore_input_ = false;
   bool are_notifications_enabled_ = true;
+
+  void DrawFpsOverlay();
+  bool fps_overlay_ = false;
+  uint64_t fps_ticks_ = 0, fps_frames_ = 0;
+  char fps_text_[16] = {};
 };
 
 }  // namespace ui

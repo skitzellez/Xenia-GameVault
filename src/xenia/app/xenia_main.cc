@@ -13,6 +13,8 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <fstream>
+#include <map>
 
 #include "third_party/fmt/include/fmt/format.h"
 
@@ -655,6 +657,99 @@ void EmulatorApp::OnDestroy() {
   std::quick_exit(EXIT_SUCCESS);
 }
 
+#if XE_PLATFORM_WINRT
+// Game Vault: Xbox 360 title updates and DLC from the player's USB drive. Game Vault finds the packages (in "Game
+// Vault\xbox 360 add-ons" on the drive), copies the new ones into the shared folder and lists them in "xbox 360
+// add-ons.txt" there; each start installs the ones not installed yet, the way Xenia's own "Install content" does, and writes what happened
+// to "xbox 360 add-ons done.txt" there ("<size>\t<installed|failed ...>\t<path>" per package) for Game Vault to show.
+// A package that failed is tried again only when its size changes (a new copy), so a broken file costs one try.
+static void InstallGameVaultAddOns(Emulator* emulator) {
+  // what happened, also in Xenia's own LocalState (Device Portal can read that one; the shared folder's log it cannot)
+  std::ofstream trace(std::filesystem::path(xe::to_path(UWP::GetLocalState())) / "gv_addons.txt", std::ios::trunc);
+  const std::string games = UWP::GetPublisherGames();
+  trace << "shared folder: " << games << "\n";
+  if (games.empty()) return;
+  const auto shared = std::filesystem::path(xe::to_path(games));
+  const auto list = shared / "xbox 360 add-ons.txt", done = shared / "xbox 360 add-ons done.txt";
+  std::ifstream in(list);
+  trace << "list " << (in ? "read" : "not there") << "\n";
+  if (!in) return;
+  std::map<std::string, std::pair<uint64_t, std::string>> before;   // path -> size, result
+  if (std::ifstream d(done); d) {
+    std::string line;
+    while (std::getline(d, line)) {
+      const size_t a = line.find('\t'), b = a == std::string::npos ? a : line.find('\t', a + 1);
+      if (b == std::string::npos) continue;
+      before[line.substr(b + 1)] = {std::strtoull(line.substr(0, a).c_str(), nullptr, 10), line.substr(a + 1, b - a - 1)};
+    }
+  }
+  std::map<std::string, std::pair<uint64_t, std::string>> after;
+  // the results so far plus `extra`, written at once: a package that brings Xenia down is on file as failed before
+  // it is tried, so the next start skips it instead of going down again
+  auto write_done = [&](const std::string* extra, uint64_t extra_size) {
+    std::map<std::string, std::pair<uint64_t, std::string>> all = after;
+    for (auto& [path, v] : before) all.emplace(path, v);   // packages on a drive not plugged in now keep theirs
+    if (extra) all[*extra] = {extra_size, "failed (Xenia stopped while installing it)"};
+    std::ofstream out(done, std::ios::trunc);
+    for (auto& [path, v] : all) out << v.first << '\t' << v.second << '\t' << path << '\n';
+  };
+  std::string line;
+  int installed = 0, failed = 0;
+  while (std::getline(in, line)) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+    if (line.empty()) continue;
+    // "<copy in the shared folder>\t<the file on the USB drive>\t<size>": Xenia cannot open the drive's file by its
+    // path, so Game Vault copies it here first; results are kept under the drive's path
+    const size_t t1 = line.find('\t'), t2 = t1 == std::string::npos ? t1 : line.find('\t', t1 + 1);
+    if (t2 == std::string::npos) continue;
+    const std::string copy = line.substr(0, t1), original = line.substr(t1 + 1, t2 - t1 - 1);
+    const uint64_t size = std::strtoull(line.substr(t2 + 1).c_str(), nullptr, 10);
+    const auto path = std::filesystem::path(xe::to_path(copy));
+    std::error_code ec;
+    auto was = before.find(original);
+    trace << "line [" << line << "]\n";
+    if (was != before.end() && was->second.first == size) {
+      trace << "  done before: " << was->second.second << "\n";
+      after[original] = was->second;   // installed before, or failed with this very file
+      std::filesystem::remove(path, ec);
+      continue;
+    }
+    trace << "package " << original << " (copy " << copy << ", " << size << " bytes)\n";
+    if (!std::filesystem::exists(path, ec)) {   // Game Vault has not copied it yet
+      trace << "  copy not there\n";
+      continue;
+    }
+    std::string result;
+    write_done(&original, size);
+    XELOGI("Game Vault: installing add-on {}", original);
+    try {
+      Emulator::ContentInstallEntry entry(path);
+      const X_STATUS status = emulator->InstallContentPackage(path, entry);
+      if (status == X_STATUS_SUCCESS) {
+        result = "installed";
+        installed++;
+      } else {
+        result = fmt::format("failed {:08X}{}{}", status, entry.installation_error_message_.empty() ? "" : " ",
+                             entry.installation_error_message_);
+        failed++;
+      }
+    } catch (const std::exception& e) {
+      result = std::string("failed ") + e.what();
+      failed++;
+    } catch (...) {
+      result = "failed";
+      failed++;
+    }
+    XELOGI("Game Vault: add-on {}: {}", original, result);
+    trace << "  " << result << "\n";
+    after[original] = {size, result};
+    std::filesystem::remove(path, ec);   // the copy has done its job (the installed content is in Xenia now)
+  }
+  write_done(nullptr, 0);
+  if (installed || failed) XELOGI("Game Vault: add-ons: {} installed, {} failed", installed, failed);
+}
+#endif
+
 void EmulatorApp::EmulatorThread() {
   assert_not_null(emulator_thread_event_);
 
@@ -674,6 +769,10 @@ void EmulatorApp::EmulatorThread() {
 
   app_context().CallInUIThread(
       [this]() { emulator_window_->SetupGraphicsSystemPresenterPainting(); });
+
+#if XE_PLATFORM_WINRT
+  InstallGameVaultAddOns(emulator_.get());   // title updates and DLC Game Vault found on the USB drive
+#endif
 
   // Set a debug handler.
   // This will respond to debugging requests so we can open the debug UI.

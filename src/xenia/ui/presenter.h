@@ -161,6 +161,9 @@ struct RawImage {
 // requesting painting) to try to recover - but the guest output refresh thread
 // must not try to reconnect by itself, as methods of the Surface are available
 // only to the UI thread.
+// Game Vault: frames the game has sent to the screen so far (the frame rate counter, ImGuiDrawer)
+extern std::atomic<uint64_t> guest_frames_presented;
+
 class Presenter {
  public:
   // May be actually called on the UI thread even if statically_from_ui_thread
