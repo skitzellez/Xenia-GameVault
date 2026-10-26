@@ -345,6 +345,9 @@ class SmbFolder : public xe::filesystem::NetFolder, public std::enable_shared_fr
     if (!ctx_ || api_->stat(ctx_, path.c_str(), &st) < 0) {
       // (a name that is not there fails too: once more on a fresh connection only when the connection is gone)
       if (ctx_ || !ConnectLocked() || api_->stat(ctx_, path.c_str(), &st) < 0) {
+        if (stat_misses_++ < 50) {   // (a game looking for files that are not there: the first ones, for reports)
+          XELOGI("network: {} is not in the game's folder ({})", path, ctx_ ? api_->get_error(ctx_) : "no connection");
+        }
         return false;
       }
     }
@@ -368,6 +371,7 @@ class SmbFolder : public xe::filesystem::NetFolder, public std::enable_shared_fr
       out.push_back({e->name, e->st.smb2_type == kTypeDirectory, e->st.smb2_size});
     }
     api_->closedir(ctx_, dir);
+    XELOGI("network: {} listed, {} entries", path, out.size());
     return true;
   }
 
@@ -463,6 +467,7 @@ class SmbFolder : public xe::filesystem::NetFolder, public std::enable_shared_fr
   smb2_context* ctx_ = nullptr;
   uint32_t max_read_ = 64 * 1024;
   uint64_t generation_ = 0;
+  int stat_misses_ = 0;
   std::mutex lock_;
 };
 
@@ -550,6 +555,7 @@ std::shared_ptr<xe::filesystem::NetFile> SmbFolder::OpenFile(const std::string& 
   if (!Stat(rel, &is_dir, &size) || is_dir) {
     return nullptr;
   }
+  XELOGI("network: {} opened, {} bytes", Full(rel), size);
   return std::make_shared<SmbFolderFile>(shared_from_this(), Full(rel), size);
 }
 

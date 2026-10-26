@@ -395,7 +395,9 @@ class NetFileHandle : public FileHandle {
   bool Read(size_t file_offset, void* buffer, size_t buffer_length,
             size_t* out_bytes_read) override {
     *out_bytes_read = 0;
-    if (file_offset > file_->size()) {
+    // as ReadFile does: at or past the end, false (end of file); a read that runs past the end gives the bytes
+    // that are there and true (a game's files are read in whole sectors: the unpacked Ice Age 3 waited forever)
+    if (file_offset >= file_->size()) {
       return false;
     }
     size_t length = size_t(std::min<uint64_t>(buffer_length,
@@ -404,7 +406,7 @@ class NetFileHandle : public FileHandle {
       return false;
     }
     *out_bytes_read = length;
-    return length == buffer_length;
+    return true;
   }
   bool Write(size_t, const void*, size_t, size_t*) override { return false; }
   bool SetLength(size_t) override { return false; }
@@ -412,6 +414,19 @@ class NetFileHandle : public FileHandle {
 
  private:
   std::shared_ptr<NetFile> file_;
+};
+
+// Game Vault: a folder of the network folder game, opened (it has no data of its own)
+class NetFolderHandle : public FileHandle {
+ public:
+  explicit NetFolderHandle(const std::filesystem::path& path) : FileHandle(path) {}
+  bool Read(size_t, void*, size_t, size_t* out_bytes_read) override {
+    *out_bytes_read = 0;
+    return false;
+  }
+  bool Write(size_t, const void*, size_t, size_t*) override { return false; }
+  bool SetLength(size_t) override { return false; }
+  void Flush() override {}
 };
 
 std::unique_ptr<FileHandle> FileHandle::OpenExisting(
@@ -437,6 +452,22 @@ std::unique_ptr<FileHandle> FileHandle::OpenExisting(
   }
   if (desired_access & FileAccess::kFileAppendData) {
     open_access |= FILE_APPEND_DATA;
+  }
+  // Game Vault: a path in the network folder game. A folder opens too (a game opens game:\ before it reads
+  // anything: the unpacked Ice Age 3 asked for it over and over, on a black screen); reads only
+  {
+    std::string rel;
+    if (auto folder = NetFolderFor(path, &rel)) {
+      if (auto net = GetNetFile(path)) {
+        return std::make_unique<NetFileHandle>(path, std::move(net));
+      }
+      bool is_dir = false;
+      uint64_t size = 0;
+      if (folder->Stat(rel, &is_dir, &size) && is_dir) {
+        return std::make_unique<NetFolderHandle>(path);
+      }
+      return nullptr;
+    }
   }
   // Game Vault: the shared game file (reads only)
   if (!(open_access & ~(GENERIC_READ | FILE_READ_DATA))) {
