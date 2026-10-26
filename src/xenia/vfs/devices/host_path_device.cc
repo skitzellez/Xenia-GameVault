@@ -29,7 +29,7 @@ HostPathDevice::HostPathDevice(const std::string_view mount_path,
 HostPathDevice::~HostPathDevice() = default;
 
 bool HostPathDevice::Initialize() {
-  if (!std::filesystem::exists(host_path_)) {
+  if (!xe::filesystem::PathExistsAny(host_path_)) {   // (Game Vault: also a network folder game)
     if (!read_only_) {
       // Create the path.
       std::filesystem::create_directories(host_path_);

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 
 namespace xe::vfs {
@@ -19,6 +20,10 @@ namespace xe::vfs {
 std::unique_ptr<SvodHostFile> SvodHostFile::Open(
     const std::filesystem::path& path, Storage storage) {
   auto file = std::unique_ptr<SvodHostFile>(new SvodHostFile(path));
+  // Game Vault: a fragment read over the network is streamed, never mapped
+  if (xe::filesystem::IsNetFolderPath(path)) {
+    storage = Storage::kFile;
+  }
   if (storage == Storage::kFile) {
     file->file_handle_ = filesystem::FileHandle::OpenExisting(
         path, filesystem::FileAccess::kGenericRead);
@@ -27,7 +32,7 @@ std::unique_ptr<SvodHostFile> SvodHostFile::Open(
       return nullptr;
     }
     std::error_code error;
-    file->size_ = std::filesystem::file_size(path, error);
+    file->size_ = xe::filesystem::FileSizeShared(path, error);
     if (error) {
       XELOGE("Failed to read SVOD fragment size for {}: {}", path,
              error.message());

@@ -82,8 +82,30 @@ class NetFile {
   virtual bool Read(uint64_t offset, void* buffer, size_t length) = 0;
 };
 void SetNetFile(const std::filesystem::path& path, std::shared_ptr<NetFile> file);
-// the reader when path names the network game, else nullptr
+// the reader when path names the network game (or a file in the network folder), else nullptr
 std::shared_ptr<NetFile> GetNetFile(const std::filesystem::path& path);
+
+// Game Vault (Xenia for Game Vault 1.1.8.61 on): a game that is a folder of files on the network (an Xbox 360
+// Games on Demand game, an unpacked game with default.xex). Every path under its stand-in root is answered by
+// this reader: GetInfo, ListFiles, GetNetFile (and through it FileHandle::OpenExisting, FileSizeShared,
+// MappedMemory::Open for small files) and PathExistsAny. Paths in it are '\' separated, "" = the root. Reads only.
+struct NetFolderEntry {
+  std::string name;
+  bool is_dir = false;
+  uint64_t size = 0;
+};
+class NetFolder {
+ public:
+  virtual ~NetFolder() = default;
+  virtual bool Stat(const std::string& rel, bool* is_dir, uint64_t* size) = 0;
+  virtual bool List(const std::string& rel, std::vector<NetFolderEntry>& out) = 0;
+  virtual std::shared_ptr<NetFile> OpenFile(const std::string& rel) = 0;
+};
+void SetNetFolder(const std::filesystem::path& root, std::shared_ptr<NetFolder> folder);
+// true when path is in the network folder (its root included)
+bool IsNetFolderPath(const std::filesystem::path& path);
+// a path that is there: in the network folder, or on the console (std::filesystem::exists)
+bool PathExistsAny(const std::filesystem::path& path);
 
 // Wrapper for the 64-bit version of fseek, returns true on success.
 bool Seek(FILE* file, int64_t offset, int origin);

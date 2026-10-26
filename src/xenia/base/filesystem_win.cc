@@ -148,19 +148,108 @@ void SetNetFile(const std::filesystem::path& path, std::shared_ptr<NetFile> file
   net_file_ = std::move(file);
 }
 
-std::shared_ptr<NetFile> GetNetFile(const std::filesystem::path& path) {
-  std::lock_guard<std::mutex> lock(net_file_lock_);
-  if (!net_file_) {
+// Game Vault: the one network folder game (see filesystem.h), and the readers of its files opened so far
+static std::mutex net_folder_lock_;
+static std::wstring net_folder_root_;
+static std::shared_ptr<NetFolder> net_folder_;
+static std::vector<std::pair<std::wstring, std::shared_ptr<NetFile>>> net_folder_files_;
+
+void SetNetFolder(const std::filesystem::path& root, std::shared_ptr<NetFolder> folder) {
+  std::lock_guard<std::mutex> lock(net_folder_lock_);
+  net_folder_root_ = root.lexically_normal().wstring();
+  while (!net_folder_root_.empty() && net_folder_root_.back() == L'\\') {
+    net_folder_root_.pop_back();
+  }
+  net_folder_ = std::move(folder);
+  net_folder_files_.clear();
+}
+
+// The folder and the path in it ('\' separated, UTF-8) when path is in the network folder
+static std::shared_ptr<NetFolder> NetFolderFor(const std::filesystem::path& path, std::string* rel,
+                                               std::wstring* key = nullptr) {
+  std::lock_guard<std::mutex> lock(net_folder_lock_);
+  if (!net_folder_) {
     return nullptr;
   }
   std::wstring a = path.lexically_normal().wstring();
-  std::wstring b = net_file_path_.wstring();
-  if (a.size() != b.size() ||
-      CompareStringOrdinal(a.c_str(), int(a.size()), b.c_str(), int(b.size()),
-                           TRUE) != CSTR_EQUAL) {
+  for (auto& c : a) {
+    if (c == L'/') c = L'\\';
+  }
+  while (a.size() > net_folder_root_.size() && a.back() == L'\\') {
+    a.pop_back();
+  }
+  const std::wstring& b = net_folder_root_;
+  if (a.size() < b.size() ||
+      CompareStringOrdinal(a.c_str(), int(b.size()), b.c_str(), int(b.size()), TRUE) != CSTR_EQUAL ||
+      (a.size() > b.size() && a[b.size()] != L'\\')) {
     return nullptr;
   }
-  return net_file_;
+  std::wstring w = a.size() > b.size() ? a.substr(b.size() + 1) : L"";
+  *rel = xe::path_to_utf8(std::filesystem::path(w));
+  if (key) {
+    *key = w;
+  }
+  return net_folder_;
+}
+
+bool IsNetFolderPath(const std::filesystem::path& path) {
+  std::string rel;
+  return NetFolderFor(path, &rel) != nullptr;
+}
+
+bool PathExistsAny(const std::filesystem::path& path) {
+  std::string rel;
+  if (auto folder = NetFolderFor(path, &rel)) {
+    bool is_dir = false;
+    uint64_t size = 0;
+    return folder->Stat(rel, &is_dir, &size);
+  }
+  if (GetNetFile(path)) {
+    return true;
+  }
+  std::error_code error;
+  return std::filesystem::exists(path, error);
+}
+
+std::shared_ptr<NetFile> GetNetFile(const std::filesystem::path& path) {
+  {
+    std::lock_guard<std::mutex> lock(net_file_lock_);
+    if (net_file_) {
+      std::wstring a = path.lexically_normal().wstring();
+      std::wstring b = net_file_path_.wstring();
+      if (a.size() == b.size() &&
+          CompareStringOrdinal(a.c_str(), int(a.size()), b.c_str(), int(b.size()), TRUE) == CSTR_EQUAL) {
+        return net_file_;
+      }
+    }
+  }
+  // a file in the network folder: its reader, opened once
+  std::string rel;
+  std::wstring key;
+  auto folder = NetFolderFor(path, &rel, &key);
+  if (!folder || rel.empty()) {
+    return nullptr;
+  }
+  {
+    std::lock_guard<std::mutex> lock(net_folder_lock_);
+    for (auto& f : net_folder_files_) {
+      if (CompareStringOrdinal(f.first.c_str(), int(f.first.size()), key.c_str(), int(key.size()), TRUE) ==
+          CSTR_EQUAL) {
+        return f.second;
+      }
+    }
+  }
+  bool is_dir = false;
+  uint64_t size = 0;
+  if (!folder->Stat(rel, &is_dir, &size) || is_dir) {
+    return nullptr;
+  }
+  auto file = folder->OpenFile(rel);
+  if (file) {
+    std::lock_guard<std::mutex> lock(net_folder_lock_);
+    net_folder_files_.emplace_back(key, file);
+  }
+  return file;
 }
 
 uint64_t FileSizeShared(const std::filesystem::path& path, std::error_code& error) {
@@ -378,6 +467,20 @@ std::unique_ptr<FileHandle> FileHandle::OpenExisting(
 #define COMBINE_TIME(t) (((uint64_t)t.dwHighDateTime << 32) | t.dwLowDateTime)
 
 std::optional<FileInfo> GetInfo(const std::filesystem::path& path) {
+  std::string rel;
+  if (auto folder = NetFolderFor(path, &rel)) {   // Game Vault: the network folder game
+    bool is_dir = false;
+    uint64_t size = 0;
+    if (!folder->Stat(rel, &is_dir, &size)) {
+      return {};
+    }
+    FileInfo info{};
+    info.type = is_dir ? FileInfo::Type::kDirectory : FileInfo::Type::kFile;
+    info.total_size = is_dir ? 0 : size;
+    info.path = path.parent_path();
+    info.name = path.filename();
+    return info;
+  }
   WIN32_FILE_ATTRIBUTE_DATA data = {0};
   if (!GetFileAttributesEx(path.c_str(), GetFileExInfoStandard, &data)) {
     return {};
@@ -403,6 +506,21 @@ std::optional<FileInfo> GetInfo(const std::filesystem::path& path) {
 
 std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
   std::vector<FileInfo> result;
+
+  std::string rel;
+  if (auto folder = NetFolderFor(path, &rel)) {   // Game Vault: the network folder game
+    std::vector<NetFolderEntry> entries;
+    folder->List(rel, entries);
+    for (auto& e : entries) {
+      FileInfo info{};
+      info.type = e.is_dir ? FileInfo::Type::kDirectory : FileInfo::Type::kFile;
+      info.total_size = e.is_dir ? 0 : e.size;
+      info.path = path;
+      info.name = xe::to_path(e.name);
+      result.push_back(info);
+    }
+    return result;
+  }
 
   WIN32_FIND_DATA ffd;
   HANDLE handle = FindFirstFileW((path / "*").c_str(), &ffd);

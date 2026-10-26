@@ -8,6 +8,7 @@
  */
 
 #include "xenia/vfs/devices/xcontent_devices/svod_container_device.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/vfs/devices/xcontent_devices/svod_container_entry.h"
 
@@ -37,7 +38,7 @@ SvodContainerDevice::Result SvodContainerDevice::LoadHostFiles(
     const size_t data_file_count) {
   std::filesystem::path data_fragment_path = host_path_;
   data_fragment_path += ".data";
-  if (!std::filesystem::exists(data_fragment_path)) {
+  if (!xe::filesystem::PathExistsAny(data_fragment_path)) {   // (Game Vault: also over the network)
     XELOGE("SVOD container is multi-file, but path {} does not exist.",
            data_fragment_path);
     return Result::kFileMismatch;

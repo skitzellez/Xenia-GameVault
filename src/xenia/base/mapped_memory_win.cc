@@ -10,6 +10,7 @@
 #include <mutex>
 
 #include "third_party/fmt/include/fmt/format.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/mapped_memory.h"
 #include "xenia/base/math.h"
@@ -105,9 +106,38 @@ class Win32MappedMemory : public MappedMemory {
   DWORD view_access_ = 0;
 };
 
+// Game Vault: a file of a game read over the network cannot be mapped; a small one (a Games on Demand header) is
+// read whole into memory instead
+class NetCopyMappedMemory : public MappedMemory {
+ public:
+  explicit NetCopyMappedMemory(std::vector<uint8_t> data)
+      : MappedMemory(nullptr, data.size()), buffer_(std::move(data)) {
+    data_ = buffer_.data();
+  }
+
+ private:
+  std::vector<uint8_t> buffer_;
+};
+
 std::unique_ptr<MappedMemory> MappedMemory::Open(
     const std::filesystem::path& path, Mode mode, size_t offset,
     size_t length) {
+  if (auto net = xe::filesystem::GetNetFile(path)) {
+    const uint64_t size = net->size();
+    if (mode != Mode::kRead || offset > size) {
+      return nullptr;
+    }
+    const uint64_t n = length ? std::min<uint64_t>(length, size - offset) : size - offset;
+    if (n > (256ull << 20)) {
+      XELOGE("{}: {} is too big to read whole from the network", __func__, path);
+      return nullptr;
+    }
+    std::vector<uint8_t> data(static_cast<size_t>(n));
+    if (n && !net->Read(offset, data.data(), size_t(n))) {
+      return nullptr;
+    }
+    return std::make_unique<NetCopyMappedMemory>(std::move(data));
+  }
   DWORD file_access = 0;
   DWORD file_share = 0;
   DWORD create_mode = 0;

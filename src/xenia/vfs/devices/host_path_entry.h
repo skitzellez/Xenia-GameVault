@@ -34,7 +34,8 @@ class HostPathEntry : public Entry {
 
   X_STATUS Open(uint32_t desired_access, File** out_file) override;
 
-  bool can_map() const override { return true; }
+  // (Game Vault: a file of a network folder game is read, not mapped)
+  bool can_map() const override { return !xe::filesystem::IsNetFolderPath(host_path_); }
   std::unique_ptr<MappedMemory> OpenMapped(MappedMemory::Mode mode,
                                            size_t offset,
                                            size_t length) override;
