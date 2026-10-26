@@ -9,6 +9,7 @@ add_executable(xenia-uwp WIN32
   windowed_app_context_uwp.cc
   file_picker_uwp.cc
   menu_item_uwp.cc
+  uwp_file_redirect.cc
   NetGame.cpp
   Package.appxmanifest
   ${PROJECT_SOURCE_DIR}/src/xenia/app/xenia_main.cc

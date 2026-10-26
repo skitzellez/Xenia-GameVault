@@ -31,6 +31,7 @@
 #include "XeniaUWP.h"
 #include "app_launch_state.h"
 #include "protocol_activation.h"
+#include "uwp_file_redirect.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/config.h"
@@ -200,6 +201,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
   IFrameworkView CreateView() { return *this; }
 
   void Initialize(CoreApplicationView const& v) {
+    // Game Vault: games on any USB drive (FAT32, exFAT, an NTFS drive no PC prepared), whole folders too
+    // (Xbox 360 Games on Demand and unpacked games with default.xex): file calls go through the *FromApp
+    // versions, which honour broadFileSystemAccess (uwp_file_redirect.cc)
+    UwpRedirectFileApis();
     v.Activated({this, &App::OnActivate});
   }
 
