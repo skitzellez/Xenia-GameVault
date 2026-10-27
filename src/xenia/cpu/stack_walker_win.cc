@@ -21,6 +21,7 @@
 DEFINE_bool(debug_symbol_loader, false,
             "Enable dbghelp debug logging and validation.", "CPU");
 
+#if !XE_PLATFORM_WINRT
 // Must be included after platform_win.h:
 #pragma warning(push)
 #pragma warning(disable : 4091)
@@ -57,11 +58,15 @@ LPSTACKWALK64 stack_walk_64_ = nullptr;
 LPSYMFUNCTIONTABLEACCESS64 sym_function_table_access_64_ = nullptr;
 LPSYMGETMODULEBASE64 sym_get_module_base_64_ = nullptr;
 LPSYMGETSYMFROMADDR64 sym_get_sym_from_addr_64_ = nullptr;
+#endif
 
 namespace xe {
 namespace cpu {
 
 bool InitializeStackWalker() {
+#if XE_PLATFORM_WINRT
+  return true;
+#else
   if (sym_get_options_) {
     // Already initialized.
     return true;
@@ -110,6 +115,7 @@ bool InitializeStackWalker() {
   }
 
   return true;
+#endif
 }
 
 class Win32StackWalker : public StackWalker {
@@ -161,7 +167,7 @@ class Win32StackWalker : public StackWalker {
     // Query context. Thread must be suspended.
     // Need at least CONTEXT_CONTROL (for rip and rsp) and CONTEXT_INTEGER (for
     // rbp).
-    CONTEXT thread_context;
+    CONTEXT thread_context = {};
     if (!in_host_context) {
       // If not given a context we need to ask for it.
       // This gets the state of the thread exactly where it was when suspended.
@@ -211,6 +217,41 @@ class Win32StackWalker : public StackWalker {
 #endif
     }
 
+#if XE_PLATFORM_WINRT
+    // DbgHelp is unavailable to app-partition builds. Unwind native frames with
+    // the system unwind tables and use the code cache's tables for JIT frames.
+    if (out_stack_hash) {
+      *out_stack_hash = 0;
+    }
+    size_t skipped = 0;
+    size_t captured = 0;
+    while (thread_context.Rip && captured < frame_count) {
+      const uint64_t pc = thread_context.Rip;
+      if (skipped < frame_offset) {
+        ++skipped;
+      } else {
+        frame_host_pcs[captured++] = pc;
+        if (out_stack_hash) {
+          *out_stack_hash = (*out_stack_hash * 31) + pc;
+        }
+      }
+      ULONG64 image_base = 0;
+      PRUNTIME_FUNCTION function;
+      if (pc >= code_cache_min_ && pc < code_cache_max_) {
+        image_base = code_cache_min_;
+        function =
+            static_cast<PRUNTIME_FUNCTION>(code_cache_->LookupUnwindInfo(pc));
+      } else {
+        function = RtlLookupFunctionEntry(pc, &image_base, nullptr);
+      }
+      const uint64_t previous_sp = thread_context.Rsp;
+      if (!UnwindFrame(&thread_context, image_base, function) ||
+          thread_context.Rsp <= previous_sp) {
+        break;
+      }
+    }
+    return captured;
+#else
     // Setup the frame for walking.
     STACKFRAME64 stack_frame = {};
     stack_frame.AddrPC.Mode = AddrModeFlat;
@@ -246,7 +287,8 @@ class Win32StackWalker : public StackWalker {
       ++frame_index;
     }
 
-    return frame_index - frame_offset;
+    return frame_index > frame_offset ? frame_index - frame_offset : 0;
+#endif
   }
 
   bool ResolveStack(uint64_t* frame_host_pcs, StackFrame* frames,
@@ -287,6 +329,7 @@ class Win32StackWalker : public StackWalker {
         frame.type = StackFrame::Type::kHost;
         // TODO(benvanik): cache so that we can avoid calling into dbghelp (and
         // taking the lock).
+#if !XE_PLATFORM_WINRT
         union {
           IMAGEHLP_SYMBOL64 info;
           uint8_t buffer[sizeof(IMAGEHLP_SYMBOL64) +
@@ -302,12 +345,35 @@ class Win32StackWalker : public StackWalker {
           frame.host_symbol.address = symbol.info.Address;
           std::strncpy(frame.host_symbol.name, symbol.info.Name, 256);
         }
+#else
+        frame.host_symbol.address = frame.host_pc;
+#endif
       }
     }
     return true;
   }
 
  private:
+#if XE_PLATFORM_WINRT
+  static bool UnwindFrame(CONTEXT* context, ULONG64 image_base,
+                          PRUNTIME_FUNCTION function) {
+    // A damaged guest stack must not crash the host while collecting a trace.
+    __try {
+      if (function) {
+        PVOID handler_data = nullptr;
+        ULONG64 establisher_frame = 0;
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context->Rip, function,
+                         context, &handler_data, &establisher_frame, nullptr);
+      } else {
+        context->Rip = *reinterpret_cast<const uint64_t*>(context->Rsp);
+        context->Rsp += sizeof(uint64_t);
+      }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      return false;
+    }
+    return true;
+  }
+#else
   static PVOID WINAPI XSymFunctionTableAccess64(__in HANDLE hProcess,
                                                 __in DWORD64 AddrBase) {
     if (AddrBase >= code_cache_min_ && AddrBase < code_cache_max_) {
@@ -328,6 +394,8 @@ class Win32StackWalker : public StackWalker {
     // Normal module base lookup.
     return sym_get_module_base_64_(hProcess, dwAddr);
   }
+
+#endif
 
   std::mutex dbghelp_mutex_;
 

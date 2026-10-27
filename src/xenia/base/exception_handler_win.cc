@@ -10,10 +10,28 @@
 #include "xenia/base/exception_handler.h"
 
 #include "xenia/base/assert.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/platform_win.h"
 
 namespace xe {
+
+#if XE_PLATFORM_WINRT
+// The app SDK omits the Win32 VEH wrappers. Bind the corresponding NT runtime
+// exports, as the UWP JIT still requires access-violation dispatch.
+using AddVectoredHandlerFn =
+    PVOID(NTAPI*)(ULONG, LONG(CALLBACK*)(PEXCEPTION_POINTERS));
+using RemoveVectoredHandlerFn = ULONG(NTAPI*)(PVOID);
+static auto add_vectored_exception_handler =
+    reinterpret_cast<AddVectoredHandlerFn>(GetProcAddress(
+        GetModuleHandleW(L"ntdll.dll"), "RtlAddVectoredExceptionHandler"));
+static auto remove_vectored_exception_handler =
+    reinterpret_cast<RemoveVectoredHandlerFn>(GetProcAddress(
+        GetModuleHandleW(L"ntdll.dll"), "RtlRemoveVectoredExceptionHandler"));
+static auto remove_vectored_continue_handler =
+    reinterpret_cast<RemoveVectoredHandlerFn>(GetProcAddress(
+        GetModuleHandleW(L"ntdll.dll"), "RtlRemoveVectoredContinueHandler"));
+#endif
 
 // Handle of the added VectoredExceptionHandler.
 void* veh_handle_ = nullptr;
@@ -136,7 +154,18 @@ LONG CALLBACK ExceptionHandlerCallback(PEXCEPTION_POINTERS ex_info) {
 
 void ExceptionHandler::Install(Handler fn, void* data) {
   if (!veh_handle_) {
+#if XE_PLATFORM_WINRT
+    if (!add_vectored_exception_handler || !remove_vectored_exception_handler) {
+      xe::FatalError(
+          "The NT runtime does not provide required exception handlers.");
+    }
+    veh_handle_ = add_vectored_exception_handler(1, ExceptionHandlerCallback);
+#else
     veh_handle_ = AddVectoredExceptionHandler(1, ExceptionHandlerCallback);
+#endif
+    if (!veh_handle_) {
+      xe::FatalError("Failed to install the emulator exception handler.");
+    }
 
     if (IsDebuggerPresent()) {
       // TODO(benvanik): do we need a continue handler if a debugger is
@@ -176,11 +205,21 @@ void ExceptionHandler::Uninstall(Handler fn, void* data) {
   }
   if (!has_any) {
     if (veh_handle_) {
+#if XE_PLATFORM_WINRT
+      remove_vectored_exception_handler(veh_handle_);
+#else
       RemoveVectoredExceptionHandler(veh_handle_);
+#endif
       veh_handle_ = nullptr;
     }
     if (vch_handle_) {
+#if XE_PLATFORM_WINRT
+      if (remove_vectored_continue_handler) {
+        remove_vectored_continue_handler(vch_handle_);
+      }
+#else
       RemoveVectoredContinueHandler(vch_handle_);
+#endif
       vch_handle_ = nullptr;
     }
   }

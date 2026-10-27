@@ -10,11 +10,17 @@
 #include <mutex>
 
 #include "third_party/fmt/include/fmt/format.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/mapped_memory.h"
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/platform_win.h"
+#include "xenia/base/string.h"
+
+#if XE_PLATFORM_WINRT
+#include <fileapifromapp.h>
+#endif
 
 #if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | \
                             WINAPI_PARTITION_SYSTEM | WINAPI_PARTITION_GAMES)
@@ -85,10 +91,12 @@ class Win32MappedMemory : public MappedMemory {
     if (length) {
       size_ = aligned_length;
     } else {
-      DWORD length_high;
-      size_t map_length = GetFileSize(file_handle, &length_high);
-      map_length |= static_cast<uint64_t>(length_high) << 32;
-      size_ = map_length - aligned_offset;
+      LARGE_INTEGER map_length;
+      if (!GetFileSizeEx(file_handle, &map_length) ||
+          uint64_t(map_length.QuadPart) < aligned_offset) {
+        return false;
+      }
+      size_ = size_t(map_length.QuadPart) - aligned_offset;
     }
 
     return true;
@@ -99,9 +107,38 @@ class Win32MappedMemory : public MappedMemory {
   DWORD view_access_ = 0;
 };
 
+// Game Vault: a file of a game read over the network cannot be mapped; a small one (a Games on Demand header) is
+// read whole into memory instead
+class NetCopyMappedMemory : public MappedMemory {
+ public:
+  explicit NetCopyMappedMemory(std::vector<uint8_t> data)
+      : MappedMemory(nullptr, data.size()), buffer_(std::move(data)) {
+    data_ = buffer_.data();
+  }
+
+ private:
+  std::vector<uint8_t> buffer_;
+};
+
 std::unique_ptr<MappedMemory> MappedMemory::Open(
     const std::filesystem::path& path, Mode mode, size_t offset,
     size_t length) {
+  if (auto net = xe::filesystem::GetNetFile(path)) {
+    const uint64_t size = net->size();
+    if (mode != Mode::kRead || offset > size) {
+      return nullptr;
+    }
+    const uint64_t n = length ? std::min<uint64_t>(length, size - offset) : size - offset;
+    if (n > (256ull << 20)) {
+      XELOGE("{}: {} is too big to read whole from the network", __func__, xe::strip_pii(xe::path_to_utf8(path)));
+      return nullptr;
+    }
+    std::vector<uint8_t> data(static_cast<size_t>(n));
+    if (n && !net->Read(offset, data.data(), size_t(n))) {
+      return nullptr;
+    }
+    return std::make_unique<NetCopyMappedMemory>(std::move(data));
+  }
   DWORD file_access = 0;
   DWORD file_share = 0;
   DWORD create_mode = 0;
@@ -134,9 +171,16 @@ std::unique_ptr<MappedMemory> MappedMemory::Open(
   auto mm = std::make_unique<Win32MappedMemory>();
   mm->view_access_ = view_access;
 
+#if XE_PLATFORM_WINRT
+  mm->file_handle =
+      CreateFileFromAppW(path.c_str(), file_access, file_share, nullptr,
+#else
   mm->file_handle = CreateFile(path.c_str(), file_access, file_share, nullptr,
-                               create_mode, FILE_ATTRIBUTE_NORMAL, nullptr);
+#endif
+                         create_mode, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (mm->file_handle == Win32MappedMemory::kFileHandleInvalid) {
+    const DWORD error = GetLastError();
+    XELOGE("Unable to open mapped file {}: Windows error {}", xe::strip_pii(xe::path_to_utf8(path)), error);
     return nullptr;
   }
 
@@ -150,6 +194,9 @@ std::unique_ptr<MappedMemory> MappedMemory::Open(
                                ULONG64(aligned_length), nullptr);
 #endif
   if (mm->mapping_handle == Win32MappedMemory::kMappingHandleInvalid) {
+    const DWORD error = GetLastError();
+    XELOGE("Unable to create file mapping for {} (length {}): Windows error {}",
+           xe::strip_pii(xe::path_to_utf8(path)), aligned_length, error);
     return nullptr;
   }
 
@@ -163,16 +210,29 @@ std::unique_ptr<MappedMemory> MappedMemory::Open(
                            ULONG64(aligned_offset), aligned_length));
 #endif
   if (!mm->data_) {
+    const DWORD error = GetLastError();
+    XELOGE("Unable to map file view for {} (offset {}, length {}): Windows "
+           "error {}",
+           xe::strip_pii(xe::path_to_utf8(path)), aligned_offset, aligned_length, error);
     return nullptr;
   }
 
   if (length) {
     mm->size_ = aligned_length;
   } else {
-    DWORD length_high;
-    size_t map_length = GetFileSize(mm->file_handle, &length_high);
-    map_length |= static_cast<uint64_t>(length_high) << 32;
-    mm->size_ = map_length - aligned_offset;
+    LARGE_INTEGER map_length;
+    if (!GetFileSizeEx(mm->file_handle, &map_length)) {
+      const DWORD error = GetLastError();
+      XELOGE("Unable to get mapped file size for {}: Windows error {}", xe::strip_pii(xe::path_to_utf8(path)),
+             error);
+      return nullptr;
+    }
+    if (uint64_t(map_length.QuadPart) < aligned_offset) {
+      XELOGE("Mapped file offset {} exceeds file size {} for {}", aligned_offset,
+             map_length.QuadPart, xe::strip_pii(xe::path_to_utf8(path)));
+      return nullptr;
+    }
+    mm->size_ = size_t(map_length.QuadPart) - aligned_offset;
   }
 
   return std::move(mm);
@@ -252,8 +312,13 @@ class Win32ChunkedMappedMemoryWriter : public ChunkedMappedMemoryWriter {
       DWORD mapping_protect = PAGE_READWRITE;
       DWORD view_access = FILE_MAP_READ | FILE_MAP_WRITE;
 
+#if XE_PLATFORM_WINRT
+      file_handle_ =
+          CreateFileFromAppW(path.c_str(), file_access, file_share, nullptr,
+#else
       file_handle_ = CreateFile(path.c_str(), file_access, file_share, nullptr,
-                                create_mode, FILE_ATTRIBUTE_NORMAL, nullptr);
+#endif
+                             create_mode, FILE_ATTRIBUTE_NORMAL, nullptr);
       if (file_handle_ == Win32MappedMemory::kFileHandleInvalid) {
         return false;
       }

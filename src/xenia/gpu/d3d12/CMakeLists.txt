@@ -19,6 +19,12 @@ target_link_libraries(xenia-gpu-d3d12 PRIVATE glslang-spirv)
 # Mesa, so it includes their vulkan_spirv headers, which the Vulkan backend
 # generates (always built when D3D12 is). Depend on that generation so the
 # headers exist on a clean build.
+# The Xbox app builds no Vulkan backend, so the D3D12 one makes those headers.
+if(XENIA_BUILD_UWP)
+  xe_shader_rules_spirv(xenia-gpu-d3d12 ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
+  xe_shader_rules_slang(xenia-gpu-d3d12 ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
+                        TARGET spirv)
+endif()
 foreach(_spirv_shaders_dep
         xenia-gpu-vulkan-spirv-shaders xenia-gpu-vulkan-slang-spirv-shaders)
   if(TARGET ${_spirv_shaders_dep})

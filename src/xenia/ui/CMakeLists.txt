@@ -7,12 +7,29 @@ file(GLOB _ui_exclude
   "${CMAKE_CURRENT_SOURCE_DIR}/*_demo.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/windowed_app_main_*.cc"
 )
-if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+if(XENIA_BUILD_UWP)
+  list(APPEND _ui_exclude
+    "${CMAKE_CURRENT_SOURCE_DIR}/window_win.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/windowed_app_context_win.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/surface_win.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/file_picker_win.cc"
+    # Edge's desktop dialogs (they use Edge's controller code; the Xbox app has its own)
+    "${CMAKE_CURRENT_SOURCE_DIR}/imgui_audio_dialog.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/imgui_debug_dialog.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/imgui_performance_dialog.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/imgui_postprocessing_dialog.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/profile_dialogs.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/audio_helper.cc"
+  )
+endif()
+# No wxWidgets on Android or in the UWP (Xbox) app
+if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR XENIA_BUILD_UWP)
   file(GLOB _wx_exclude
     "${CMAKE_CURRENT_SOURCE_DIR}/*_wx.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/*_wx.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/wx_locale.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/wx_locale.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/icon_decode.cc"
   )
   list(APPEND _ui_exclude ${_wx_exclude})
 endif()
@@ -22,10 +39,12 @@ if(_ui_exclude AND _ui_srcs)
   set_target_properties(xenia-ui PROPERTIES SOURCES "${_ui_srcs}")
 endif()
 target_link_libraries(xenia-ui PUBLIC xenia-base)
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
-  target_link_libraries(xenia-ui PUBLIC xe-wxWidgets)
-endif()
-if(WIN32)
+if(XENIA_BUILD_UWP)
+  target_link_libraries(xenia-ui PRIVATE dwrite)
+elseif(WIN32)
+  if(NOT XENIA_HOST_TOOLS_ONLY)
+    target_link_libraries(xenia-ui PUBLIC xe-wxWidgets)
+  endif()
   target_link_libraries(xenia-ui PRIVATE dxgi)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   # xcb / X11 / X11-xcb: Vulkan surface creation in window_wx.cc.

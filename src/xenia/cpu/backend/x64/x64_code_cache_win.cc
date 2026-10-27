@@ -21,10 +21,20 @@
 #include "xenia/cpu/function.h"
 
 // Function pointer definitions
+#if XE_PLATFORM_WINRT
+// The app SDK omits these declarations. Keep the same optional ntdll export
+// lookup and callback fallback used by desktop builds.
+using FnRtlAddGrowableFunctionTable = DWORD(NTAPI*)(PVOID*, PRUNTIME_FUNCTION,
+                                                    DWORD, DWORD, ULONG_PTR,
+                                                    ULONG_PTR);
+using FnRtlGrowFunctionTable = VOID(NTAPI*)(PVOID, DWORD);
+using FnRtlDeleteGrowableFunctionTable = VOID(NTAPI*)(PVOID);
+#else
 using FnRtlAddGrowableFunctionTable = decltype(&RtlAddGrowableFunctionTable);
 using FnRtlGrowFunctionTable = decltype(&RtlGrowFunctionTable);
 using FnRtlDeleteGrowableFunctionTable =
     decltype(&RtlDeleteGrowableFunctionTable);
+#endif
 
 namespace xe {
 namespace cpu {

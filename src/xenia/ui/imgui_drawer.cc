@@ -395,7 +395,7 @@ bool ImGuiDrawer::LoadCustomFont(ImGuiIO& io, ImFontConfig& font_config,
 
 bool ImGuiDrawer::LoadWindowsFont(ImGuiIO& io, ImFontConfig& font_config,
                                   float font_size) {
-#if XE_PLATFORM_WIN32
+#if XE_PLATFORM_WIN32 && !XE_PLATFORM_WINRT  // (the Xbox app has no fonts folder: built-in font)
   PWSTR fonts_dir;
   HRESULT result = SHGetKnownFolderPath(FOLDERID_Fonts, 0, NULL, &fonts_dir);
   if (FAILED(result)) {

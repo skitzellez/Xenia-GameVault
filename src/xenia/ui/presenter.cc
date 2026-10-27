@@ -15,7 +15,7 @@
 #include "xenia/base/platform.h"
 #include "xenia/ui/window.h"
 
-#if XE_PLATFORM_WIN32
+#if XE_PLATFORM_WIN32 && !XE_PLATFORM_WINRT
 #include "xenia/ui/surface_win.h"
 #endif
 
@@ -1235,7 +1235,7 @@ void Presenter::UpdateSurfaceMonitorFromUIThread(
   // surface, the existence of `surface_` (which implies that `window_` exists
   // too) must be the condition for a non-null monitor, not just the existence
   // of `window_`.
-#if XE_PLATFORM_WIN32
+#if XE_PLATFORM_WIN32 && !XE_PLATFORM_WINRT  // (no HWND or monitors in the Xbox app)
   HMONITOR surface_new_win32_monitor = nullptr;
   if (surface_) {
     HWND hwnd = nullptr;
@@ -1297,7 +1297,7 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
   if (!surface_) {
     return false;
   }
-#if XE_PLATFORM_WIN32
+#if XE_PLATFORM_WIN32 && !XE_PLATFORM_WINRT
   return surface_win32_monitor_ != nullptr;
 #else
   return true;

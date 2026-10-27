@@ -71,15 +71,30 @@ if(_bc_asm_lang STREQUAL "ASM_MASM")
   string(APPEND CMAKE_ASM_MASM_COMPILE_OBJECT " > nul")
 endif()
 
+# The Visual Studio generator (the UWP build) passes no defines to MASM, so the
+# BOOST_CONTEXT_EXPORT tag below never becomes empty there: those builds
+# assemble copies with the tag taken out (the submodule stays pristine).
+if(CMAKE_GENERATOR MATCHES "Visual Studio" AND _bc_asm_lang STREQUAL "ASM_MASM")
+  set(_bc_src_dir "${CMAKE_CURRENT_BINARY_DIR}/asm")
+  foreach(_bc_part make jump ontop)
+    file(READ "${_bc_asm_dir}/${_bc_part}_${_bc_variant}" _bc_text)
+    string(REPLACE "BOOST_CONTEXT_EXPORT" "" _bc_text "${_bc_text}")
+    file(WRITE "${_bc_src_dir}/${_bc_part}_${_bc_variant}" "${_bc_text}")
+  endforeach()
+else()
+  set(_bc_src_dir "${_bc_asm_dir}")
+endif()
+
 add_library(boost_context STATIC
-  "${_bc_asm_dir}/make_${_bc_variant}"
-  "${_bc_asm_dir}/jump_${_bc_variant}"
-  "${_bc_asm_dir}/ontop_${_bc_variant}"
+  "${_bc_src_dir}/make_${_bc_variant}"
+  "${_bc_src_dir}/jump_${_bc_variant}"
+  "${_bc_src_dir}/ontop_${_bc_variant}"
 )
 
 # Boost's MASM/PE sources tag the routines with BOOST_CONTEXT_EXPORT; for a
 # static lib it must be empty.
 target_compile_definitions(boost_context PRIVATE "BOOST_CONTEXT_EXPORT=")
+
 
 if(MSVC)
   target_compile_options(boost_context PRIVATE

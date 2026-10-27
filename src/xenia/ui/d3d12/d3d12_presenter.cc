@@ -20,10 +20,15 @@
 #include "xenia/base/math.h"
 #include "xenia/ui/d3d12/d3d12_provider.h"
 #include "xenia/ui/d3d12/d3d12_util.h"
+#if XE_PLATFORM_WINRT
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.UI.Core.h>
+#else
 #include "xenia/ui/surface_win.h"
+#endif
 
 DEFINE_bool(
-    d3d12_allow_variable_refresh_rate_and_tearing, true,
+    d3d12_allow_variable_refresh_rate_and_tearing, !XE_PLATFORM_WINRT,
     "In fullscreen, allow using variable refresh rate on displays supporting "
     "it. On displays not supporting VRR, screen tearing may occur in certain "
     "cases.",
@@ -66,6 +71,9 @@ Surface::TypeFlags D3D12Presenter::GetSupportedSurfaceTypes() const {
   Surface::TypeFlags types = 0;
 #if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_GAMES)
   types |= Surface::kTypeFlag_Win32Hwnd;
+#endif
+#if XE_PLATFORM_WINRT
+  types |= Surface::kTypeFlag_UWPCore;
 #endif
   return types;
 }
@@ -294,6 +302,11 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
                                new_swap_chain_height == new_surface_height)
                                   ? DXGI_SCALING_NONE
                                   : DXGI_SCALING_STRETCH;
+#if XE_PLATFORM_WINRT
+    if (surface_type == Surface::kTypeIndex_UWPCore) {
+      swap_chain_desc.Scaling = DXGI_SCALING_STRETCH;
+    }
+#endif
     swap_chain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     swap_chain_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
     swap_chain_desc.Flags = 0;
@@ -323,6 +336,20 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
         // better, and nothing is presented for some reason.
         dxgi_factory->MakeWindowAssociation(surface_hwnd,
                                             DXGI_MWA_NO_ALT_ENTER);
+      } break;
+#endif
+#if XE_PLATFORM_WINRT
+      case Surface::kTypeIndex_UWPCore: {
+        auto window =
+            winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread();
+        auto* abi = static_cast<::IUnknown*>(winrt::get_abi(window));
+        if (!abi ||
+            FAILED(dxgi_factory->CreateSwapChainForCoreWindow(
+                direct_queue, abi, &swap_chain_desc, nullptr, &swap_chain_1))) {
+          XELOGE(
+              "D3D12Presenter: Failed to create a swap chain for CoreWindow");
+          return SurfacePaintConnectResult::kFailure;
+        }
       } break;
 #endif
       default:

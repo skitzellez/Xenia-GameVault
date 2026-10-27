@@ -11,22 +11,32 @@
 #include "xenia/base/platform_win.h"
 #include "xenia/base/string.h"
 #include "xenia/base/system.h"
+#if XE_PLATFORM_WINRT
+#include "xenia-canary-uwp/UWPUtil.h"
+#endif
 
 namespace xe {
 
 void LaunchWebBrowser(const std::string_view url) {
+#if XE_PLATFORM_WINRT
+  UWP::LaunchUri(std::string(url));
+#else
   auto wide_url = xe::to_utf16(url);
   ShellExecuteW(nullptr, L"open", reinterpret_cast<LPCWSTR>(wide_url.c_str()),
                 nullptr, nullptr, SW_SHOWNORMAL);
+#endif
 }
 
 void LaunchFileExplorer(const std::filesystem::path& url) {
+#if !XE_PLATFORM_WINRT
   ShellExecuteW(nullptr, L"explore", url.c_str(), nullptr, nullptr,
                 SW_SHOWNORMAL);
+#endif
 }
 
 void ShowSimpleMessageBox(SimpleMessageBoxType type,
                           const std::string_view message) {
+#if !XE_PLATFORM_WINRT
   const wchar_t* title;
   std::u16string wide_message = xe::to_utf16(message);
   DWORD type_flags = MB_OK | MB_APPLMODAL | MB_SETFOREGROUND;
@@ -47,6 +57,7 @@ void ShowSimpleMessageBox(SimpleMessageBoxType type,
   }
   MessageBoxW(nullptr, reinterpret_cast<LPCWSTR>(wide_message.c_str()), title,
               type_flags);
+#endif
 }
 
 static std::map<const uint32_t, DWORD> xeniaToWindowsPriorityClassMapping = {

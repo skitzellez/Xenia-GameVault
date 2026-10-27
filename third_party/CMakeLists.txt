@@ -147,6 +147,14 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   )
 endif()
 
+# Discord desktop IPC and registry registration are outside the UWP app
+# container. Keep the shared presence model and invite decoding linked, while
+# providing an inert transport on UWP only.
+if(XENIA_BUILD_UWP)
+  set_property(TARGET discord-rpc PROPERTY SOURCES
+    ${PROJECT_SOURCE_DIR}/xenia-canary-uwp/discord_rpc_uwp.cc)
+endif()
+
 # ==============================================================================
 # fmt
 # ==============================================================================
@@ -182,6 +190,11 @@ target_include_directories(glslang-spirv PUBLIC glslang)
 set(_xe_use_host_shader_cc FALSE)
 if(WIN32 AND CMAKE_CROSSCOMPILING AND XE_TARGET_AARCH64
     AND CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
+  set(_xe_use_host_shader_cc TRUE)
+endif()
+# The UWP (Xbox) build can't make a desktop tool either: it uses the one a
+# desktop configure with XENIA_HOST_TOOLS_ONLY built into build/host_tools.
+if(XENIA_BUILD_UWP)
   set(_xe_use_host_shader_cc TRUE)
 endif()
 
@@ -1096,9 +1109,10 @@ target_link_libraries(libavformat PRIVATE libavutil libavcodec)
 ffmpeg_common(libavformat)
 
 # ==============================================================================
-# wxWidgets
 # ==============================================================================
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
+# wxWidgets (not in the UWP / Xbox app)
+# ==============================================================================
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT XENIA_BUILD_UWP AND NOT XENIA_HOST_TOOLS_ONLY)
     # Build from vendored source — matches what we ship on Windows/macOS, and
     # on Linux gives us a known-good 3.3 (system 3.2 has GTK3/Wayland issues).
     # Strip the directory-level /W0 (or -w) so wxWidgets's own /W3 doesn't

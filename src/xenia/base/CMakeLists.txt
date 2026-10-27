@@ -14,6 +14,11 @@ target_link_libraries(xenia-base PUBLIC fmt)
 target_link_libraries(xenia-base PRIVATE zlib-ng boost_context)
 xe_target_defaults(xenia-base)
 
+if(XENIA_BUILD_UWP)
+  # Native Windows memory APIs preserve upstream's single-address JIT mapping.
+  set_property(TARGET xenia-base PROPERTY VS_GLOBAL__NoWinAPIFamilyApp true)
+endif()
+
 if(XENIA_BUILD_TESTS)
   add_subdirectory(testing)
 endif()

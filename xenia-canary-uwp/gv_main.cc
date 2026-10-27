@@ -1,0 +1,390 @@
+// Copyright (c) 2026 Skitzelles - part of Game Vault, https://github.com/skitzellez/xbox-game-vault
+// PolyForm Noncommercial License 1.0.0: not for sale, and this notice stays in every copy.
+//
+// The Xbox app's start-up on Xenia Edge. Edge's own front end is a wxWidgets desktop window, which the Xbox has no
+// use for (and can't run): Game Vault picks the game, so this app only sets up the emulator in the app's CoreWindow,
+// starts the game Game Vault sent (gamevault-xenia: link, see App.cpp) and starts the next one when Game Vault sends
+// another while a game runs. The steps follow Edge's xenia_main.cc: Setup, SetupSubsystems, the presenter on the
+// window, LaunchPath; RelaunchTitle for the next game.
+
+#include <atomic>
+#include <filesystem>
+#include <functional>
+#include <fstream>
+#include <map>
+#include <memory>
+#include <string>
+#include <thread>
+
+#include "third_party/fmt/include/fmt/format.h"
+#include "xenia/base/platform.h"
+
+#include "xenia/apu/nop/nop_audio_system.h"
+#include "xenia/apu/xaudio2/xaudio2_audio_system.h"
+#include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
+#include "xenia/base/filesystem.h"
+#include "xenia/base/logging.h"
+#include "xenia/base/profiling.h"
+#include "xenia/base/threading.h"
+#include "xenia/config.h"
+#include "xenia/emulator.h"
+#include "xenia/gpu/d3d12/d3d12_graphics_system.h"
+#include "xenia/hid/input_system.h"
+#include "xenia/hid/xinput/xinput_hid.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xam/xam_module.h"
+#include "xenia/ui/imgui_dialog.h"
+#include "xenia/ui/imgui_drawer.h"
+#include "xenia/ui/immediate_drawer.h"
+#include "xenia/ui/presenter.h"
+#include "xenia/ui/window.h"
+#include "xenia/ui/windowed_app.h"
+#include "xenia/ui/windowed_app_context.h"
+
+#include "UWPUtil.h"
+#include "XeniaUWP.h"
+
+DEFINE_string(apu, "any", "Audio system. Use: [any, nop, xaudio2]", "APU");
+DEFINE_string(gpu, "any", "Graphics system. Use: [any, d3d12]", "GPU");
+DEFINE_string(hid, "any", "Input system. Use: [any, nop, xinput]", "HID");
+
+DEFINE_path(storage_root, "",
+            "Root path for persistent internal data storage (config, etc.), or "
+            "empty for the app's LocalState folder.",
+            "Storage");
+DEFINE_path(content_root, "",
+            "Root path for guest content storage (saves, etc.), or empty to use "
+            "the content folder under the storage root.",
+            "Storage");
+DEFINE_path(cache_root, "",
+            "Root path for files used to speed up the emulator, or empty for "
+            "the cache_host folder under the storage root.",
+            "Storage");
+DEFINE_transient_path(target, "",
+                      "Specifies the target .xex or .iso to execute.",
+                      "General");
+
+namespace xe {
+namespace app {
+
+namespace {
+// Draw order on the window: the emulator's own UI above the game.
+constexpr size_t kZOrderImGui = 0;
+constexpr size_t kZOrderHidInput = 1;
+
+// Picks a backend by name, or the first one that comes up (as xenia_main.cc).
+template <typename T, typename... Args>
+class Factory {
+ public:
+  template <typename DT>
+  void Add(const std::string_view name) {
+    creators_.push_back({std::string(name), [](Args... args) -> std::unique_ptr<T> {
+                           if (!DT::IsAvailable()) return nullptr;
+                           return std::make_unique<DT>(std::forward<Args>(args)...);
+                         }});
+  }
+  void Add(const std::string_view name,
+           std::function<std::unique_ptr<T>(Args...)> instantiate) {
+    creators_.push_back({std::string(name), std::move(instantiate)});
+  }
+  std::unique_ptr<T> Create(const std::string_view name, Args... args) {
+    for (const auto& c : creators_) {
+      if (name == c.name) {
+        if (auto instance = c.instantiate(args...)) return instance;
+      }
+    }
+    for (const auto& c : creators_) {
+      if (auto instance = c.instantiate(args...)) return instance;
+    }
+    return nullptr;
+  }
+  std::vector<std::unique_ptr<T>> CreateAll(const std::string_view name,
+                                            Args... args) {
+    std::vector<std::unique_ptr<T>> instances;
+    for (const auto& c : creators_) {
+      if (name == "any" || name == c.name) {
+        if (auto instance = c.instantiate(args...)) {
+          instances.emplace_back(std::move(instance));
+        }
+      }
+    }
+    return instances;
+  }
+
+ private:
+  struct Creator {
+    std::string name;
+    std::function<std::unique_ptr<T>(Args...)> instantiate;
+  };
+  std::vector<Creator> creators_;
+};
+}  // namespace
+
+class GameVaultXeniaApp final : public ui::WindowedApp {
+ public:
+  static std::unique_ptr<ui::WindowedApp> Create(
+      ui::WindowedAppContext& app_context) {
+    return std::unique_ptr<ui::WindowedApp>(
+        new GameVaultXeniaApp(app_context));
+  }
+
+  bool OnInitialize() override;
+
+ protected:
+  void OnDestroy() override;
+
+ private:
+  explicit GameVaultXeniaApp(ui::WindowedAppContext& app_context)
+      : ui::WindowedApp(app_context, "xenia") {}
+
+  static std::unique_ptr<apu::AudioSystem> CreateAudioSystem(
+      cpu::Processor* processor);
+  static std::unique_ptr<gpu::GraphicsSystem> CreateGraphicsSystem();
+  static std::vector<std::unique_ptr<hid::InputDriver>> CreateInputDrivers(
+      ui::Window* window);
+
+  void EmulatorThread();
+  // UI thread: the graphics system's frames go to the window (again after a
+  // relaunch, which makes a new graphics system).
+  void SetupPresenter();
+  void ShutdownPresenter();
+  // UI thread, every pass: Game Vault sent another game while one runs.
+  void CompanionTick();
+  void StartTitle(const std::filesystem::path& path);
+
+  std::unique_ptr<Emulator> emulator_;
+  std::unique_ptr<ui::Window> window_;
+  std::unique_ptr<ui::ImGuiDrawer> imgui_drawer_;
+  std::unique_ptr<ui::ImmediateDrawer> immediate_drawer_;
+  ui::Presenter* presenter_painting_ = nullptr;
+  std::atomic<bool> emulator_ready_{false};
+  std::atomic<bool> switching_{false};
+  std::thread emulator_thread_;
+};
+
+std::unique_ptr<apu::AudioSystem> GameVaultXeniaApp::CreateAudioSystem(
+    cpu::Processor* processor) {
+  Factory<apu::AudioSystem, cpu::Processor*> factory;
+  factory.Add<apu::xaudio2::XAudio2AudioSystem>("xaudio2");
+  factory.Add<apu::nop::NopAudioSystem>("nop");
+  return factory.Create(cvars::apu, processor);
+}
+
+std::unique_ptr<gpu::GraphicsSystem> GameVaultXeniaApp::CreateGraphicsSystem() {
+  // Direct3D 12 is the only graphics API of the Xbox's app runtime.
+  Factory<gpu::GraphicsSystem> factory;
+  factory.Add<gpu::d3d12::D3D12GraphicsSystem>("d3d12");
+  return factory.Create(cvars::gpu);
+}
+
+std::vector<std::unique_ptr<hid::InputDriver>>
+GameVaultXeniaApp::CreateInputDrivers(ui::Window* window) {
+  std::vector<std::unique_ptr<hid::InputDriver>> drivers;
+  Factory<hid::InputDriver, ui::Window*, size_t> factory;
+  factory.Add("xinput", xe::hid::xinput::Create);
+  for (auto& driver :
+       factory.CreateAll(cvars::hid, window, kZOrderHidInput)) {
+    if (XSUCCEEDED(driver->Setup())) {
+      drivers.emplace_back(std::move(driver));
+    }
+  }
+  return drivers;
+}
+
+bool GameVaultXeniaApp::OnInitialize() {
+  Profiler::Initialize();
+  Profiler::ThreadEnter("Main");
+
+  // The app's LocalState (filesystem_win.cc: GetUserFolder on the Xbox).
+  std::filesystem::path storage_root = cvars::storage_root;
+  if (storage_root.empty()) {
+    storage_root = xe::filesystem::GetUserFolder();
+  }
+  storage_root = std::filesystem::absolute(storage_root);
+  config::SetupConfig(storage_root);
+  XELOGI("Storage root: {}", storage_root);
+
+  std::filesystem::path content_root = cvars::content_root;
+  if (content_root.empty()) {
+    content_root = storage_root / "content";
+  } else if (!content_root.is_absolute()) {
+    content_root = storage_root / content_root;
+  }
+  XELOGI("Content root: {}", content_root);
+  // Game Vault: saves come back after a reinstall, and are copied out while
+  // Xenia runs
+  UWP::SavesAtStart(content_root);
+
+  std::filesystem::path cache_root = cvars::cache_root;
+  if (cache_root.empty()) {
+    cache_root = storage_root / "cache_host";
+  } else if (!cache_root.is_absolute()) {
+    cache_root = storage_root / cache_root;
+  }
+  XELOGI("Host cache root: {}", cache_root);
+  XELOGI("Game Vault: Xenia Edge build {}", UWP::GetPackageVersion());
+
+  emulator_ =
+      std::make_unique<Emulator>("", storage_root, content_root, cache_root);
+
+  window_ = ui::Window::Create(app_context(), "Xenia", 1920, 1080);
+  if (!window_ || !window_->Open()) {
+    XELOGE("Failed to open the window");
+    return false;
+  }
+  UWP::RegisterXeniaWindow(window_.get());
+  imgui_drawer_ =
+      std::make_unique<ui::ImGuiDrawer>(window_.get(), kZOrderImGui);
+
+  emulator_thread_ = std::thread(&GameVaultXeniaApp::EmulatorThread, this);
+  return true;
+}
+
+void GameVaultXeniaApp::SetupPresenter() {
+  auto* graphics = emulator_ ? emulator_->graphics_system() : nullptr;
+  ui::Presenter* presenter = graphics ? graphics->presenter() : nullptr;
+  if (presenter && presenter_painting_ == presenter) {
+    return;
+  }
+  ShutdownPresenter();
+  if (!presenter) {
+    return;
+  }
+  window_->SetPresenter(presenter);
+  presenter_painting_ = presenter;
+  immediate_drawer_ = graphics->provider()->CreateImmediateDrawer();
+  if (immediate_drawer_) {
+    immediate_drawer_->SetPresenter(presenter);
+    imgui_drawer_->SetPresenterAndImmediateDrawer(presenter,
+                                                  immediate_drawer_.get());
+  }
+}
+
+void GameVaultXeniaApp::ShutdownPresenter() {
+  imgui_drawer_->SetPresenterAndImmediateDrawer(nullptr, nullptr);
+  immediate_drawer_.reset();
+  if (window_) {
+    window_->SetPresenter(nullptr);
+  }
+  presenter_painting_ = nullptr;
+}
+
+void GameVaultXeniaApp::StartTitle(const std::filesystem::path& path) {
+  // The game Game Vault shared or a network game is there without a look at
+  // the drive (a network game's stand-in path is on no drive at all).
+  std::error_code ec;
+  if (path.empty() || !(xe::filesystem::IsGameVaultFile(path) ||
+                        std::filesystem::exists(path, ec))) {
+    XELOGE("Game Vault: no game at {} (network game here: {}, shared or "
+           "network file: {})",
+           path, xe::filesystem::GetNetFile(path) != nullptr,
+           xe::filesystem::IsGameVaultFile(path));
+    app_context().CallInUIThread([this, path]() {
+      ui::ImGuiDialog::ShowMessageBox(
+          imgui_drawer_.get(), "Game not found",
+          fmt::format("Xenia could not open {}", xe::path_to_utf8(path)));
+    });
+    return;
+  }
+  if (auto xam = emulator_->kernel_state()
+                      ->GetKernelModule<kernel::xam::XamModule>("xam.xex")) {
+    xam->loader_data().host_path = xe::path_to_utf8(path);
+  }
+  XELOGI("Game Vault: starting {}", path);
+  const X_STATUS result = emulator_->LaunchPath(path);
+  if (XFAILED(result)) {
+    XELOGE("Game Vault: starting {} failed: {:08X}", path, result);
+  }
+}
+
+void GameVaultXeniaApp::EmulatorThread() {
+  xe::threading::set_name("Emulator");
+  Profiler::ThreadEnter("Emulator");
+
+  X_STATUS result =
+      emulator_->Setup(window_.get(), imgui_drawer_.get(), true,
+                       CreateAudioSystem, CreateGraphicsSystem,
+                       CreateInputDrivers);
+  if (XSUCCEEDED(result)) {
+    result = emulator_->SetupSubsystems();
+  }
+  if (XFAILED(result)) {
+    XELOGE("Failed to set up the emulator: {:08X}", result);
+    app_context().RequestDeferredQuit();
+    return;
+  }
+
+  // A relaunch makes a new graphics system: its frames go to the window again.
+  emulator_->on_launch.AddListener([this](auto, const auto&) {
+    app_context().CallInUIThread([this]() { SetupPresenter(); });
+  });
+  emulator_->on_before_shutdown.AddListener([this]() {
+    app_context().CallInUIThreadSynchronous([this]() { ShutdownPresenter(); });
+  });
+  // The game quit to the dashboard: back to Game Vault.
+  emulator_->set_on_exit_to_dashboard([this]() {
+    app_context().CallInUIThread([]() { UWP::RequestQuit(); });
+    return false;
+  });
+
+  app_context().CallInUIThreadSynchronous([this]() {
+    SetupPresenter();
+    UWP::RegisterInputSystem(emulator_->input_system());
+    UWP::SetCompanionTick([this]() { CompanionTick(); });
+    // View + Menu held: back to Game Vault.
+    UWP::SetHostGuideAction([this]() {
+      UWP::ReturnToFrontend(imgui_drawer_.get());
+    });
+  });
+  emulator_ready_ = true;
+
+  if (!cvars::target.empty()) {
+    UWP::ConsumeGamePath();
+    StartTitle(cvars::target);
+  } else if (UWP::HasGamePath()) {
+    StartTitle(std::filesystem::u8path(UWP::ConsumeGamePath()));
+  }
+
+  emulator_->WaitUntilExit();
+}
+
+void GameVaultXeniaApp::CompanionTick() {
+  if (!emulator_ready_ || switching_ || !UWP::HasGamePath()) {
+    return;
+  }
+  const auto path = std::filesystem::u8path(UWP::ConsumeGamePath());
+  if (!emulator_->is_title_open()) {
+    switching_ = true;
+    std::thread([this, path]() {
+      StartTitle(path);
+      switching_ = false;
+    }).detach();
+    return;
+  }
+  // Game Vault: the player opened Game Vault from the guide while a game ran
+  // here and picked another game. Edge restarts the emulator in this process
+  // with the new one (on its own thread, as Edge's front end does).
+  XELOGI("Game Vault: another game was sent while a game runs: {}", path);
+  switching_ = true;
+  std::thread([this, path]() {
+    emulator_->RelaunchTitle(xe::path_to_utf8(path), "", 0, {}, false);
+    switching_ = false;
+  }).detach();
+}
+
+void GameVaultXeniaApp::OnDestroy() {
+  UWP::SetCompanionTick({});
+  UWP::SetHostGuideAction({});
+  UWP::RegisterInputSystem(nullptr);
+  config::SaveConfig();
+  XELOGI("Game Vault: Xenia closing");
+  xe::FlushLog();
+  // Like Edge and Canary: no orderly teardown of a running title.
+  std::quick_exit(EXIT_SUCCESS);
+}
+
+}  // namespace app
+}  // namespace xe
+
+XE_DEFINE_WINDOWED_APP(xenia, xe::app::GameVaultXeniaApp::Create);

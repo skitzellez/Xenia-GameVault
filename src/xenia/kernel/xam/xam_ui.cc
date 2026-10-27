@@ -11,8 +11,11 @@
 
 #include <algorithm>
 
+#if !XE_PLATFORM_WINRT  // (not used here; the desktop window header pulls in wxWidgets)
 #include "xenia/app/emulator_window.h"
+#endif
 #include "xenia/base/png_utils.h"
+#include "xenia/emulator.h"
 #include "xenia/base/system.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/guest_scheduler.h"

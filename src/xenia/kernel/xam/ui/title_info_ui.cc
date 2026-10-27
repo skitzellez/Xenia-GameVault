@@ -12,7 +12,9 @@
 #include "xenia/emulator.h"
 #include "xenia/kernel/xam/ui/game_achievements_ui.h"
 
+#if !XE_PLATFORM_WINRT  // (not used here; the desktop window header pulls in wxWidgets)
 #include "xenia/app/emulator_window.h"
+#endif
 #include "xenia/base/system.h"
 
 namespace xe {

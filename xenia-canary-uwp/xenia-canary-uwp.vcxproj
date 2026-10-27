@@ -1,0 +1,324 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="..\build\packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.props" Condition="Exists('..\build\packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.props')" />
+  <PropertyGroup Label="Globals">
+    <CppWinRTOptimized>true</CppWinRTOptimized>
+    <CppWinRTRootNamespaceAutoMerge>true</CppWinRTRootNamespaceAutoMerge>
+    <MinimalCoreWin>true</MinimalCoreWin>
+    <ProjectGuid>{b235bec7-29b5-4e46-88db-0139cadb61cc}</ProjectGuid>
+    <ProjectName>xenia-canary-uwp</ProjectName>
+    <RootNamespace>xenia_canary_uwp</RootNamespace>
+    <DefaultLanguage>en-US</DefaultLanguage>
+    <MinimumVisualStudioVersion>15.0</MinimumVisualStudioVersion>
+    <AppContainerApplication>true</AppContainerApplication>
+    <ApplicationType>Windows Store</ApplicationType>
+    <ApplicationTypeRevision>10.0</ApplicationTypeRevision>
+    <WindowsTargetPlatformVersion Condition=" '$(WindowsTargetPlatformVersion)' == '' ">10.0.22621.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformMinVersion>10.0.17134.0</WindowsTargetPlatformMinVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|ARM">
+      <Configuration>Debug</Configuration>
+      <Platform>ARM</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|ARM64">
+      <Configuration>Debug</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM">
+      <Configuration>Release</Configuration>
+      <Platform>ARM</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM64">
+      <Configuration>Release</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset Condition="'$(VisualStudioVersion)' == '16.0'">v142</PlatformToolset>
+    <PlatformToolset Condition="'$(VisualStudioVersion)' == '15.0'">v141</PlatformToolset>
+    <PlatformToolset Condition="'$(VisualStudioVersion)' == '14.0'">v140</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <LinkIncremental>true</LinkIncremental>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Release'" Label="Configuration">
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="PropertySheet.props" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros">
+    <AppxPackageSigningEnabled>True</AppxPackageSigningEnabled>
+    <GenerateAppInstallerFile>False</GenerateAppInstallerFile>
+    <AppxPackageSigningTimestampDigestAlgorithm>SHA256</AppxPackageSigningTimestampDigestAlgorithm>
+    <AppxAutoIncrementPackageRevision>False</AppxAutoIncrementPackageRevision>
+    <GenerateTestArtifacts>True</GenerateTestArtifacts>
+    <AppxBundle>Always</AppxBundle>
+    <AppxBundlePlatforms>x64</AppxBundlePlatforms>
+    <HoursBetweenUpdateChecks>0</HoursBetweenUpdateChecks>
+    <PackageCertificateKeyFile>XeniaDevCert.pfx</PackageCertificateKeyFile>
+    <PackageCertificatePassword>xenia123</PackageCertificatePassword>
+    <PackageCertificateThumbprint>EDA6F6AC2865A64DFFF7E29AC79FDBED3A1C9CE7</PackageCertificateThumbprint>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <TargetName>xeniacanary</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
+      <WarningLevel>Level4</WarningLevel>
+      <AdditionalOptions>%(AdditionalOptions) /bigobj /utf-8</AdditionalOptions>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;WINRT_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..;..\src;..\third_party;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <GenerateWindowsMetadata>false</GenerateWindowsMetadata>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
+    <ClCompile>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">AdvancedVectorExtensions</EnableEnhancedInstructionSet>
+      <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">AdvancedVectorExtensions</EnableEnhancedInstructionSet>
+      <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">AdvancedVectorExtensions</EnableEnhancedInstructionSet>
+      <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">AdvancedVectorExtensions</EnableEnhancedInstructionSet>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
+    <ClCompile>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)..\src;$(SolutionDir)..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Release|x64'">stdcpp20</LanguageStandard>
+      <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">stdcpp20</LanguageStandard>
+      <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">AdvancedVectorExtensions</EnableEnhancedInstructionSet>
+      <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">AdvancedVectorExtensions</EnableEnhancedInstructionSet>
+      <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">AdvancedVectorExtensions</EnableEnhancedInstructionSet>
+      <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Release|x64'">AdvancedVectorExtensions</EnableEnhancedInstructionSet>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalDependencies Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(CoreLibraryDependencies);%(AdditionalDependencies)</AdditionalDependencies>
+      <IgnoreSpecificDefaultLibraries Condition="'$(Configuration)|$(Platform)'=='Release|x64'">libcmt.lib</IgnoreSpecificDefaultLibraries>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ProjectReference Include="../build/xenia-apu.vcxproj">
+      <Project>{F4DF01F0-50E4-4C67-8F54-61660696CC79}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-apu-nop.vcxproj">
+      <Project>{F37DBF3A-D200-4CC0-83F0-F801B1BDD862}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-base.vcxproj">
+      <Project>{AEADAF22-2B20-4941-B05F-A802D5679C11}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-core.vcxproj">
+      <Project>{970F7892-F19A-4BF5-8795-478C51757BEC}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-cpu.vcxproj">
+      <Project>{0109C91E-5A04-41AB-9168-0D5187D11298}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-gpu.vcxproj">
+      <Project>{0E8D3370-E4B1-4B05-A2E8-39EBBCDF9B17}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-gpu-null.vcxproj">
+      <Project>{42FCA0B3-4C20-4532-95E9-07D297013BE4}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-hid.vcxproj">
+      <Project>{88A4EF38-C550-430F-8C22-8DED4E4EF601}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-hid-nop.vcxproj">
+      <Project>{887B6F26-B0C1-43C1-A013-A37E7B9634FD}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-kernel.vcxproj">
+      <Project>{AE185C4A-1C4F-4503-9892-328E549E871A}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-patcher.vcxproj">
+      <Project>{E1C75F76-9E7B-48F6-B17E-DBD20F7A1592}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-ui.vcxproj">
+      <Project>{D0407C25-B0EA-40DC-846C-82C46FBD9FA2}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/aes_128.vcxproj">
+      <Project>{B50458BF-DD83-4C1A-8CAD-61F5FBBFD720}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/capstone.vcxproj">
+      <Project>{B3A89F7E-BB02-4945-AE75-219CAED6AFA2}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/fmt.vcxproj">
+      <Project>{B9FF4B2C-B438-42A9-971E-E0C19A711A13}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/dxbc.vcxproj">
+      <Project>{C96688CA-51CA-406E-AEEF-068734A67ABE}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/discord-rpc.vcxproj">
+      <Project>{012F6131-EFC0-4ABD-852D-A33640732D4C}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/glslang-spirv.vcxproj">
+      <Project>{1CC8F45E-91E2-4DAF-A55E-666BF8B5E6B2}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/imgui.vcxproj">
+      <Project>{ED9271C4-B0A1-42EF-8403-067B11BF49D0}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/libavcodec.vcxproj">
+      <Project>{9DB2830C-D326-48ED-B4CC-08EA6A1B7272}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/libavutil.vcxproj">
+      <Project>{19216035-F781-4F15-B009-213B7E3A18AC}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/mspack.vcxproj">
+      <Project>{0881692A-75A1-4E7B-87D8-BB9108CEDEA4}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/snappy.vcxproj">
+      <Project>{BB143D61-3FD4-44C2-8B7E-04CC538BA2C7}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xxhash.vcxproj">
+      <Project>{40D4CE21-5448-4399-9F98-589B7E1C23B1}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-cpu-backend-x64.vcxproj">
+      <Project>{7D8D5DCE-4696-4197-952A-09506F725AFE}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-debug-ui.vcxproj">
+      <Project>{9193A274-F4C2-4746-BD85-93FCFC5C3E38}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-apu-xaudio2.vcxproj">
+      <Project>{7A54A497-24D9-4C0E-A013-8507A04231F9}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-gpu-d3d12.vcxproj">
+      <Project>{C057EAE4-E7BB-4113-9A69-1FE07B735C49}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-hid-xinput.vcxproj">
+      <Project>{3D49E251-07A7-40AE-9BC6-AAE984C85568}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+    <ProjectReference Include="../build/xenia-ui-d3d12.vcxproj">
+      <Project>{F93DC1A8-600F-43E7-B0FC-AE3EEFBE836B}</Project>
+      <Properties>Configuration=Release Windows;Platform=x64</Properties>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\src\xenia\app\emulator_window.h" />
+    <ClInclude Include="pch.h" />
+    <ClInclude Include="surface_uwp.h" />
+    <ClInclude Include="UWPUtil.h" />
+    <ClInclude Include="windowed_app_context_uwp.h" />
+    <ClInclude Include="window_uwp.h" />
+    <ClInclude Include="WinRTKeyboard.h" />
+    <ClInclude Include="XeniaUWP.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <AppxManifest Include="Package.appxmanifest">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="Assets\A.png" />
+    <Image Include="Assets\B.png" />
+    <Image Include="Assets\X.png" />
+    <Image Include="Assets\Y.png" />
+    <Image Include="Assets\LockScreenLogo.scale-200.png" />
+    <Image Include="Assets\SplashScreen.scale-200.png" />
+    <Image Include="Assets\Square150x150Logo.scale-200.png" />
+    <Image Include="Assets\Square44x44Logo.scale-200.png" />
+    <Image Include="Assets\Square44x44Logo.targetsize-24_altform-unplated.png" />
+    <Image Include="Assets\StoreLogo.png" />
+    <Image Include="Assets\Wide310x150Logo.scale-200.png" />
+    <Image Include="Assets\interface_overlays\**\*.png" />
+    <Image Include="Assets\backgrounds\**\*.png" />
+    <Image Include="Assets\guide_images\**\*.png" />
+    <Image Include="Assets\interface_logos\**\*.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\xenia\app\emulator_window.cc" />
+    <ClCompile Include="..\src\xenia\app\profile_dialogs.cc" />
+    <ClCompile Include="..\src\xenia\app\xenia_main.cc" />
+    <ClCompile Include="App.cpp" />
+    <ClCompile Include="pch.cpp">
+      <PrecompiledHeader>Create</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="surface_uwp.cpp" />
+    <ClCompile Include="UWPUtil.cpp" />
+    <ClCompile Include="windowed_app_context_uwp.cc" />
+    <ClCompile Include="window_uwp.cc" />
+    <ClCompile Include="WinRTKeyboard.cpp" />
+    <ClCompile Include="XeniaUWP.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
+    <None Include="PropertySheet.props" />
+    <Text Include="readme.txt">
+      <DeploymentContent>false</DeploymentContent>
+    </Text>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="..\build\packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.targets" Condition="Exists('..\build\packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.targets')" />
+  </ImportGroup>
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
+    </PropertyGroup>
+    <Error Condition="!Exists('..\build\packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.props')" Text="$([System.String]::Format('$(ErrorText)', '..\build\packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.props'))" />
+    <Error Condition="!Exists('..\build\packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\build\packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.targets'))" />
+  </Target>
+</Project>

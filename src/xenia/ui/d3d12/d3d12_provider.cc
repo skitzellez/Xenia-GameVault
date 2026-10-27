@@ -269,7 +269,9 @@ bool D3D12Provider::Initialize() {
   // unsigned, so offer to download it if it's missing.
   auto d3d12_dir = xe::filesystem::GetExecutablePath().parent_path() / "D3D12";
   {
+#if !XE_PLATFORM_WINRT
     EnsureShaderCompilerRuntime(d3d12_dir);
+#endif  // (the Xbox app ships dxil.dll in its package, loaded by name below)
 
     // Load by full path, since the signer's own plain-name load skips D3D12/.
     auto dxil_path_utf16 = xe::path_to_utf16(d3d12_dir / "dxil.dll");
@@ -292,6 +294,9 @@ bool D3D12Provider::Initialize() {
 
   // The D3D12SDKVersion exports make d3d12.dll load D3D12Core.dll at the first
   // device creation, which fails outright if it's missing, so fetch it first.
+  // Not on the Xbox: apps there use the console's own Direct3D 12 (no Agility
+  // SDK), and the app exports no D3D12SDKVersion.
+#if !XE_PLATFORM_WINRT
   std::error_code ec;
   if (!std::filesystem::exists(d3d12_dir / "D3D12Core.dll", ec)) {
     // Returns only on decline or failure. On success it restarts.
@@ -303,6 +308,7 @@ bool D3D12Provider::Initialize() {
       return false;
     }
   }
+#endif  // !XE_PLATFORM_WINRT
 
   // Configure the DXGI debug info queue.
   if (cvars::d3d12_break_on_error || cvars::d3d12_break_on_warning) {
@@ -355,7 +361,9 @@ bool D3D12Provider::Initialize() {
     } else {
       // The debug layer (D3D12SDKLayers.dll) isn't redistributable on its own.
       // Offer to fetch it from the Agility SDK and restart.
+#if !XE_PLATFORM_WINRT
       EnsureDebugLayer(d3d12_dir);
+#endif
       XELOGW("Failed to enable the Direct3D 12 debug layer (HRESULT 0x{:08X})",
              uint32_t(debug_interface_hr));
       debug = false;
@@ -463,6 +471,13 @@ bool D3D12Provider::Initialize() {
         SUCCEEDED(device->CheckFeatureSupport(
             D3D12_FEATURE_SHADER_MODEL, &shader_model, sizeof(shader_model))) &&
         shader_model.HighestShaderModel >= D3D_SHADER_MODEL_6_6;
+#if XE_PLATFORM_WINRT
+    // Game Vault test: the Xbox app runtime may report less than 6.6; see how
+    // far Edge's DXIL path gets with what it has.
+    XELOGI("Game Vault: Direct3D 12 highest shader model {:X}",
+           uint32_t(shader_model.HighestShaderModel));
+    shader_model_6_6_supported = true;
+#endif
     if (!shader_model_6_6_supported) {
       device->Release();
       dxgi_factory->Release();

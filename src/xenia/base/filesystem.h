@@ -72,6 +72,54 @@ std::string ReadAllText(const std::filesystem::path& path);
 // This behaves like fopen and the returned handle can be used with stdio.
 FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode);
 
+// Game Vault (Xenia for Game Vault): a game file the launcher shared with us (its token came with the launch
+// link), already open for reading. On an Xbox the console's file broker may never answer for a USB drive, so
+// the game is read through this handle instead of being opened by path. Reads only.
+void SetSharedFile(const std::filesystem::path& path, void* handle);
+// A new read-only handle to that file when path names it, else nullptr. The caller closes it.
+void* DuplicateSharedFile(const std::filesystem::path& path);
+// True when path names the shared game file or a network game (it then needs no check on the drive).
+bool IsGameVaultFile(const std::filesystem::path& path);
+// The size of the shared file when path names it; otherwise std::filesystem::file_size(path).
+uint64_t FileSizeShared(const std::filesystem::path& path, std::error_code& error);
+
+// Game Vault (Xenia for Game Vault 1.1.7.112 on): a game played straight from a PC's shared folder or a NAS,
+// with no copy on the console first. The app reads it over the network itself (apps on the Xbox may not open
+// \\PC\share paths) and registers the reader under a stand-in path; FileSizeShared and FileHandle::OpenExisting
+// read the game through it. Reads only.
+class NetFile {
+ public:
+  virtual ~NetFile() = default;
+  virtual uint64_t size() const = 0;
+  // the whole range or false
+  virtual bool Read(uint64_t offset, void* buffer, size_t length) = 0;
+};
+void SetNetFile(const std::filesystem::path& path, std::shared_ptr<NetFile> file);
+// the reader when path names the network game (or a file in the network folder), else nullptr
+std::shared_ptr<NetFile> GetNetFile(const std::filesystem::path& path);
+
+// Game Vault (Xenia for Game Vault 1.1.8.61 on): a game that is a folder of files on the network (an Xbox 360
+// Games on Demand game, an unpacked game with default.xex). Every path under its stand-in root is answered by
+// this reader: GetInfo, ListFiles, GetNetFile (and through it FileHandle::OpenExisting, FileSizeShared,
+// MappedMemory::Open for small files) and PathExistsAny. Paths in it are '\' separated, "" = the root. Reads only.
+struct NetFolderEntry {
+  std::string name;
+  bool is_dir = false;
+  uint64_t size = 0;
+};
+class NetFolder {
+ public:
+  virtual ~NetFolder() = default;
+  virtual bool Stat(const std::string& rel, bool* is_dir, uint64_t* size) = 0;
+  virtual bool List(const std::string& rel, std::vector<NetFolderEntry>& out) = 0;
+  virtual std::shared_ptr<NetFile> OpenFile(const std::string& rel) = 0;
+};
+void SetNetFolder(const std::filesystem::path& root, std::shared_ptr<NetFolder> folder);
+// true when path is in the network folder (its root included)
+bool IsNetFolderPath(const std::filesystem::path& path);
+// a path that is there: in the network folder, or on the console (std::filesystem::exists)
+bool PathExistsAny(const std::filesystem::path& path);
+
 // Wrapper for the 64-bit version of fseek, returns true on success.
 bool Seek(FILE* file, int64_t offset, int origin);
 
@@ -82,6 +130,14 @@ int64_t Tell(FILE* file);
 // clamped. If this returns false, the size of the file and the file pointer are
 // undefined.
 bool TruncateStdioFile(FILE* file, uint64_t length);
+
+// Copy file from source to destination in defined chunks and optional progress
+// tracking.
+bool Copy(const std::filesystem::path& source,
+          const std::filesystem::path& destination, uint64_t& progress,
+          size_t copy_chunk = size_t(5) << 20);
+
+bool SetAttributes(const std::filesystem::path& path, uint64_t attributes);
 
 struct FileAccess {
   // Implies kFileReadData.

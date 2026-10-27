@@ -23,6 +23,11 @@
 // https://sourceforge.net/p/predef/wiki/OperatingSystems/
 // Original link: https://predef.sourceforge.net/preos.html
 
+// The UWP build defines this explicitly; desktop targets retain Win32 APIs.
+#ifndef XE_PLATFORM_WINRT
+#define XE_PLATFORM_WINRT 0
+#endif
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif

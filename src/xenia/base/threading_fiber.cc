@@ -172,7 +172,18 @@ FiberStack AllocFiberStack(size_t size) {
   // First-position handler, so guard faults grow the stack before any other
   // handler sees them.
   std::call_once(veh_install_once_, []() {
+#if XE_PLATFORM_WINRT
+    // The app SDK has no AddVectoredExceptionHandler; ntdll's is the same call.
+    using AddVectoredHandlerFn =
+        PVOID(NTAPI*)(ULONG, LONG(CALLBACK*)(PEXCEPTION_POINTERS));
+    auto add = reinterpret_cast<AddVectoredHandlerFn>(GetProcAddress(
+        GetModuleHandleW(L"ntdll.dll"), "RtlAddVectoredExceptionHandler"));
+    if (add) {
+      add(1, FiberStackExceptionHandler);
+    }
+#else
     AddVectoredExceptionHandler(1, FiberStackExceptionHandler);
+#endif
   });
   s.base = VirtualAlloc(nullptr, s.total, MEM_RESERVE, PAGE_READWRITE);
   if (!s.base) {

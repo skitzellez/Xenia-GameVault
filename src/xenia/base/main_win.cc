@@ -82,6 +82,13 @@ bool ParseWin32LaunchArguments(
     bool transparent_options, const std::string_view positional_usage,
     const std::vector<std::string>& positional_options,
     std::vector<std::string>* args_out) {
+#if XE_PLATFORM_WINRT
+  // The UWP frontend receives arguments through its activation event.
+  if (args_out) {
+    args_out->clear();
+  }
+  return true;
+#else
   auto command_line = GetCommandLineW();
 
   int wargc;
@@ -118,6 +125,7 @@ bool ParseWin32LaunchArguments(
   }
 
   return true;
+#endif
 }
 
 int InitializeWin32App(const std::string_view app_name) {

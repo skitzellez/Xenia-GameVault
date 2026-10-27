@@ -36,6 +36,8 @@ class Surface {
     kTypeIndex_MacNSView,
     // Windows.
     kTypeIndex_Win32Hwnd,
+    // Windows UWP (Xbox): the app's CoreWindow.
+    kTypeIndex_UWPCore,
   };
   using TypeFlags = uint32_t;
   enum : TypeFlags {
@@ -45,6 +47,7 @@ class Surface {
     kTypeFlag_XcbWindow = TypeFlags(1) << kTypeIndex_XcbWindow,
     kTypeFlag_MacNSView = TypeFlags(1) << kTypeIndex_MacNSView,
     kTypeFlag_Win32Hwnd = TypeFlags(1) << kTypeIndex_Win32Hwnd,
+    kTypeFlag_UWPCore = TypeFlags(1) << kTypeIndex_UWPCore,
   };
 
   Surface(const Surface& surface) = delete;
