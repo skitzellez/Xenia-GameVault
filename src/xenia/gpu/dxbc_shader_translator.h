@@ -723,6 +723,11 @@ class DxbcShaderTranslator : public ShaderTranslator {
 
   // Whether to use switch-case rather than if (pc >= label) for control flow.
   bool UseSwitchForControlFlow() const;
+  // Game Vault: whether the shader's control flow only ever jumps forward (no
+  // loops, calls or backward jumps), so it can run as one pass through
+  // if (pc <= label) blocks with no main-loop continue (see
+  // dxbc_forward_jumps_without_loop).
+  static bool IsForwardOnlyControlFlow(const Shader& shader);
 
   // Allocates new consecutive r# registers for internal use and returns the
   // index of the first.
@@ -1253,6 +1258,9 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // Maximum number of backward jumps before the shader is ended, 0 if not
   // guarded.
   uint32_t control_flow_guard_max_jumps_ = 0;
+  // Game Vault: the current shader jumps only forward and is translated
+  // without looping back to the main loop's start (IsForwardOnlyControlFlow).
+  bool forward_only_control_flow_ = false;
 
   // The bool constant number containing the condition for the currently
   // processed exec (or the last - unless a label has reset this), or

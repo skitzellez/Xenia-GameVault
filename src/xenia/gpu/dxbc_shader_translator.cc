@@ -38,6 +38,15 @@ DEFINE_uint32(dxbc_control_flow_guard_max_jumps, XE_PLATFORM_WINRT ? 65536 : 0,
               "GPU.Debug");
 // Configs saved with the old default of 16384 get the new default.
 UPDATE_from_uint32(dxbc_control_flow_guard_max_jumps, 2026, 9, 18, 23, 16384);
+// Game Vault: GTA IV's shaders that only jump forward crashed the Xbox's
+// shader compiler (if) or hung its GPU (switch) at the start of gameplay, both
+// from the main loop that a jump continues.
+DEFINE_bool(dxbc_forward_jumps_without_loop, true,
+            "Translate shaders whose control flow only jumps forward (no "
+            "loops, calls or backward jumps) as one pass through if blocks, "
+            "without continuing the main loop for jumps. Avoids driver "
+            "compiler crashes and GPU hangs with the main loop.",
+            "GPU.Debug");
 DEFINE_bool(dxbc_source_map, false,
             "Disassemble Xenos instructions as comments in the resulting DXBC "
             "for debugging.",
@@ -198,8 +207,34 @@ uint32_t DxbcShaderTranslator::GetModificationRegisterCount() const {
 
 bool DxbcShaderTranslator::UseSwitchForControlFlow() const {
   // Xenia crashes on Intel HD Graphics 4000 with switch.
-  return cvars::dxbc_switch &&
+  return !forward_only_control_flow_ && cvars::dxbc_switch &&
          vendor_id_ != ui::GraphicsProvider::GpuVendorID::kIntel;
+}
+
+bool DxbcShaderTranslator::IsForwardOnlyControlFlow(const Shader& shader) {
+  const std::vector<uint32_t>& ucode = shader.ucode_data();
+  uint32_t pair_bound = shader.cf_pair_index_bound();
+  for (uint32_t i = 0; i < pair_bound && (i + 1) * 3 <= ucode.size(); ++i) {
+    ucode::ControlFlowInstruction cf_ab[2];
+    ucode::UnpackControlFlowInstructions(ucode.data() + i * 3, cf_ab);
+    for (uint32_t j = 0; j < 2; ++j) {
+      switch (cf_ab[j].opcode()) {
+        case ucode::ControlFlowOpcode::kLoopStart:
+        case ucode::ControlFlowOpcode::kLoopEnd:
+        case ucode::ControlFlowOpcode::kCondCall:
+        case ucode::ControlFlowOpcode::kReturn:
+          return false;
+        case ucode::ControlFlowOpcode::kCondJmp:
+          if (cf_ab[j].cond_jmp.address() <= i * 2 + j) {
+            return false;
+          }
+          break;
+        default:
+          break;
+      }
+    }
+  }
+  return true;
 }
 
 uint32_t DxbcShaderTranslator::PushSystemTemp(uint32_t zero_mask,
@@ -867,6 +902,8 @@ void DxbcShaderTranslator::StartPixelShader() {
 }
 
 void DxbcShaderTranslator::StartTranslation() {
+  forward_only_control_flow_ = cvars::dxbc_forward_jumps_without_loop &&
+                               IsForwardOnlyControlFlow(current_shader());
   // Set up the input and output registers.
   Modification shader_modification = GetDxbcShaderModification();
   uint32_t interpolator_register_mask = GetModificationInterpolatorMask();
@@ -1824,6 +1861,12 @@ void DxbcShaderTranslator::JumpToLabel(uint32_t address,
                                        bool counts_towards_guard) {
   a_.OpMov(dxbc::Dest::R(system_temp_ps_pc_p0_a0_, 0b0010),
            dxbc::Src::LU(address));
+  if (forward_only_control_flow_) {
+    // The blocks up to the target are skipped by their if (pc <= label)
+    // checks in this same pass (ProcessJumpInstruction starts one after the
+    // jump), no going back to the start of the main loop.
+    return;
+  }
   if (counts_towards_guard && control_flow_guard_max_jumps_) {
     // Count the jump, and break out of the main loop (through the switch in
     // switch mode) once the limit is reached.
@@ -2062,6 +2105,10 @@ void DxbcShaderTranslator::ProcessJumpInstruction(
 
   // Only backward jumps count towards the control flow guard.
   JumpToLabel(instr.target_address, instr.target_address <= instr.dword_index);
+  if (forward_only_control_flow_) {
+    // What follows the jump runs only if the jump wasn't taken.
+    ProcessLabel(instr.dword_index + 1);
+  }
 }
 
 void DxbcShaderTranslator::ProcessAllocInstruction(
