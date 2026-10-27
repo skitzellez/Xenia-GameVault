@@ -9,6 +9,9 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/platform_win.h"
 #include "xenia/emulator.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xam/profile_manager.h"
+#include "xenia/kernel/xam/xam_state.h"
 
 #include <algorithm>
 #include <atomic>
@@ -107,6 +110,29 @@ bool HasGamePath() {
 std::string ConsumeGamePath() {
   std::lock_guard lock(m_game_path_mutex);
   return std::exchange(m_game_path, {});
+}
+
+bool EnsureProfile(xe::Emulator* emu) {
+  if (!emu || !emu->kernel_state() || !emu->kernel_state()->xam_state()) {
+    return false;
+  }
+  auto* profiles = emu->kernel_state()->xam_state()->profile_manager();
+  if (!profiles) {
+    return false;
+  }
+  if (profiles->GetAccountCount() > 0) {
+    // a profile from before, but nobody signed in (no logged_profile_slot_0_xuid in the config): games then say
+    // "You are not signed in" and cannot save (GTA IV). The first one is signed in.
+    if (!profiles->IsAnyProfileSignedIn()) {
+      uint64_t xuid = profiles->GetAccounts()->begin()->first;
+      profiles->Login(xuid, 0);
+      XELOGI("Game Vault: signed in profile {:016X}", xuid);
+    }
+    return true;
+  }
+  bool made = profiles->CreateProfile("Player", true, false);
+  XELOGI("Game Vault: no profile yet, made \"Player\": {}", made ? "yes" : "no");
+  return made;
 }
 
 

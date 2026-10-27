@@ -558,6 +558,9 @@ void GameVaultXeniaApp::StartTitle(const std::filesystem::path& path) {
   });
   XELOGI("Game Vault: starting {} (frame rate shown: {})", path,
          UWP::GetShowFps());
+  // signed in, as on a real console (games otherwise stop at "You are not
+  // signed in" and can't save)
+  UWP::EnsureProfile(emulator_.get());
   const X_STATUS result = emulator_->LaunchPath(path);
   if (XFAILED(result)) {
     XELOGE("Game Vault: starting {} failed: {:08X}", path, result);
