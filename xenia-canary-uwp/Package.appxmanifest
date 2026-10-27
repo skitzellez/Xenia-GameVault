@@ -3,7 +3,7 @@
   <Identity
     Name="GamerDad.XeniaForGameVault"
     Publisher="CN=GamerDad"
-    Version="1.1.8.94" />
+    Version="1.1.8.97" />
   <mp:PhoneIdentity PhoneProductId="b605b27a-eb39-440e-ac90-bbfb71bbbed4" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
   <Properties>
     <DisplayName>Game Vault · Xbox 360 (Xenia)</DisplayName>

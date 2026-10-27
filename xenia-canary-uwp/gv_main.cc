@@ -19,6 +19,7 @@
 #include <set>
 #include <vector>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -96,10 +97,34 @@ DEFINE_transient_path(target, "",
 namespace xe {
 namespace gpu {
 namespace d3d12 {
-void GameVaultTakeSubmitStats(uint64_t out[7]);
+void GameVaultTakeSubmitStats(uint64_t out[9]);
+void GameVaultTakeGpuTiming(double secs, std::vector<std::string>* lines);
 }  // namespace d3d12
 }  // namespace gpu
 namespace app {
+
+// The frame rate and profile lines also go to gv_live.log in Xenia's own
+// LocalState, which Device Portal can read while the game runs (the main log
+// is in the shared folder, which only Game Vault can copy out). New each run,
+// 2 MB at most.
+static void GvLiveLine(const std::string& line) {
+  static std::mutex mutex;
+  static bool first = true;
+  std::lock_guard<std::mutex> lock(mutex);
+  const auto path =
+      std::filesystem::path(xe::to_path(UWP::GetLocalState())) / "gv_live.log";
+  std::error_code ec;
+  const bool fresh =
+      first || std::filesystem::file_size(path, ec) > (2u << 20);
+  first = false;
+  std::ofstream(path, fresh ? std::ios::trunc : std::ios::app) << line << '\n';
+}
+#define GV_LIVE(...)                                      \
+  do {                                                    \
+    const std::string gv_live = fmt::format(__VA_ARGS__); \
+    XELOGI("{}", gv_live);                                \
+    GvLiveLine(gv_live);                                  \
+  } while (0)
 
 namespace {
 // Draw order on the window: the emulator's own UI above the game.
@@ -394,7 +419,7 @@ class CpuSampler {
           i < kernel::GuestScheduler::cpu_count() ? fmt::format("CPU {}", i)
                                                   : std::string("GPU thread");
       for (size_t j = 0; j < top.size() && j < 12; ++j) {
-        XELOGI("Game Vault profile: {} {:5.1f}% {}", who,
+        GV_LIVE("Game Vault profile: {} {:5.1f}% {}", who,
                100.0 * top[j].first / samples.size(), top[j].second);
       }
       samples.clear();
@@ -410,7 +435,7 @@ class CpuSampler {
       for (int w = 0; w < 160; ++w) {
         words += fmt::format("{:08X} ", xe::byte_swap(code[w]));
       }
-      XELOGI("Game Vault profile code {:08X}: {}", address, words);
+      GV_LIVE("Game Vault profile code {:08X}: {}", address, words);
     }
     hot_.clear();
   }
@@ -1159,23 +1184,27 @@ void GameVaultXeniaApp::EmulatorThread() {
       double cpu, gpu, memory_mb;
       load.Sample(&cpu, &gpu, &memory_mb);
       if (last && frames >= last) {
-        XELOGI("Game Vault: frame rate {:.1f}, CPU {:.0f}%, GPU {:.0f}%, "
+        GV_LIVE("Game Vault: frame rate {:.1f}, CPU {:.0f}%, GPU {:.0f}%, "
                "memory {:.0f} MB, emulated CPUs {}%",
                double(frames - last) /
                    std::chrono::duration<double>(now - last_time).count(),
                cpu, gpu, memory_mb, load.PerCpu());
-        uint64_t st[7];
+        uint64_t st[9];
         gpu::d3d12::GameVaultTakeSubmitStats(st);
         const double secs =
             std::chrono::duration<double>(now - last_time).count();
         const auto pct = [secs](uint64_t ns) {
           return 100.0 * double(ns) / (secs * 1e9);
         };
-        XELOGI("Game Vault: GPU submits {:.0f}/s; time in replay {:.0f}%, "
-               "close {:.0f}%, execute {:.0f}%, signal {:.0f}%; waits for the "
-               "GPU {:.0f}/s, {:.0f}% of the time",
-               st[0] / secs, pct(st[1]), pct(st[2]), pct(st[3]), pct(st[4]),
-               st[5] / secs, pct(st[6]));
+        GV_LIVE("Game Vault: GPU submits {:.0f}/s; time in replay {:.0f}%, "
+                "close {:.0f}%, execute {:.0f}%, signal {:.0f}%; waits for the "
+                "GPU {:.0f}/s, {:.0f}% of the time; occlusion query waits "
+                "{:.0f}/s, {:.0f}%",
+                st[0] / secs, pct(st[1]), pct(st[2]), pct(st[3]), pct(st[4]),
+                st[5] / secs, pct(st[6]), st[7] / secs, pct(st[8]));
+        std::vector<std::string> gpu_lines;
+        gpu::d3d12::GameVaultTakeGpuTiming(secs, &gpu_lines);
+        for (const std::string& gpu_line : gpu_lines) GV_LIVE("{}", gpu_line);
       }
       last = frames, last_time = now;
     }

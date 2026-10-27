@@ -12,6 +12,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <intrin.h>
+#include <map>
+#include <mutex>
+#include <string>
 #include "xenia/apu/audio_system.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
@@ -61,6 +65,12 @@ DEFINE_bool(d3d12_submit_on_primary_buffer_end, !XE_PLATFORM_WINRT,
             "D3D12");
 UPDATE_from_bool(d3d12_submit_on_primary_buffer_end, 2026, 10, 27, 15, true);
 
+DEFINE_bool(gv_gpu_timing, false,
+            "Game Vault testing: time every draw and copy on the GPU, and log "
+            "every 30 s how busy the GPU was and the shaders that took the "
+            "most GPU time.",
+            "D3D12");
+
 DECLARE_bool(clear_memory_page_state);
 DECLARE_bool(readback_resolve_half_pixel_offset);
 
@@ -78,6 +88,201 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/d3d12_5_1/fxaa_extreme_cs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_downscale_cs.h"
 }  // namespace shaders
+
+// Game Vault testing (gv_gpu_timing): a GPU timestamp before and after every
+// draw and copy, read back once the submission is done, summed per shader pair;
+// and who made the GPU thread wait for the GPU. Logged every 30 s (gv_main.cc).
+namespace gv_timing {
+constexpr uint32_t kSlots = 16;         // submissions in flight
+constexpr uint32_t kMaxPerSlot = 8192;  // draws and copies per submission
+constexpr uint64_t kCopyKey = 0xC0C0C0C0C0C0C0C0ull;
+struct Key {
+  uint64_t vs, ps;
+  bool operator<(const Key& o) const {
+    return vs != o.vs ? vs < o.vs : ps < o.ps;
+  }
+};
+struct Slot {
+  uint64_t submission = 0;
+  uint32_t count = 0;
+  bool pending = false;
+  std::vector<Key> keys;
+};
+Microsoft::WRL::ComPtr<ID3D12QueryHeap> heap;
+Microsoft::WRL::ComPtr<ID3D12Resource> readback;
+std::vector<Slot> slots;
+uint32_t current = 0;
+bool failed = false;
+double ns_per_tick = 0.0;
+std::mutex mutex;  // the sums below (the GPU thread adds, the log thread takes)
+std::map<Key, std::pair<uint64_t, uint64_t>> sums;  // ns, count
+uint64_t busy_ns = 0, draw_ns = 0, copy_ns = 0, untimed = 0;
+std::map<uintptr_t, uint64_t> wait_callers;
+// Resolve read-backs, and those that had to wait for the GPU (no earlier copy
+// of that picture to read yet). Counted always (cheap).
+std::atomic<uint64_t> readbacks{0}, readback_waits{0};
+
+bool Ensure(const ui::d3d12::D3D12Provider& provider) {
+  if (heap) return true;
+  if (failed) return false;
+  failed = true;
+  ID3D12Device* device = provider.GetDevice();
+  D3D12_QUERY_HEAP_DESC desc = {};
+  desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+  desc.Count = kSlots * kMaxPerSlot * 2;
+  if (FAILED(device->CreateQueryHeap(&desc, IID_PPV_ARGS(&heap)))) {
+    XELOGE("Game Vault GPU time: no timestamp query heap");
+    return false;
+  }
+  D3D12_RESOURCE_DESC buffer_desc;
+  ui::d3d12::util::FillBufferResourceDesc(
+      buffer_desc, uint64_t(desc.Count) * sizeof(uint64_t),
+      D3D12_RESOURCE_FLAG_NONE);
+  if (FAILED(device->CreateCommittedResource(
+          &ui::d3d12::util::kHeapPropertiesReadback, D3D12_HEAP_FLAG_NONE,
+          &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+          IID_PPV_ARGS(&readback)))) {
+    XELOGE("Game Vault GPU time: no readback buffer");
+    heap.Reset();
+    return false;
+  }
+  UINT64 frequency = 0;
+  if (FAILED(provider.GetDirectQueue()->GetTimestampFrequency(&frequency)) ||
+      !frequency) {
+    XELOGE("Game Vault GPU time: no timestamp frequency");
+    heap.Reset();
+    readback.Reset();
+    return false;
+  }
+  ns_per_tick = 1e9 / double(frequency);
+  slots.resize(kSlots);
+  for (Slot& slot : slots) slot.keys.resize(kMaxPerSlot);
+  failed = false;
+  XELOGI("Game Vault GPU time: on, timestamps at {} Hz", frequency);
+  return true;
+}
+
+// Returns a handle for End, or UINT32_MAX when this one is not timed.
+uint32_t Begin(const ui::d3d12::D3D12Provider& provider,
+               DeferredCommandList& list, Key key) {
+  if (!Ensure(provider)) return UINT32_MAX;
+  Slot& slot = slots[current];
+  if (slot.pending || slot.count >= kMaxPerSlot) {
+    ++untimed;
+    return UINT32_MAX;
+  }
+  const uint32_t i = slot.count++;
+  slot.keys[i] = key;
+  const uint32_t handle = current * kMaxPerSlot + i;
+  list.D3DEndQuery(heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, handle * 2);
+  return handle;
+}
+
+void End(DeferredCommandList& list, uint32_t handle) {
+  if (handle == UINT32_MAX) return;
+  // A copy that ended the submission on the way: its slot is already sent.
+  if (handle / kMaxPerSlot != current || slots[current].pending) return;
+  list.D3DEndQuery(heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, handle * 2 + 1);
+}
+
+// Before the submission's command list is replayed.
+void Submit(DeferredCommandList& list, uint64_t submission) {
+  if (!heap) return;
+  Slot& slot = slots[current];
+  if (slot.pending || !slot.count) return;
+  const UINT first = current * kMaxPerSlot * 2;
+  list.D3DResolveQueryData(heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first,
+                           slot.count * 2, readback.Get(),
+                           uint64_t(first) * sizeof(uint64_t));
+  slot.pending = true;
+  slot.submission = submission;
+  current = (current + 1) % kSlots;
+}
+
+void Harvest(uint64_t completed_submission) {
+  if (!heap) return;
+  for (uint32_t s = 0; s < kSlots; ++s) {
+    Slot& slot = slots[s];
+    if (!slot.pending || slot.submission > completed_submission) continue;
+    const size_t first = size_t(s) * kMaxPerSlot * 2;
+    D3D12_RANGE range = {first * sizeof(uint64_t),
+                         (first + slot.count * 2) * sizeof(uint64_t)};
+    void* mapping;
+    if (SUCCEEDED(readback->Map(0, &range, &mapping))) {
+      const uint64_t* ts = reinterpret_cast<const uint64_t*>(mapping) + first;
+      uint64_t lo = UINT64_MAX, hi = 0;
+      std::lock_guard<std::mutex> lock(mutex);
+      for (uint32_t i = 0; i < slot.count; ++i) {
+        const uint64_t t0 = ts[i * 2], t1 = ts[i * 2 + 1];
+        if (!t0 || t1 < t0) continue;  // end not written (see End)
+        lo = std::min(lo, t0);
+        hi = std::max(hi, t1);
+        const uint64_t ns = uint64_t(double(t1 - t0) * ns_per_tick);
+        auto& sum = sums[slot.keys[i]];
+        sum.first += ns;
+        ++sum.second;
+        (slot.keys[i].vs == kCopyKey ? copy_ns : draw_ns) += ns;
+      }
+      if (hi > lo) busy_ns += uint64_t(double(hi - lo) * ns_per_tick);
+      D3D12_RANGE written = {};
+      readback->Unmap(0, &written);
+    }
+    slot.pending = false;
+    slot.count = 0;
+  }
+}
+}  // namespace gv_timing
+
+void GameVaultTakeGpuTiming(double secs, std::vector<std::string>* lines) {
+  std::lock_guard<std::mutex> lock(gv_timing::mutex);
+  const auto pct = [secs](uint64_t ns) {
+    return 100.0 * double(ns) / (secs * 1e9);
+  };
+  if (gv_timing::heap) {
+    lines->push_back(fmt::format(
+        "Game Vault GPU time: busy {:.0f}%, draws {:.0f}%, copies {:.0f}%, "
+        "{} not timed",
+        pct(gv_timing::busy_ns), pct(gv_timing::draw_ns),
+        pct(gv_timing::copy_ns), gv_timing::untimed));
+    std::vector<std::pair<uint64_t, gv_timing::Key>> top;
+    for (auto& [key, sum] : gv_timing::sums) top.emplace_back(sum.first, key);
+    std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
+      return a.first > b.first;
+    });
+    for (size_t i = 0; i < top.size() && i < 15; ++i) {
+      const auto& sum = gv_timing::sums[top[i].second];
+      if (top[i].second.vs == gv_timing::kCopyKey) {
+        lines->push_back(
+            fmt::format("Game Vault GPU time: copies {:5.1f}% ({:.0f}/s)",
+                        pct(sum.first), sum.second / secs));
+      } else {
+        lines->push_back(fmt::format(
+            "Game Vault GPU time: VS {:016X} PS {:016X} {:5.1f}% ({:.0f} "
+            "draws/s)",
+            top[i].second.vs, top[i].second.ps, pct(sum.first),
+            sum.second / secs));
+      }
+    }
+  }
+  const uint64_t readbacks = gv_timing::readbacks.exchange(0);
+  const uint64_t readback_waits = gv_timing::readback_waits.exchange(0);
+  if (readbacks) {
+    lines->push_back(fmt::format(
+        "Game Vault: resolve read-backs {:.0f}/s, {:.0f}/s waited for the GPU",
+        readbacks / secs, readback_waits / secs));
+  }
+  const uintptr_t base = uintptr_t(GetModuleHandleW(nullptr));
+  for (auto& [caller, n] : gv_timing::wait_callers) {
+    lines->push_back(fmt::format(
+        "Game Vault profile: GPU thread waits for the GPU {:.0f}/s, from "
+        "xenia +{:08X}",
+        n / secs, uint32_t(caller - base)));
+  }
+  gv_timing::sums.clear();
+  gv_timing::wait_callers.clear();
+  gv_timing::busy_ns = gv_timing::draw_ns = gv_timing::copy_ns = 0;
+  gv_timing::untimed = 0;
+}
 
 D3D12CommandProcessor::D3D12CommandProcessor(
     D3D12GraphicsSystem* graphics_system, kernel::KernelState* kernel_state)
@@ -3047,8 +3252,16 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       shared_memory_->UseForWriting();
     }
     SubmitBarriers();
+    const uint32_t gv_timed =
+        cvars::gv_gpu_timing
+            ? gv_timing::Begin(GetD3D12Provider(), deferred_command_list_,
+                               {vertex_shader->ucode_data_hash(),
+                                pixel_shader ? pixel_shader->ucode_data_hash()
+                                             : 0})
+            : UINT32_MAX;
     deferred_command_list_.D3DDrawInstanced(
         primitive_processing_result.host_draw_vertex_count, 1, 0, 0);
+    gv_timing::End(deferred_command_list_, gv_timed);
   } else {
     D3D12_INDEX_BUFFER_VIEW index_buffer_view;
     index_buffer_view.SizeInBytes =
@@ -3112,8 +3325,16 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       shared_memory_->UseForReading();
     }
     SubmitBarriers();
+    const uint32_t gv_timed =
+        cvars::gv_gpu_timing
+            ? gv_timing::Begin(GetD3D12Provider(), deferred_command_list_,
+                               {vertex_shader->ucode_data_hash(),
+                                pixel_shader ? pixel_shader->ucode_data_hash()
+                                             : 0})
+            : UINT32_MAX;
     deferred_command_list_.D3DDrawIndexedInstanced(
         primitive_processing_result.host_draw_vertex_count, 1, 0, 0, 0);
+    gv_timing::End(deferred_command_list_, gv_timed);
     if (scratch_index_buffer != nullptr) {
       ReleaseScratchGPUBuffer(scratch_index_buffer,
                               D3D12_RESOURCE_STATE_INDEX_BUFFER);
@@ -3241,15 +3462,23 @@ bool D3D12CommandProcessor::IssueCopy() {
   if (!BeginSubmission(true)) {
     return false;
   }
+  const uint32_t gv_timed =
+      cvars::gv_gpu_timing
+          ? gv_timing::Begin(GetD3D12Provider(), deferred_command_list_,
+                             {gv_timing::kCopyKey, 0})
+          : UINT32_MAX;
+  bool result;
   ReadbackResolveMode readback_mode = GetReadbackResolveMode();
   if (readback_mode == ReadbackResolveMode::kDisabled) {
     uint32_t written_address, written_length;
-    return render_target_cache_->Resolve(*memory_, *shared_memory_,
-                                         *texture_cache_, written_address,
-                                         written_length);
+    result = render_target_cache_->Resolve(*memory_, *shared_memory_,
+                                           *texture_cache_, written_address,
+                                           written_length);
   } else {
-    return IssueCopy_ReadbackResolvePath();
+    result = IssueCopy_ReadbackResolvePath();
   }
+  gv_timing::End(deferred_command_list_, gv_timed);
+  return result;
 }
 XE_NOINLINE
 bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
@@ -3399,6 +3628,12 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   bool read_cache_miss = readback_mode == ReadbackResolveMode::kFast &&
                          (rb.buffers[read_index] == nullptr ||
                           readback_length > rb.sizes[read_index]);
+  // The next use of this read-back writes the other buffer and reads this one.
+  rb.current_index = 1 - write_index;
+  ++gv_timing::readbacks;
+  if (readback_mode != ReadbackResolveMode::kFast || read_cache_miss) {
+    ++gv_timing::readback_waits;
+  }
 
   if (is_scaled) {
     // Scaled path: downscale on the GPU, then copy the 1x data to the
@@ -3546,15 +3781,15 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
 // Game Vault: where the GPU thread's submissions spend their time (for the
 // frame rate log line): submissions, then ns in the replay of the recorded
 // commands, Close, ExecuteCommandLists and the fence signal, and waits for the
-// GPU to finish (count, ns).
-static std::atomic<uint64_t> gv_submit_stats[7];
+// GPU to finish (count, ns), and the occlusion query waits (count, ns).
+static std::atomic<uint64_t> gv_submit_stats[9];
 static uint64_t GvNowNs() {
   return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                       std::chrono::steady_clock::now().time_since_epoch())
                       .count());
 }
-void GameVaultTakeSubmitStats(uint64_t out[7]) {
-  for (int i = 0; i < 7; ++i) out[i] = gv_submit_stats[i].exchange(0);
+void GameVaultTakeSubmitStats(uint64_t out[9]) {
+  for (int i = 0; i < 9; ++i) out[i] = gv_submit_stats[i].exchange(0);
 }
 
 void D3D12CommandProcessor::CheckSubmissionCompletion(
@@ -3591,7 +3826,12 @@ void D3D12CommandProcessor::CheckSubmissionCompletion(
   if (await_submission > gv_done_before) {
     gv_submit_stats[5]++;
     gv_submit_stats[6] += GvNowNs() - gv_w0;
+    if (cvars::gv_gpu_timing) {
+      std::lock_guard<std::mutex> lock(gv_timing::mutex);
+      ++gv_timing::wait_callers[uintptr_t(_ReturnAddress())];
+    }
   }
+  gv_timing::Harvest(GetCompletedSubmission());
 
   const uint64_t completed_submission = GetCompletedSubmission();
 
@@ -3742,10 +3982,10 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
   if (is_opening_frame) {
     frame_open_ = true;
 
-    // Swap all readback buffers for delayed sync (one frame behind)
-    for (auto& pair : readback_buffers_) {
-      pair.second.current_index = 1 - pair.second.current_index;
-    }
+    // Game Vault: the two buffers of a read-back swap at each use of it (end of
+    // IssueCopy_ReadbackResolvePath), not at each frame: a game that resolves
+    // every other frame (30 fps on a 60 Hz screen, GTA IV's streets) always found
+    // the other buffer empty and waited for the GPU each time (2026-10-27).
 
     // Evict old readback buffers only when map gets too large to prevent
     // unbounded memory growth. Don't do this every frame as it's expensive.
@@ -3865,6 +4105,7 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     // Submit barriers now because resources with the queued barriers may be
     // destroyed between frames.
     SubmitBarriers();
+    gv_timing::Submit(deferred_command_list_, GetCurrentSubmission());
 
     // TODO(Triang3l): Error checking.
 
@@ -5803,7 +6044,10 @@ CommandProcessor::QueryOpenResult D3D12CommandProcessor::OpenZPDQuery(
         return QueryOpenResult::kDeferred;
       }
 
+      const uint64_t gv_w0 = GvNowNs();
       completion_timeline_->AwaitSubmissionAndUpdateCompleted(wait_for);
+      gv_submit_stats[7]++;
+      gv_submit_stats[8] += GvNowNs() - gv_w0;
       waited_for_submission = true;
       PumpQueryResolves();
       is_pool_exhausted = !zpd_host_query_pool_->has_free_indices();
@@ -5953,8 +6197,11 @@ bool D3D12CommandProcessor::AwaitQueryResolve(ReportHandle report_handle,
   }
 
   if (wait_for_submission > GetCompletedSubmission()) {
+    const uint64_t gv_w0 = GvNowNs();
     completion_timeline_->AwaitSubmissionAndUpdateCompleted(
         wait_for_submission);
+    gv_submit_stats[7]++;
+    gv_submit_stats[8] += GvNowNs() - gv_w0;
   }
 
   PumpQueryResolves();
