@@ -71,6 +71,12 @@ DEFINE_bool(gv_gpu_timing, false,
             "most GPU time.",
             "D3D12");
 
+DEFINE_bool(readback_resolve_deferred, true,
+            "With readback_resolve = fast: copy each resolve's data into guest "
+            "memory once the GPU has finished it, instead of reading the "
+            "previous copy (and waiting for the GPU when there is none).",
+            "GPU");
+
 DECLARE_bool(clear_memory_page_state);
 DECLARE_bool(readback_resolve_half_pixel_offset);
 
@@ -1895,6 +1901,14 @@ bool D3D12CommandProcessor::SetupContext() {
 void D3D12CommandProcessor::ShutdownContext() {
   AwaitAllQueueOperationsCompletion();
 
+  gv_readback_pending_.clear();
+  if (gv_readback_ring_mapping_) {
+    D3D12_RANGE written = {};
+    gv_readback_ring_->Unmap(0, &written);
+    gv_readback_ring_mapping_ = nullptr;
+  }
+  gv_readback_ring_.Reset();
+
   for (auto& pair : readback_buffers_) {
     ui::d3d12::util::ReleaseAndNull(pair.second.buffers[0]);
     ui::d3d12::util::ReleaseAndNull(pair.second.buffers[1]);
@@ -2805,6 +2819,10 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
 }
 
 void D3D12CommandProcessor::OnPrimaryBufferEnd() {
+  if (!gv_readback_pending_.empty()) {
+    completion_timeline_->UpdateCompletedSubmission();
+    GvPumpReadbacks();
+  }
   // Pump any completed resolves now since the guest is likely about to poll.
   PumpQueryResolves();
   PumpPendingRetire();
@@ -3590,16 +3608,23 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
         texture_cache_->GetCurrentScaledResolveBufferBaseOffset();
   }
 
-  uint64_t resolve_key =
-      MakeReadbackResolveKey(written_address, written_length);
-  ReadbackBuffer& rb = readback_buffers_[resolve_key];
+  ReadbackResolveMode readback_mode = GetReadbackResolveMode();
+  uint64_t ring_start = 0;
+  const bool deferred = readback_mode == ReadbackResolveMode::kFast &&
+                        cvars::readback_resolve_deferred &&
+                        GvReadbackRingAllocate(readback_length, &ring_start);
+  ReadbackBuffer deferred_rb;  // not used when deferred
+  ReadbackBuffer& rb =
+      deferred ? deferred_rb
+               : readback_buffers_[MakeReadbackResolveKey(written_address,
+                                                          written_length)];
   rb.last_used_frame = frame_current_;
 
   uint32_t write_index = rb.current_index;
   uint32_t size = AlignReadbackBufferSize(readback_length);
 
   // Allocate/resize write buffer if needed
-  if (size > rb.sizes[write_index]) {
+  if (!deferred && size > rb.sizes[write_index]) {
     const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
     ID3D12Device* device = provider.GetDevice();
     D3D12_RESOURCE_DESC buffer_desc;
@@ -3621,11 +3646,11 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     }
   }
 
-  ReadbackResolveMode readback_mode = GetReadbackResolveMode();
   uint32_t read_index = readback_mode == ReadbackResolveMode::kFast
                             ? 1 - write_index
                             : write_index;
-  bool read_cache_miss = readback_mode == ReadbackResolveMode::kFast &&
+  bool read_cache_miss = !deferred &&
+                         readback_mode == ReadbackResolveMode::kFast &&
                          (rb.buffers[read_index] == nullptr ||
                           readback_length > rb.sizes[read_index]);
   // The next use of this read-back writes the other buffer and reads this one.
@@ -3634,6 +3659,10 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   if (readback_mode != ReadbackResolveMode::kFast || read_cache_miss) {
     ++gv_timing::readback_waits;
   }
+  ID3D12Resource* copy_dest =
+      deferred ? gv_readback_ring_.Get() : rb.buffers[write_index];
+  const UINT64 copy_dest_offset =
+      deferred ? ring_start % gv_readback_ring_->GetDesc().Width : 0;
 
   if (is_scaled) {
     // Scaled path: downscale on the GPU, then copy the 1x data to the
@@ -3725,7 +3754,7 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                           D3D12_RESOURCE_STATE_COPY_SOURCE);
     SubmitBarriers();
-    deferred_command_list_.D3DCopyBufferRegion(rb.buffers[write_index], 0,
+    deferred_command_list_.D3DCopyBufferRegion(copy_dest, copy_dest_offset,
                                                resolve_downscale_buffer_.Get(),
                                                0, readback_length);
     // Return the buffers to their steady states.
@@ -3742,8 +3771,14 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     SubmitBarriers();
     ID3D12Resource* shared_memory_buffer = shared_memory_->GetBuffer();
     deferred_command_list_.D3DCopyBufferRegion(
-        rb.buffers[write_index], 0, shared_memory_buffer, written_address,
+        copy_dest, copy_dest_offset, shared_memory_buffer, written_address,
         readback_length);
+  }
+
+  if (deferred) {
+    gv_readback_pending_.push_back(
+        {ring_start, readback_length, written_address, GetCurrentSubmission()});
+    return true;
   }
 
   if (readback_mode != ReadbackResolveMode::kFast) {
@@ -3776,6 +3811,74 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     }
   }
   return true;
+}
+
+bool D3D12CommandProcessor::GvReadbackRingAllocate(uint32_t length,
+                                                   uint64_t* start_out) {
+  constexpr uint64_t kRingSize = uint64_t(64) << 20;
+  if (length > kRingSize / 4 || gv_readback_ring_failed_) {
+    return false;
+  }
+  if (!gv_readback_ring_) {
+    const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
+    D3D12_RESOURCE_DESC desc;
+    ui::d3d12::util::FillBufferResourceDesc(desc, kRingSize,
+                                            D3D12_RESOURCE_FLAG_NONE);
+    void* mapping = nullptr;
+    if (FAILED(provider.GetDevice()->CreateCommittedResource(
+            &ui::d3d12::util::kHeapPropertiesReadback,
+            provider.GetHeapFlagCreateNotZeroed(), &desc,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            IID_PPV_ARGS(&gv_readback_ring_))) ||
+        FAILED(gv_readback_ring_->Map(0, nullptr, &mapping))) {
+      XELOGE("Game Vault: no resolve read-back ring, reading back as before");
+      gv_readback_ring_.Reset();
+      gv_readback_ring_failed_ = true;
+      return false;
+    }
+    gv_readback_ring_mapping_ = static_cast<uint8_t*>(mapping);
+  }
+  const uint64_t aligned = xe::align(uint64_t(length), uint64_t(256));
+  uint64_t start = gv_readback_ring_head_;
+  const uint64_t position = start % kRingSize;
+  if (position + aligned > kRingSize) {
+    start += kRingSize - position;  // no read-back wraps around the end
+  }
+  // The space must not hold a read-back that is still on its way. Older
+  // submissions can be awaited; one in the open submission cannot (the copy is
+  // not submitted yet): then this one is read back as before.
+  while (!gv_readback_pending_.empty() &&
+         gv_readback_pending_.front().start + kRingSize < start + aligned) {
+    const uint64_t submission = gv_readback_pending_.front().submission;
+    if (submission >= GetCurrentSubmission()) {
+      return false;
+    }
+    CheckSubmissionCompletion(submission);  // copies what has completed
+    if (!gv_readback_pending_.empty() &&
+        gv_readback_pending_.front().submission == submission &&
+        GetCompletedSubmission() < submission) {
+      return false;  // could not await it
+    }
+  }
+  gv_readback_ring_head_ = start + aligned;
+  *start_out = start;
+  return true;
+}
+
+void D3D12CommandProcessor::GvPumpReadbacks() {
+  if (gv_readback_pending_.empty() || !gv_readback_ring_mapping_) {
+    return;
+  }
+  const uint64_t ring_size = gv_readback_ring_->GetDesc().Width;
+  const uint64_t completed = GetCompletedSubmission();
+  while (!gv_readback_pending_.empty() &&
+         gv_readback_pending_.front().submission <= completed) {
+    const GvPendingReadback& readback = gv_readback_pending_.front();
+    memory::vastcpy(memory_->TranslatePhysical(readback.address),
+                    gv_readback_ring_mapping_ + readback.start % ring_size,
+                    readback.length);
+    gv_readback_pending_.pop_front();
+  }
 }
 
 // Game Vault: where the GPU thread's submissions spend their time (for the
@@ -3832,6 +3935,7 @@ void D3D12CommandProcessor::CheckSubmissionCompletion(
     }
   }
   gv_timing::Harvest(GetCompletedSubmission());
+  GvPumpReadbacks();
 
   const uint64_t completed_submission = GetCompletedSubmission();
 

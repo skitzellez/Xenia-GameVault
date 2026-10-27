@@ -760,6 +760,24 @@ class D3D12CommandProcessor final : public CommandProcessor {
   // Map: (written_address << 32 | written_length) -> ReadbackBuffer
   std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;
 
+  // Game Vault (readback_resolve_deferred): fast resolve read-backs are copied
+  // into one persistently mapped ring and written into guest memory once their
+  // submission has completed, without waiting for the GPU or creating a buffer
+  // per destination.
+  struct GvPendingReadback {
+    uint64_t start;  // in the ring, counting from 0 without wrapping
+    uint32_t length;
+    uint32_t address;
+    uint64_t submission;
+  };
+  bool GvReadbackRingAllocate(uint32_t length, uint64_t* start_out);
+  void GvPumpReadbacks();
+  Microsoft::WRL::ComPtr<ID3D12Resource> gv_readback_ring_;
+  uint8_t* gv_readback_ring_mapping_ = nullptr;
+  bool gv_readback_ring_failed_ = false;
+  uint64_t gv_readback_ring_head_ = 0;
+  std::deque<GvPendingReadback> gv_readback_pending_;
+
   // Simple single buffer for memexport (always syncs, no double-buffering)
   ID3D12Resource* memexport_readback_buffer_ = nullptr;
   uint32_t memexport_readback_buffer_size_ = 0;

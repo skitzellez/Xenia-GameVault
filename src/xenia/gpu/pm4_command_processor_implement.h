@@ -1458,6 +1458,15 @@ uint32_t COMMAND_PROCESSOR::ExecutePrimaryBuffer(uint32_t read_index,
       assert_always();
       break;
     }
+    // Game Vault: the guest sees the read pointer move after each packet, as
+    // the real GPU moves it while fetching, not only at the end of everything
+    // written so far (games' D3D wait loops poll it: WWE 2K17 spent ~73% of its
+    // main thread there while this thread sat in a GPU wait).
+    if (cvars::gv_rptr_writeback_per_packet && read_ptr_writeback_ptr_) {
+      xe::store_and_swap<uint32_t>(
+          memory_->TranslatePhysical(read_ptr_writeback_ptr_),
+          uint32_t(reader_.read_offset() / sizeof(uint32_t)));
+    }
   } while (reader_.read_count());
 
   COMMAND_PROCESSOR::OnPrimaryBufferEnd();

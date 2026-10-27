@@ -34,6 +34,10 @@ DEFINE_bool(
     "its own, just ones the guest makes or instructs it to make.",
     "Logging");
 
+DEFINE_bool(gv_rptr_writeback_per_packet, true,
+            "Write the command processor's ring read pointer back to the guest "
+            "after each packet instead of after each batch.",
+            "GPU");
 DEFINE_bool(disassemble_pm4, false,
             "Only does anything in debug builds, if set will disassemble and "
             "log all PM4 packets sent to the CP.",

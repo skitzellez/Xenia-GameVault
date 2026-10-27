@@ -27,7 +27,10 @@
 #include "xenia/gpu/xenos.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/memory.h"
+#include "xenia/base/cvar.h"
 #include "xenia/ui/presenter.h"
+
+DECLARE_bool(gv_rptr_writeback_per_packet);
 
 namespace xe {
 

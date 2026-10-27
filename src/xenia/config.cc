@@ -750,6 +750,10 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     // Blur: 3D far too bright without resolve read-back (its brightness adaptation reads the picture back; xenia-canary
     // game-compatibility issue 549, label gpu-readback). A player's Blur also lost the graphics device (2026-10-19).
     {"41560845", "[GPU]\nreadback_resolve = \"fast\"\n"},
+    // GTA IV (+ Episodes from Liberty City, same title ID): its resolves stay on the GPU (not labelled gpu-readback
+    // on xenia-canary game-compatibility issue 14); reading ~1,700 of them back per second held the streets at ~20 fps
+    // on the console. No visible change without it (user check, 2026-10-27).
+    {"545407F2", "[GPU]\nreadback_resolve = \"none\"\n"},
 };
 
 void ApplyBuiltInGameConfig(const std::string_view title_id) {
