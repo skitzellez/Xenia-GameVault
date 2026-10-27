@@ -58,6 +58,12 @@ class GuestScheduler {
   // host threads, nothing is stopped while holding a lock.
   void SetPaused(bool paused) { paused_.store(paused); }
   bool paused() const { return paused_.load(); }
+  // Game Vault: the host thread of each emulated CPU's dispatch loop (null
+  // before it starts), for the frame rate log's per-CPU load.
+  static constexpr int cpu_count() { return kMaxCpus; }
+  xe::threading::Thread* cpu_host_thread(int cpu) const {
+    return cpus_[cpu].host_thread.get();
+  }
 
   // Adds |thread| to its CPU's ready queue by guest affinity and wakes that
   // CPU. Idempotent and safe to call from any host thread. A thread already

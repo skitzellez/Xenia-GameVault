@@ -148,6 +148,9 @@ class Factory {
 class LoadMeter {
  public:
   explicit LoadMeter(Emulator* emulator) : emulator_(emulator) {}
+  // Each emulated CPU's load (the guest scheduler's dispatch threads), in %,
+  // "-" for one not running; from the last Sample().
+  std::string PerCpu() const { return per_cpu_; }
   void Sample(double* cpu, double* gpu, double* memory_mb) {
     const uint64_t now = Now();
     FILETIME c, e, k, u;
@@ -171,6 +174,7 @@ class LoadMeter {
                      reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),
                      sizeof(memory))
                      ? memory.PrivateUsage / (1024.0 * 1024.0) : 0;
+    SamplePerCpu(double(now - wall_));
     wall_ = now, process_ = process, thread_ = thread;
   }
 
@@ -190,8 +194,32 @@ class LoadMeter {
     auto* thread = worker ? worker->thread() : nullptr;
     return thread ? HANDLE(thread->native_handle()) : nullptr;
   }
+  void SamplePerCpu(double wall) {
+    auto* kernel = emulator_ ? emulator_->kernel_state() : nullptr;
+    auto* scheduler = kernel ? kernel->guest_scheduler() : nullptr;
+    per_cpu_.clear();
+    for (int i = 0; i < kernel::GuestScheduler::cpu_count(); ++i) {
+      auto* thread = scheduler ? scheduler->cpu_host_thread(i) : nullptr;
+      FILETIME c, e, k, u;
+      uint64_t now = 0;
+      bool have = thread && GetThreadTimes(HANDLE(thread->native_handle()),
+                                           &c, &e, &k, &u);
+      if (have) now = Ticks(k) + Ticks(u);
+      if (!per_cpu_.empty()) per_cpu_ += "/";
+      if (have && wall_ && wall > 0 && now >= cpu_threads_[i]) {
+        per_cpu_ += fmt::format(
+            "{:.0f}",
+            std::min(100.0, 100.0 * double(now - cpu_threads_[i]) / wall));
+      } else {
+        per_cpu_ += "-";
+      }
+      cpu_threads_[i] = now;
+    }
+  }
   Emulator* emulator_;
   uint64_t wall_ = 0, process_ = 0, thread_ = 0;
+  uint64_t cpu_threads_[kernel::GuestScheduler::cpu_count()] = {};
+  std::string per_cpu_;
 };
 
 // Game Vault's "Show frame rate" (fps=1 in the link that sent the game): the
@@ -801,10 +829,10 @@ void GameVaultXeniaApp::EmulatorThread() {
       load.Sample(&cpu, &gpu, &memory_mb);
       if (last && frames >= last) {
         XELOGI("Game Vault: frame rate {:.1f}, CPU {:.0f}%, GPU {:.0f}%, "
-               "memory {:.0f} MB",
+               "memory {:.0f} MB, emulated CPUs {}%",
                double(frames - last) /
                    std::chrono::duration<double>(now - last_time).count(),
-               cpu, gpu, memory_mb);
+               cpu, gpu, memory_mb, load.PerCpu());
       }
       last = frames, last_time = now;
     }
