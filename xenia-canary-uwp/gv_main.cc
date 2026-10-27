@@ -16,6 +16,7 @@
 #include <functional>
 #include <fstream>
 #include <map>
+#include <set>
 #include <vector>
 #include <memory>
 #include <string>
@@ -41,6 +42,7 @@
 #include "xenia/cpu/function.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/emulator.h"
+#include "xenia/memory.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/shader_storage.h"
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
@@ -258,7 +260,8 @@ class CpuSampler {
   }
   void Run(int interval_ms) {
     XELOGI("Game Vault profile: on, every {} ms", interval_ms);
-    auto next_report = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    auto next_report =
+        std::chrono::steady_clock::now() + std::chrono::seconds(30);
     for (;;) {
       std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
       Sample();
@@ -271,59 +274,146 @@ class CpuSampler {
 
  private:
   static constexpr size_t kMaxSamples = 65536;
+  // The 6 emulated CPUs, then the GPU thread (command processor).
+  static constexpr int kThreads = kernel::GuestScheduler::cpu_count() + 1;
+  struct Spot {
+    uint64_t pc;
+    uint64_t caller;  // outside Xenia and the game: the first Xenia frame
+  };
+  bool InExe(uint64_t pc) const {
+    return exe_size_ && pc >= exe_base_ && pc < exe_base_ + exe_size_;
+  }
+  bool InJit(uint64_t pc) const {
+    return jit_size_ && pc >= jit_base_ && pc < jit_base_ + jit_size_;
+  }
+  // While the thread is stopped: its pc and, when that is in Windows or the
+  // driver (waiting, mostly), the first return address in Xenia's own code.
+  Spot Walk(CONTEXT context) const {
+    Spot spot = {context.Rip, 0};
+    if (InExe(spot.pc) || InJit(spot.pc)) return spot;
+    for (int frame = 0; frame < 32; ++frame) {
+      DWORD64 image_base = 0;
+      auto* entry = RtlLookupFunctionEntry(context.Rip, &image_base, nullptr);
+      if (!entry) {
+        // a leaf function: the return address is on top of the stack
+        context.Rip = *reinterpret_cast<DWORD64*>(context.Rsp);
+        context.Rsp += 8;
+      } else {
+        void* handler_data;
+        DWORD64 establisher;
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, entry,
+                         &context, &handler_data, &establisher, nullptr);
+      }
+      if (!context.Rip) break;
+      if (InExe(context.Rip)) {
+        spot.caller = context.Rip;
+        break;
+      }
+      if (InJit(context.Rip)) {
+        spot.caller = 1;  // called from the game's code
+        break;
+      }
+    }
+    return spot;
+  }
   void Sample() {
     auto* kernel = emulator_->kernel_state();
     auto* scheduler = kernel ? kernel->guest_scheduler() : nullptr;
     if (!scheduler || !emulator_->is_title_open()) return;
-    for (int i = 0; i < kernel::GuestScheduler::cpu_count(); ++i) {
-      auto* thread = scheduler->cpu_host_thread(i);
+    if (!jit_size_ && emulator_->processor() &&
+        emulator_->processor()->backend()) {
+      auto* cache = emulator_->processor()->backend()->code_cache();
+      jit_base_ = cache->execute_base_address();
+      jit_size_ = cache->total_size();
+    }
+    for (int i = 0; i < kThreads; ++i) {
+      xe::threading::Thread* thread = nullptr;
+      if (i < kernel::GuestScheduler::cpu_count()) {
+        thread = scheduler->cpu_host_thread(i);
+      } else if (auto* graphics = emulator_->graphics_system()) {
+        auto* processor = graphics->command_processor();
+        auto* worker = processor ? processor->worker_thread() : nullptr;
+        thread = worker ? worker->thread() : nullptr;
+      }
       if (!thread || samples_[i].size() >= kMaxSamples) continue;
       HANDLE handle = HANDLE(thread->native_handle());
       if (SuspendThread(handle) == DWORD(-1)) continue;
       CONTEXT context = {};
-      context.ContextFlags = CONTEXT_CONTROL;
+      context.ContextFlags = CONTEXT_FULL;
+      Spot spot = {0, 0};
       const bool got = GetThreadContext(handle, &context) != 0;
+      if (got) spot = Walk(context);
       ResumeThread(handle);
-      if (got) samples_[i].push_back(context.Rip);
+      if (got) samples_[i].push_back(spot);
     }
+  }
+  std::string Xenia(uint64_t pc) const {
+    // 16-byte steps: the line in Xenia's code, looked up in the .pdb on the PC
+    return fmt::format("xenia +{:08X}", (pc - exe_base_) & ~uint64_t(15));
   }
   void Report() {
     auto* backend = emulator_->processor()
                         ? emulator_->processor()->backend()
                         : nullptr;
     auto* code_cache = backend ? backend->code_cache() : nullptr;
-    for (int i = 0; i < kernel::GuestScheduler::cpu_count(); ++i) {
+    for (int i = 0; i < kThreads; ++i) {
       auto& samples = samples_[i];
       if (samples.empty()) continue;
       std::map<std::string, uint32_t> counts;
-      for (uint64_t pc : samples) {
+      for (const Spot& spot : samples) {
         std::string key;
-        if (exe_size_ && pc >= exe_base_ && pc < exe_base_ + exe_size_) {
-          // 64-byte steps: one spot per small stretch of Xenia's code
-          key = fmt::format("xenia +{:08X}", (pc - exe_base_) & ~uint64_t(63));
-        } else if (auto* function =
-                       code_cache ? code_cache->LookupFunction(pc) : nullptr) {
-          key = fmt::format("game  {:08X} {}", function->address(),
-                            function->name());
+        if (InExe(spot.pc)) {
+          key = Xenia(spot.pc);
+        } else if (InJit(spot.pc)) {
+          if (auto* function =
+                  code_cache ? code_cache->LookupFunction(spot.pc) : nullptr) {
+            key = fmt::format("game  {:08X} {}", function->address(),
+                              function->name());
+            hot_[function->address()]++;
+          } else {
+            key = "game  (helper code)";
+          }
+        } else if (spot.caller == 1) {
+          key = "system, called by the game";
+        } else if (spot.caller) {
+          key = "system, called from " + Xenia(spot.caller);
         } else {
-          key = "other (system / driver / waiting)";
+          key = "system (idle or unknown)";
         }
         ++counts[key];
       }
       std::vector<std::pair<uint32_t, std::string>> top;
       for (auto& [key, n] : counts) top.emplace_back(n, key);
       std::sort(top.rbegin(), top.rend());
-      XELOGI("Game Vault profile: CPU {}: {} samples", i, samples.size());
+      const std::string who =
+          i < kernel::GuestScheduler::cpu_count() ? fmt::format("CPU {}", i)
+                                                  : std::string("GPU thread");
       for (size_t j = 0; j < top.size() && j < 12; ++j) {
-        XELOGI("Game Vault profile:   {:5.1f}% {}",
+        XELOGI("Game Vault profile: {} {:5.1f}% {}", who,
                100.0 * top[j].first / samples.size(), top[j].second);
       }
       samples.clear();
     }
+    // The game's hottest functions, once each: their code (big-endian PowerPC
+    // words) for a look on the PC.
+    for (auto& [address, n] : hot_) {
+      if (n < 3000 || dumped_.count(address)) continue;
+      dumped_.insert(address);
+      const uint32_t* code =
+          emulator_->memory()->TranslateVirtual<const uint32_t*>(address);
+      std::string words;
+      for (int w = 0; w < 160; ++w) {
+        words += fmt::format("{:08X} ", xe::byte_swap(code[w]));
+      }
+      XELOGI("Game Vault profile code {:08X}: {}", address, words);
+    }
+    hot_.clear();
   }
   Emulator* emulator_;
-  std::vector<uint64_t> samples_[kernel::GuestScheduler::cpu_count()];
-  uint64_t exe_base_ = 0, exe_size_ = 0;
+  std::map<uint32_t, uint32_t> hot_;
+  std::set<uint32_t> dumped_;
+  std::vector<Spot> samples_[kThreads];
+  uint64_t exe_base_ = 0, exe_size_ = 0, jit_base_ = 0, jit_size_ = 0;
 };
 
 // Game Vault's "Show frame rate" (fps=1 in the link that sent the game): the
