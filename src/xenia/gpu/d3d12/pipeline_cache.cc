@@ -229,6 +229,7 @@ void PipelineCache::InitializeShaderStorage(
     const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
     std::function<void()> completion_callback) {
   ShutdownShaderStorage();
+  ClearShaderStorageIfRequested(cache_root, title_id);
 
   bool edram_rov_used = render_target_cache_.GetPath() ==
                         RenderTargetCache::Path::kPixelShaderInterlock;

@@ -37,6 +37,7 @@
 #include "xenia/config.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/command_processor.h"
+#include "xenia/gpu/shader_storage.h"
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/hid/xinput/xinput_hid.h"
@@ -58,6 +59,9 @@
 DEFINE_string(apu, "any", "Audio system. Use: [any, nop, xaudio2]", "APU");
 DEFINE_string(gpu, "any", "Graphics system. Use: [any, d3d12]", "GPU");
 DEFINE_string(hid, "any", "Input system. Use: [any, nop, xinput]", "HID");
+// (the in-game menu's resolution scale; Xenia's own settings)
+DECLARE_int32(draw_resolution_scale_x);
+DECLARE_int32(draw_resolution_scale_y);
 
 DEFINE_path(storage_root, "",
             "Root path for persistent internal data storage (config, etc.), or "
@@ -404,19 +408,23 @@ class NoGameMessage final : public ui::ImGuiDialog {
   Emulator* emulator_;
 };
 
-// View + Menu during a game: the game stops and a small menu comes up over
-// it. Resume (or B) goes on, "Show frame rate" turns the counter on or off,
-// "Back to Game Vault" leaves the game. While it is open the controller only
-// moves through the menu.
+// View + Menu during a game: the game stops and a menu comes up over it. The
+// controller then only moves through the menu; B goes back a page or resumes.
+struct GameMenuActions {
+  std::function<void()> fps_changed;    // the counter was turned on or off
+  std::function<void()> restart;        // the game starts again
+  std::function<void()> leave;          // back to Game Vault
+  std::function<void()> clear_shaders;  // stored shaders go, then restart
+  std::function<void(int)> set_scale;   // resolution scale, then restart
+};
+
 class GameMenu final : public ui::ImGuiDialog {
  public:
   GameMenu(ui::ImGuiDrawer* drawer, Emulator* emulator,
-           std::function<void()> fps_changed, std::function<void()> leave,
-           GameMenu** open_menu)
+           GameMenuActions actions, GameMenu** open_menu)
       : ui::ImGuiDialog(drawer),
         emulator_(emulator),
-        fps_changed_(std::move(fps_changed)),
-        leave_(std::move(leave)),
+        actions_(std::move(actions)),
         open_menu_(open_menu) {
     *open_menu_ = this;
     if (auto* input = emulator_->input_system()) {
@@ -426,10 +434,13 @@ class GameMenu final : public ui::ImGuiDialog {
                           ? emulator_->kernel_state()->guest_scheduler()
                           : nullptr;
     if (scheduler && kernel::GuestScheduler::enabled()) {
+      // Sound and graphics first: they stop at a point of their own, which
+      // may need the game's threads to get to (the audio worker runs the
+      // game's sound callbacks), so those are held last.
       scheduler_ = scheduler;
-      scheduler_->SetPaused(true);
       if (emulator_->audio_system()) emulator_->audio_system()->Pause();
       if (emulator_->graphics_system()) emulator_->graphics_system()->Pause();
+      scheduler_->SetPaused(true);
     } else {
       emulator_->Pause();
     }
@@ -437,9 +448,9 @@ class GameMenu final : public ui::ImGuiDialog {
   }
   ~GameMenu() override {
     if (scheduler_) {
+      scheduler_->SetPaused(false);
       if (emulator_->graphics_system()) emulator_->graphics_system()->Resume();
       if (emulator_->audio_system()) emulator_->audio_system()->Resume();
-      scheduler_->SetPaused(false);
     } else {
       emulator_->Resume();
     }
@@ -447,26 +458,29 @@ class GameMenu final : public ui::ImGuiDialog {
       input->RemoveUIInputBlocker();
     }
     *open_menu_ = nullptr;
-    XELOGI("Game Vault: in-game menu closed, game goes on");
+    XELOGI("Game Vault: in-game menu closed");
+    if (after_close_) {
+      after_close_();
+    }
   }
 
  protected:
+  enum class Page { kMain, kScale, kControllers };
+
   void OnDraw(ImGuiIO& io) override {
     ++frames_;
     const float scale = io.DisplaySize.y / 1080.0f;
-    const ImVec2 size(520.0f * scale, 0.0f);
     ImGui::SetNextWindowPos(
         ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
         ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.92f);
+    ImGui::SetNextWindowSize(ImVec2(560.0f * scale, 0.0f), ImGuiCond_Always);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f * scale);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
                         ImVec2(28.0f * scale, 24.0f * scale));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f * scale);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
-                        ImVec2(10.0f * scale, 12.0f * scale));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(12, 18, 32, 255));
+                        ImVec2(10.0f * scale, 10.0f * scale));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(12, 18, 32, 245));
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(32, 44, 70, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(40, 110, 220, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(60, 140, 255, 255));
@@ -476,49 +490,150 @@ class GameMenu final : public ui::ImGuiDialog {
                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                      ImGuiWindowFlags_NoSavedSettings |
                      ImGuiWindowFlags_AlwaysAutoResize);
-    ImGui::SetWindowFontScale(1.6f * scale);
-    ImGui::TextUnformatted("Paused");
-    ImGui::SetWindowFontScale(1.25f * scale);
-    ImGui::Spacing();
-    const ImVec2 button(-FLT_MIN, 64.0f * scale);
-    if (frames_ == 1) {
-      ImGui::SetKeyboardFocusHere();
+    button_ = ImVec2(-FLT_MIN, 58.0f * scale);
+    switch (page_) {
+      case Page::kMain:
+        DrawMain(scale);
+        break;
+      case Page::kScale:
+        DrawScale(scale);
+        break;
+      case Page::kControllers:
+        DrawControllers(scale);
+        break;
     }
-    bool close = ImGui::Button("Resume", button);
-    const bool fps = UWP::GetShowFps();
-    if (ImGui::Button(fps ? "Show frame rate: On" : "Show frame rate: Off",
-                      button)) {
-      UWP::SetShowFps(!fps);
-      if (fps_changed_) fps_changed_();
-    }
-    bool leave = ImGui::Button("Back to Game Vault", button);
-    ImGui::SetWindowFontScale(1.0f * scale);
-    ImGui::TextDisabled("B: resume");
     ImGui::End();
     ImGui::PopStyleColor(5);
     ImGui::PopStyleVar(4);
-    // (the View button that opened the menu is still down for a moment)
-    if (frames_ > 10 && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight)) {
-      close = true;
+    // B: back a page, or resume (the View button that opened the menu is
+    // still down for a moment, so the first frames don't count)
+    if (!done_ && frames_ > 10 &&
+        ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight)) {
+      if (page_ == Page::kMain) {
+        done_ = true;
+      } else {
+        Show(Page::kMain);
+      }
     }
-    if (leave) {
-      XELOGI("Game Vault: in-game menu: back to Game Vault");
-      Close();
-      if (leave_) leave_();
-      return;
-    }
-    if (close) {
+    if (done_) {
       Close();
     }
   }
 
  private:
+  void Show(Page page) {
+    page_ = page;
+    page_frame_ = frames_ + 1;
+  }
+  void Title(const char* text, float scale) {
+    ImGui::SetWindowFontScale(1.6f * scale);
+    ImGui::TextUnformatted(text);
+    ImGui::SetWindowFontScale(1.2f * scale);
+    ImGui::Spacing();
+    if (frames_ == page_frame_) {
+      ImGui::SetKeyboardFocusHere();
+    }
+  }
+  void Hint(const char* text, float scale) {
+    ImGui::SetWindowFontScale(0.95f * scale);
+    ImGui::TextDisabled("%s", text);
+  }
+  // Closes the menu (the game goes on) and then runs |action|.
+  void CloseThen(std::function<void()> action) {
+    after_close_ = std::move(action);
+    done_ = true;
+  }
+
+  void DrawMain(float scale) {
+    Title("Paused", scale);
+    if (ImGui::Button("Resume", button_)) {
+      done_ = true;
+    }
+    if (ImGui::Button("Restart game", button_)) {
+      CloseThen(actions_.restart);
+    }
+    const int current = std::max(1, int(cvars::draw_resolution_scale_x));
+    if (ImGui::Button(fmt::format("Resolution scale: {}x", current).c_str(),
+                      button_)) {
+      Show(Page::kScale);
+    }
+    if (ImGui::Button("Controllers", button_)) {
+      Show(Page::kControllers);
+    }
+    const bool fps = UWP::GetShowFps();
+    if (ImGui::Button(fps ? "Show frame rate: On" : "Show frame rate: Off",
+                      button_)) {
+      UWP::SetShowFps(!fps);
+      if (actions_.fps_changed) actions_.fps_changed();
+    }
+    if (ImGui::Button("Clear shader cache", button_)) {
+      CloseThen(actions_.clear_shaders);
+    }
+    if (ImGui::Button("Back to Game Vault", button_)) {
+      CloseThen(actions_.leave);
+    }
+    Hint("B: resume.  Clearing the shader cache restarts the game.", scale);
+  }
+
+  void DrawScale(float scale) {
+    Title("Resolution scale", scale);
+    const int current = std::max(1, int(cvars::draw_resolution_scale_x));
+    static const char* kNames[] = {"1x  (720p, fastest)", "2x  (1440p)",
+                                   "3x  (4K, sharpest)"};
+    for (int i = 1; i <= 3; ++i) {
+      const std::string label =
+          fmt::format("{}{}", kNames[i - 1], i == current ? "   (now)" : "");
+      if (ImGui::Button(label.c_str(), button_) && i != current) {
+        CloseThen([this, i]() { actions_.set_scale(i); });
+      }
+    }
+    Hint("For every Xbox 360 game. The game restarts. B: back.", scale);
+  }
+
+  void DrawControllers(float scale) {
+    Title("Controllers", scale);
+    auto* input = emulator_->input_system();
+    for (uint32_t slot = 0; slot < 4; ++slot) {
+      hid::X_INPUT_CAPABILITIES caps = {};
+      hid::X_INPUT_STATE state = {};
+      const bool connected =
+          input && input->GetCapabilities(slot, 1, &caps) == X_ERROR_SUCCESS;
+      const bool pressed =
+          connected &&
+          input->GetStateForUI(slot, 1, &state) == X_ERROR_SUCCESS &&
+          (state.gamepad.buttons || state.gamepad.left_trigger > 30 ||
+           state.gamepad.right_trigger > 30);
+      const std::string line =
+          fmt::format("Player {}:  {}", slot + 1,
+                      !connected ? "-"
+                      : pressed  ? "connected  (pressing)"
+                                 : "connected");
+      if (pressed) {
+        ImGui::TextColored(ImVec4(0.45f, 0.75f, 1.0f, 1.0f), "%s",
+                           line.c_str());
+      } else if (connected) {
+        ImGui::TextUnformatted(line.c_str());
+      } else {
+        ImGui::TextDisabled("%s", line.c_str());
+      }
+    }
+    ImGui::Spacing();
+    if (ImGui::Button("Back", button_)) {
+      Show(Page::kMain);
+    }
+    Hint("Hold a button on a controller to see which player it is.", scale);
+  }
+
   Emulator* emulator_;
-  std::function<void()> fps_changed_;
-  std::function<void()> leave_;
+  GameMenuActions actions_;
   GameMenu** open_menu_;
   kernel::GuestScheduler* scheduler_ = nullptr;
+  Page page_ = Page::kMain;
   uint64_t frames_ = 0;
+  uint64_t page_frame_ = 1;
+  ImVec2 button_;
+  bool done_ = false;
+  std::function<void()> after_close_;
 };
 
 class GameVaultXeniaApp final : public ui::WindowedApp {
@@ -552,6 +667,8 @@ class GameVaultXeniaApp final : public ui::WindowedApp {
   // UI thread, every pass: Game Vault sent another game while one runs.
   void CompanionTick();
   void StartTitle(const std::filesystem::path& path);
+  // The running game starts again (in-game menu), on its own thread.
+  void RestartTitle(const char* why);
 
   std::unique_ptr<Emulator> emulator_;
   std::unique_ptr<ui::Window> window_;
@@ -562,6 +679,7 @@ class GameVaultXeniaApp final : public ui::WindowedApp {
   GameMenu* game_menu_ = nullptr;      // owned by the ImGui drawer, when open
   std::atomic<bool> emulator_ready_{false};
   std::atomic<bool> switching_{false};
+  std::filesystem::path current_path_;  // the game started last
   std::thread emulator_thread_;
 };
 
@@ -673,6 +791,7 @@ void GameVaultXeniaApp::ShutdownPresenter() {
 }
 
 void GameVaultXeniaApp::StartTitle(const std::filesystem::path& path) {
+  current_path_ = path;
   // The game Game Vault shared or a network game is there without a look at
   // the drive (a network game's stand-in path is on no drive at all).
   std::error_code ec;
@@ -782,20 +901,31 @@ void GameVaultXeniaApp::EmulatorThread() {
         UWP::ReturnToFrontend(imgui_drawer_.get());
         return;
       }
-      new GameMenu(
-          imgui_drawer_.get(), emulator_.get(),
-          [this]() {
-            if (!fps_overlay_ && UWP::GetShowFps()) {
-              fps_overlay_ = new FpsOverlay(
-                  imgui_drawer_.get(), [this]() { return presenter_painting_; },
-                  emulator_.get());
-            }
-            if (fps_overlay_) {
-              fps_overlay_->set_shown(UWP::GetShowFps());
-            }
-          },
-          [this]() { UWP::ReturnToFrontend(imgui_drawer_.get()); },
-          &game_menu_);
+      GameMenuActions actions;
+      actions.fps_changed = [this]() {
+        if (!fps_overlay_ && UWP::GetShowFps()) {
+          fps_overlay_ = new FpsOverlay(
+              imgui_drawer_.get(), [this]() { return presenter_painting_; },
+              emulator_.get());
+        }
+        if (fps_overlay_) {
+          fps_overlay_->set_shown(UWP::GetShowFps());
+        }
+      };
+      actions.restart = [this]() { RestartTitle("restart"); };
+      actions.leave = [this]() { UWP::ReturnToFrontend(imgui_drawer_.get()); };
+      actions.clear_shaders = [this]() {
+        gpu::RequestShaderStorageClear(emulator_->game_config_title_id());
+        RestartTitle("shader cache cleared");
+      };
+      actions.set_scale = [this](int scale) {
+        cvars::draw_resolution_scale_x = scale;
+        cvars::draw_resolution_scale_y = scale;
+        config::SaveConfig();
+        RestartTitle("resolution scale");
+      };
+      new GameMenu(imgui_drawer_.get(), emulator_.get(), std::move(actions),
+                   &game_menu_);
     });
   });
   emulator_ready_ = true;
@@ -858,7 +988,21 @@ void GameVaultXeniaApp::CompanionTick() {
   // here and picked another game. Edge restarts the emulator in this process
   // with the new one (on its own thread, as Edge's front end does).
   XELOGI("Game Vault: another game was sent while a game runs: {}", path);
+  current_path_ = path;
   switching_ = true;
+  std::thread([this, path]() {
+    emulator_->RelaunchTitle(xe::path_to_utf8(path), "", 0, {}, false);
+    switching_ = false;
+  }).detach();
+}
+
+void GameVaultXeniaApp::RestartTitle(const char* why) {
+  if (switching_ || current_path_.empty()) {
+    return;
+  }
+  XELOGI("Game Vault: in-game menu: the game starts again ({})", why);
+  switching_ = true;
+  const std::filesystem::path path = current_path_;
   std::thread([this, path]() {
     emulator_->RelaunchTitle(xe::path_to_utf8(path), "", 0, {}, false);
     switching_ = false;

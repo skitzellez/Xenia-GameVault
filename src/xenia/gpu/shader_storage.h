@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -83,6 +84,40 @@ inline std::filesystem::path GetShaderStorageFilePath(
     const std::filesystem::path& cache_root, uint32_t title_id) {
   return GetShaderStorageShareableRoot(cache_root) /
          fmt::format("{:08X}.xsh", title_id);
+}
+
+// Game Vault: the in-game menu's "Clear shader cache". The next shader storage
+// start for the title (its restart) deletes the title's stored shaders and
+// pipelines first, after the old storage files are closed.
+inline std::atomic<uint32_t>& ShaderStorageClearRequest() {
+  static std::atomic<uint32_t> title_id{0};
+  return title_id;
+}
+inline void RequestShaderStorageClear(uint32_t title_id) {
+  ShaderStorageClearRequest().store(title_id);
+}
+// Deletes the title's storage files if a clear was asked for it.
+inline void ClearShaderStorageIfRequested(
+    const std::filesystem::path& cache_root, uint32_t title_id) {
+  uint32_t expected = title_id;
+  if (!title_id ||
+      !ShaderStorageClearRequest().compare_exchange_strong(expected, 0)) {
+    return;
+  }
+  const std::string prefix = fmt::format("{:08X}.", title_id);
+  int removed = 0;
+  for (const auto& root : {GetShaderStorageShareableRoot(cache_root),
+                           GetShaderStorageLocalRoot(cache_root)}) {
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+      if (entry.path().filename().string().rfind(prefix, 0) == 0 &&
+          std::filesystem::remove(entry.path(), ec)) {
+        ++removed;
+      }
+    }
+  }
+  XELOGI("Game Vault: shader cache of {:08X} cleared ({} files)", title_id,
+         removed);
 }
 
 // Ensures shader storage directories exist. Returns true on success.
