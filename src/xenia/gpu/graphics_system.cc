@@ -9,15 +9,12 @@
 
 #include "xenia/gpu/graphics_system.h"
 
-#include <charconv>
-
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/threading.h"
-#include "xenia/base/utf8.h"
 #include "xenia/config.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -26,6 +23,7 @@
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
 
+// Edge's kernel (xconfig.cc) reads these; this renderer reports the default.
 DEFINE_uint32(internal_display_resolution, 8,
               "Allow games that support different resolutions to render "
               "in a specific resolution.\n"
@@ -50,10 +48,12 @@ DEFINE_uint32(internal_display_resolution, 8,
               "   16=1920x1080\n"
               "   17=internal_display_resolution_x/y",
               "Console");
-DEFINE_uint32(internal_display_resolution_x, 1280,
+DEFINE_bool(use_50Hz_mode, false, "Enables usage of PAL-50 mode.", "Console");
+
+DEFINE_uint32(custom_internal_display_resolution_x, 0,
               "Custom width. See internal_display_resolution. Range 1-1920.",
               "Video");
-DEFINE_uint32(internal_display_resolution_y, 720,
+DEFINE_uint32(custom_internal_display_resolution_y, 0,
               "Custom height. See internal_display_resolution. Range 1-1080.\n",
               "Video");
 
@@ -65,6 +65,42 @@ DEFINE_bool(
 
 namespace xe {
 namespace gpu {
+
+namespace {
+constexpr uint32_t kInterruptCallbacksStopped = UINT32_C(0x80000000);
+
+class InterruptCallbackScope {
+ public:
+  explicit InterruptCallbackScope(std::atomic<uint32_t>& state) : state_(state) {
+    auto value = state_.load(std::memory_order_relaxed);
+    while (!(value & kInterruptCallbacksStopped)) {
+      if (state_.compare_exchange_weak(value, value + 1,
+                                      std::memory_order_acquire,
+                                      std::memory_order_relaxed)) {
+        entered_ = true;
+        return;
+      }
+    }
+  }
+
+  InterruptCallbackScope(const InterruptCallbackScope&) = delete;
+  InterruptCallbackScope& operator=(const InterruptCallbackScope&) = delete;
+
+  ~InterruptCallbackScope() {
+    if (entered_ &&
+        state_.fetch_sub(1, std::memory_order_release) ==
+            (kInterruptCallbacksStopped | 1)) {
+      state_.notify_all();
+    }
+  }
+
+  explicit operator bool() const { return entered_; }
+
+ private:
+  std::atomic<uint32_t>& state_;
+  bool entered_ = false;
+};
+}  // namespace
 
 // Nvidia Optimus/AMD PowerXpress support.
 // These exports force the process to trigger the discrete GPU in multi-GPU
@@ -86,17 +122,6 @@ GraphicsSystem::GraphicsSystem() : frame_limiter_worker_running_(false) {
 
 GraphicsSystem::~GraphicsSystem() = default;
 
-// The trace writer is compiled out of Release unless XENIA_ENABLE_GPU_TRACE is
-// enabled.
-constexpr bool kTraceCaptureAvailable =
-    XE_ENABLE_TRACE_WRITER_INSTRUMENTATION != 0;
-
-static void WarnTraceCaptureUnavailable() {
-  XELOGW(
-      "GPU trace capture isn't built into this configuration; use a Debug "
-      "build or enable the XENIA_ENABLE_GPU_TRACE CMake option");
-}
-
 X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                                kernel::KernelState* kernel_state,
                                ui::WindowedAppContext* app_context,
@@ -109,22 +134,7 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
   scaled_aspect_x_ = 16;
   scaled_aspect_y_ = 9;
 
-  auto custom_res_x = cvars::internal_display_resolution_x;
-  auto custom_res_y = cvars::internal_display_resolution_y;
-  if (!custom_res_x || custom_res_x > 1920 || !custom_res_y ||
-      custom_res_y > 1080) {
-    OVERRIDE_PERSIST_uint32(internal_display_resolution_x,
-                            internal_display_resolution_entries[8].first);
-    OVERRIDE_PERSIST_uint32(internal_display_resolution_y,
-                            internal_display_resolution_entries[8].second);
-    config::SaveConfig();
-    xe::FatalError(fmt::format(
-        "Invalid custom resolution specified: {}x{}\n"
-        "Width must be between 1-1920.\nHeight must be between 1-1080.",
-        custom_res_x, custom_res_y));
-  }
-
-  if (with_presentation && provider_) {
+  if (with_presentation && provider_ && !presenter_) {
     // Safe if either the UI thread call or the presenter creation fails.
     if (app_context_) {
       app_context_->CallInUIThreadSynchronous([this]() {
@@ -146,33 +156,6 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
   // Create command processor. This will spin up a thread to process all
   // incoming ringbuffer packets.
   command_processor_ = CreateCommandProcessor();
-
-  // Trace requests from the command line, made before Initialize starts the
-  // command processor thread, which reads the frame numbers on every swap.
-  if (cvars::trace_gpu_stream) {
-    BeginTracing();
-  }
-  std::vector<uint32_t> trace_frame_numbers;
-  for (std::string_view frame :
-       utf8::split(cvars::trace_gpu_frames, ", ", true)) {
-    uint32_t frame_number;
-    auto [end, error] = std::from_chars(
-        frame.data(), frame.data() + frame.size(), frame_number);
-    if (error != std::errc() || end != frame.data() + frame.size()) {
-      XELOGW("Ignoring invalid frame number \"{}\" in trace_gpu_frames", frame);
-      continue;
-    }
-    trace_frame_numbers.push_back(frame_number);
-  }
-  if (!trace_frame_numbers.empty()) {
-    if constexpr (kTraceCaptureAvailable) {
-      command_processor_->SetTraceFrameNumbers(cvars::trace_gpu_prefix,
-                                               std::move(trace_frame_numbers));
-    } else {
-      WarnTraceCaptureUnavailable();
-    }
-  }
-
   if (!command_processor_->Initialize()) {
     XELOGE("Unable to initialize command processor");
     return X_STATUS_UNSUCCESSFUL;
@@ -190,7 +173,30 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
       kernel::object_ref<kernel::XHostThread>(new kernel::XHostThread(
           kernel_state_, 128 * 1024, 0,
           [this]() {
+            uint64_t normalized_framerate_limit =
+                std::max<uint64_t>(0, cvars::framerate_limit);
+
+            // If VSYNC is enabled, but frames are not limited,
+            // lock framerate at default value of 60
+            if (normalized_framerate_limit == 0 && cvars::vsync) {
+              normalized_framerate_limit = 60;
+            }
+
+            const double vsync_duration_d =
+                cvars::vsync
+                    ? std::max<double>(5.0,
+                                       1000.0 / static_cast<double>(
+                                                    normalized_framerate_limit))
+                    : 1.0;
             uint64_t last_frame_time = Clock::QueryGuestTickCount();
+    // Sleep for 90% of the vblank duration on Windows, spin for 10%
+    // Linux uses full sleep duration due to scheduler quantum issues
+#if XE_PLATFORM_WIN32
+            constexpr double duration_scalar = 0.90;
+#endif
+#if XE_PLATFORM_LINUX
+            constexpr double duration_scalar = 1.0;
+#endif
 
             while (frame_limiter_worker_running_) {
               // If there is no title running then there is no need for guest
@@ -200,56 +206,59 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                 continue;
               }
 
-              // Read guest_display_refresh_cap cvar each frame to allow
-              // runtime changes
-              // true: Fire vblanks at fixed rate (50Hz PAL, 60Hz NTSC)
-              // false: Fire vblanks limited by framerate_limit or 1ms
-              // Note: framerate_limit is handled separately at IssueSwap for
-              // host presentation throttling
-              bool refresh_cap_enabled = cvars::guest_display_refresh_cap;
+              register_file()->values[XE_GPU_REG_D1MODE_V_COUNTER] +=
+                  GetResolution().second;
 
-              if (refresh_cap_enabled) {
-                const uint32_t vblank_hz = GetGuestVblankRateHz();
-                const uint64_t tick_freq = Clock::guest_tick_frequency();
-                const uint64_t target_duration_ticks = tick_freq / vblank_hz;
+#if XE_PLATFORM_WIN32
+              if (cvars::vsync) {
                 const uint64_t current_time = Clock::QueryGuestTickCount();
+                const uint64_t tick_freq = Clock::guest_tick_frequency();
                 const uint64_t time_delta = current_time - last_frame_time;
+                const double elapsed_d =
+                    static_cast<double>(time_delta) /
+                    (static_cast<double>(tick_freq) / 1000.0);
+                if (elapsed_d >= vsync_duration_d) {
+                  last_frame_time = current_time;
 
-                if (time_delta >= target_duration_ticks) {
-                  // If we've fallen behind by more than 2 frames, reset
-                  if (time_delta > target_duration_ticks * 2) {
-                    last_frame_time = current_time;
-                  } else {
-                    last_frame_time += target_duration_ticks;
-                  }
                   MarkVblank();
-#if XE_PLATFORM_WIN32 || XE_PLATFORM_MAC
-                  // Sleep for 90% of the period, spin for the rest.
-                  const uint64_t sleep_ns = static_cast<uint64_t>(
-                      900000000.0 / (vblank_hz * Clock::guest_time_scalar()));
-#if XE_PLATFORM_MAC
-                  threading::NanoSleepPrecise(sleep_ns);
-#else
-                  threading::NanoSleep(sleep_ns);
-#endif
-#endif
+                  const uint64_t estimated_nanoseconds = static_cast<uint64_t>(
+                      (vsync_duration_d * 1000000.0) *
+                      duration_scalar);  // 1000 microseconds = 1 ms
+
+                  threading::NanoSleep(estimated_nanoseconds);
                 }
-#if XE_PLATFORM_LINUX
-                else {
-                  // Sleep to the deadline, so a late wake-up shortens the
-                  // next sleep instead of stretching the period.
-                  threading::NanoSleep(static_cast<int64_t>(
-                      (target_duration_ticks - time_delta) * 1000000000.0 /
-                      (tick_freq * Clock::guest_time_scalar())));
-                }
-#endif
-              } else {
-                // Unlimited mode (guest_display_refresh_cap=false) - fire
-                // vblanks as fast as possible Host presentation is separately
-                // throttled by framerate_limit
-                MarkVblank();
-                threading::Sleep(std::chrono::milliseconds(1));
               }
+
+              if (!cvars::vsync) {
+                MarkVblank();
+                if (normalized_framerate_limit > 0) {
+                  // framerate_limit is over 0, vsync disabled
+                  //  - No VSYNC + limited frames defined by user
+                  uint64_t framerate_limited_sleep_time =
+                      1000000000 / normalized_framerate_limit;
+                  xe::threading::NanoSleep(framerate_limited_sleep_time);
+                } else {
+                  // framerate_limit is 0, vsync disabled
+                  //  - No VSYNC + unlimited frames
+                  xe::threading::Sleep(std::chrono::milliseconds(1));
+                }
+              }
+#endif
+#if XE_PLATFORM_LINUX
+              // Linux: Use simplified timing logic to avoid oversleeping
+              MarkVblank();
+
+              if (cvars::vsync || normalized_framerate_limit > 0) {
+                uint64_t sleep_duration_ns =
+                    static_cast<uint64_t>(vsync_duration_d * 1000000.0);
+                if (!cvars::vsync && normalized_framerate_limit > 0) {
+                  sleep_duration_ns = 1000000000 / normalized_framerate_limit;
+                }
+                threading::NanoSleep(sleep_duration_ns);
+              } else {
+                xe::threading::Sleep(std::chrono::milliseconds(1));
+              }
+#endif
             }
             return 0;
           },
@@ -258,26 +267,17 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
   frame_limiter_worker_thread_->set_can_debugger_suspend(true);
   frame_limiter_worker_thread_->set_name("GPU Frame limiter");
   frame_limiter_worker_thread_->Create();
-  // Linux only sleeps, so kLowest (nice 15) would just add wake-up latency.
-#if XE_PLATFORM_LINUX
-  frame_limiter_worker_thread_->thread()->set_priority(
-      threading::ThreadPriority::kNormal);
-#else
   frame_limiter_worker_thread_->thread()->set_priority(
       threading::ThreadPriority::kLowest);
-#endif
+  if (cvars::trace_gpu_stream) {
+    BeginTracing();
+  }
 
   return X_STATUS_SUCCESS;
 }
 
 void GraphicsSystem::Shutdown() {
-  if (command_processor_) {
-    EndTracing();
-    command_processor_->Shutdown();
-    command_processor_.reset();
-  }
-
-  StopFrameLimiter();
+  ShutdownGuestState();
 
   if (presenter_) {
     if (app_context_) {
@@ -292,12 +292,47 @@ void GraphicsSystem::Shutdown() {
   provider_.reset();
 }
 
-void GraphicsSystem::StopFrameLimiter() {
+void GraphicsSystem::StopGuestCallbacks() {
+  auto state = interrupt_callbacks_state_.fetch_or(
+                   kInterruptCallbacksStopped, std::memory_order_acq_rel) |
+               kInterruptCallbacksStopped;
+  while (state != kInterruptCallbacksStopped) {
+    interrupt_callbacks_state_.wait(state, std::memory_order_acquire);
+    state = interrupt_callbacks_state_.load(std::memory_order_acquire);
+  }
+  interrupt_callback_.store(0, std::memory_order_relaxed);
+}
+
+void GraphicsSystem::ShutdownGuestState() {
+  if (paused_ && command_processor_) {
+    Resume();
+  }
+  StopGuestCallbacks();
   if (frame_limiter_worker_thread_) {
     frame_limiter_worker_running_ = false;
     frame_limiter_worker_thread_->Wait(0, 0, 0, nullptr);
     frame_limiter_worker_thread_.reset();
   }
+  if (command_processor_) {
+    EndTracing();
+    command_processor_->Shutdown();
+    command_processor_.reset();
+  }
+  memory_ = nullptr;
+  processor_ = nullptr;
+  kernel_state_ = nullptr;
+}
+
+X_STATUS GraphicsSystem::ReinitializeGuestState(
+    cpu::Processor* processor, kernel::KernelState* kernel_state) {
+  assert_null(command_processor_);
+  assert_null(frame_limiter_worker_thread_);
+  std::memset(register_file_, 0, sizeof(*register_file_));
+  interrupt_callback_.store(0, std::memory_order_relaxed);
+  interrupt_callbacks_state_.store(0, std::memory_order_release);
+  paused_ = false;
+  return GraphicsSystem::Setup(processor, kernel_state, app_context_,
+                               presenter_ != nullptr);
 }
 
 void GraphicsSystem::OnHostGpuLossFromAnyThread(
@@ -335,49 +370,15 @@ uint32_t GraphicsSystem::ReadRegister(uint32_t addr) {
   uint32_t r = (addr & 0xFFFF) / 4;
 
   switch (r) {
-    case XE_GPU_REG_RB_EDRAM_TIMING:
+    case 0x0F00:  // RB_EDRAM_TIMING
       return 0x08100748;
-    case XE_GPU_REG_RB_BC_CONTROL:
+    case 0x0F01:  // RB_BC_CONTROL
       return 0x0000200E;
-    case XE_GPU_REG_RB_HSIO_INTERFACE_ALIGNER_VALUE:
-      return 0x00BBBBBB;
-    case XE_GPU_REG_D1MODE_V_COUNTER: {
-      // Free-running scanline counter, like Xenos drives off the pixel clock.
-      // Cycles 0..(total_lines-1) every frame, including the vertical-blank
-      // region above the 720 active lines reported by D1MODE_VIEWPORT_SIZE
-      // below. Total ~= active + 4% blanking (720p60 -> 750, 576p50 -> 625).
-      // Period is measured from the MarkVblank cadence, so V_COUNTER stays
-      // coupled to whatever vblank rate is actually in effect (50Hz, 60Hz,
-      // or uncapped ~1ms) — matching how silicon raises vblank IRQs from
-      // V_COUNTER crossings.
-      const uint32_t vblank_hz = GetGuestVblankRateHz();
-      const uint32_t total_lines = (vblank_hz == 50) ? 625u : 750u;
-      uint64_t period = vblank_period_ticks_.load(std::memory_order_acquire);
-      if (!period) {
-        // Pre-first-vblank bootstrap: assume the configured rate.
-        period = Clock::guest_tick_frequency() / vblank_hz;
-        if (!period) {
-          return 0;
-        }
-      }
-      const uint64_t last =
-          last_vblank_guest_tick_.load(std::memory_order_acquire);
-      if (!last) {
-        return 0;
-      }
-      const uint64_t now = Clock::QueryGuestTickCount();
-      uint64_t delta = (now > last) ? (now - last) : 0;
-      if (delta >= period) {
-        // Reader outran the next vblank (stall, paused, etc.); park on the
-        // last line until MarkVblank advances the anchor.
-        delta = period - 1;
-      }
-      return static_cast<uint32_t>((delta * total_lines) / period);
-    }
-    case XE_GPU_REG_D1MODE_VBLANK_VLINE_STATUS:
-      return 1;  // vblank
-    case XE_GPU_REG_D1MODE_VIEWPORT_SIZE:
-      // 1280x720, [width(0x0FFF), height(0x0FFF)].
+    case 0x1951:  // interrupt status
+      return 1;   // vblank
+    case 0x1961:  // AVIVO_D1MODE_VIEWPORT_SIZE
+                  // Screen res - 1280x720
+                  // maximum [width(0x0FFF), height(0x0FFF)]
       return 0x050002D0;
     default:
       if (!register_file()->IsValidRegister(r)) {
@@ -395,10 +396,6 @@ void GraphicsSystem::WriteRegister(uint32_t addr, uint32_t value) {
   switch (r) {
     case 0x01C5:  // CP_RB_WPTR
       command_processor_->UpdateWritePointer(value);
-      break;
-    case 0x0F01:  // RB_BC_CONTROL
-      break;
-    case 0x0F2D:  // RB_HSIO_INTERFACE_ALIGNER_VALUE
       break;
     case 0x1844:  // AVIVO_D1GRPH_PRIMARY_SURFACE_ADDRESS
       break;
@@ -422,27 +419,27 @@ void GraphicsSystem::EnableReadPointerWriteBack(uint32_t ptr,
 
 void GraphicsSystem::SetInterruptCallback(uint32_t callback,
                                           uint32_t user_data) {
-  interrupt_callback_ = callback;
-  interrupt_callback_data_ = user_data;
+  const InterruptCallbackScope registration(interrupt_callbacks_state_);
+  if (!registration) {
+    return;
+  }
+  interrupt_callback_.store(uint64_t(callback) | (uint64_t(user_data) << 32),
+                             std::memory_order_release);
   XELOGGPU("SetInterruptCallback({:08X}, {:08X})", callback, user_data);
 }
 
 void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
-  kernel_state()->EmulateCPInterruptDPC(interrupt_callback_,
-                                        interrupt_callback_data_, source, cpu);
+  const InterruptCallbackScope dispatch(interrupt_callbacks_state_);
+  if (!dispatch) {
+    return;
+  }
+  const auto callback = interrupt_callback_.load(std::memory_order_acquire);
+  kernel_state()->EmulateCPInterruptDPC(uint32_t(callback),
+                                       uint32_t(callback >> 32), source, cpu);
 }
 
 void GraphicsSystem::MarkVblank() {
   SCOPE_profile_cpu_f("gpu");
-
-  // Capture vblank cadence so D1MODE_V_COUNTER tracks the actual rate
-  // (50Hz, 60Hz, or uncapped ~1ms), not just the configured one.
-  const uint64_t now = Clock::QueryGuestTickCount();
-  const uint64_t prev =
-      last_vblank_guest_tick_.exchange(now, std::memory_order_acq_rel);
-  if (prev && now > prev) {
-    vblank_period_ticks_.store(now - prev, std::memory_order_release);
-  }
 
   // Increment vblank counter (so the game sees us making progress).
   command_processor_->increment_counter();
@@ -458,14 +455,8 @@ void GraphicsSystem::ClearCaches() {
       [&]() { command_processor_->ClearCaches(); });
 }
 
-void GraphicsSystem::InvalidateGpuMemory() {
-  command_processor_->CallInThread(
-      [&]() { command_processor_->InvalidateGpuMemory(); });
-}
-
 void GraphicsSystem::InitializeShaderStorage(
     const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
-    std::function<void()> started_callback,
     std::function<void()> completion_callback) {
   if (!cvars::store_shaders) {
     if (completion_callback) {
@@ -477,20 +468,13 @@ void GraphicsSystem::InitializeShaderStorage(
     if (command_processor_->is_paused()) {
       // Safe to run on any thread while the command processor is paused, no
       // race condition.
-      if (started_callback) {
-        started_callback();
-      }
       command_processor_->InitializeShaderStorage(
           cache_root, title_id, true, std::move(completion_callback));
     } else {
       xe::threading::Fence fence;
       command_processor_->CallInThread(
           [this, cache_root, title_id, &fence,
-           started_callback = std::move(started_callback),
            completion_callback = std::move(completion_callback)]() mutable {
-            if (started_callback) {
-              started_callback();
-            }
             command_processor_->InitializeShaderStorage(
                 cache_root, title_id, true, std::move(completion_callback));
             fence.Signal();
@@ -500,11 +484,7 @@ void GraphicsSystem::InitializeShaderStorage(
   } else {
     command_processor_->CallInThread(
         [this, cache_root, title_id,
-         started_callback = std::move(started_callback),
          completion_callback = std::move(completion_callback)]() mutable {
-          if (started_callback) {
-            started_callback();
-          }
           command_processor_->InitializeShaderStorage(
               cache_root, title_id, false, std::move(completion_callback));
         });
@@ -512,30 +492,14 @@ void GraphicsSystem::InitializeShaderStorage(
 }
 
 void GraphicsSystem::RequestFrameTrace() {
-  if constexpr (kTraceCaptureAvailable) {
-    command_processor_->RequestFrameTrace(cvars::trace_gpu_prefix);
-  } else {
-    WarnTraceCaptureUnavailable();
-  }
+  command_processor_->RequestFrameTrace(cvars::trace_gpu_prefix);
 }
 
 void GraphicsSystem::BeginTracing() {
-  if constexpr (kTraceCaptureAvailable) {
-    command_processor_->BeginTracing(cvars::trace_gpu_prefix);
-  } else {
-    WarnTraceCaptureUnavailable();
-  }
+  command_processor_->BeginTracing(cvars::trace_gpu_prefix);
 }
 
 void GraphicsSystem::EndTracing() { command_processor_->EndTracing(); }
-
-void GraphicsSystem::RequestEndTracing() {
-  command_processor_->RequestEndTracing();
-}
-
-bool GraphicsSystem::is_tracing_stream() const {
-  return command_processor_->is_tracing_stream();
-}
 
 void GraphicsSystem::Pause() {
   paused_ = true;
@@ -550,27 +514,53 @@ void GraphicsSystem::Resume() {
 }
 
 bool GraphicsSystem::Save(ByteStream* stream) {
-  stream->Write<uint32_t>(interrupt_callback_);
-  stream->Write<uint32_t>(interrupt_callback_data_);
+  const auto callback = interrupt_callback_.load(std::memory_order_acquire);
+  stream->Write<uint32_t>(uint32_t(callback));
+  stream->Write<uint32_t>(uint32_t(callback >> 32));
 
   return command_processor_->Save(stream);
 }
 
 bool GraphicsSystem::Restore(ByteStream* stream) {
-  interrupt_callback_ = stream->Read<uint32_t>();
-  interrupt_callback_data_ = stream->Read<uint32_t>();
+  const auto callback = stream->Read<uint32_t>();
+  const auto user_data = stream->Read<uint32_t>();
+  SetInterruptCallback(callback, user_data);
 
   return command_processor_->Restore(stream);
 }
 
-std::pair<uint16_t, uint16_t> GraphicsSystem::GetInternalDisplayResolution() {
-  if (cvars::internal_display_resolution >=
-      internal_display_resolution_entries.size()) {
-    return {cvars::internal_display_resolution_x,
-            cvars::internal_display_resolution_y};
+void GraphicsSystem::StopFrameLimiter() {
+  if (frame_limiter_worker_thread_) {
+    frame_limiter_worker_running_ = false;
+    frame_limiter_worker_thread_->Wait(0, 0, 0, nullptr);
+    frame_limiter_worker_thread_.reset();
   }
-  return internal_display_resolution_entries
-      [cvars::internal_display_resolution];
+}
+
+std::pair<uint16_t, uint16_t> GraphicsSystem::GetInternalDisplayResolution() {
+  if (cvars::custom_internal_display_resolution_x != 0 &&
+      cvars::custom_internal_display_resolution_y != 0) {
+    return {uint16_t(cvars::custom_internal_display_resolution_x),
+            uint16_t(cvars::custom_internal_display_resolution_y)};
+  }
+  return {1280, 720};
+}
+
+std::pair<uint32_t, uint32_t> GraphicsSystem::GetResolution() const {
+  if (!kernel_state_) {
+    return {1280, 720};
+  }
+
+  if (cvars::custom_internal_display_resolution_x != 0 &&
+      cvars::custom_internal_display_resolution_y != 0) {
+    return {cvars::custom_internal_display_resolution_x,
+            cvars::custom_internal_display_resolution_y};
+  }
+
+  // (Edge's kernel has no xconfig screen-size table: its default, as the
+  // kernel's video calls report it)
+  const auto resolution = GetInternalDisplayResolution();
+  return {resolution.first, resolution.second};
 }
 
 }  // namespace gpu

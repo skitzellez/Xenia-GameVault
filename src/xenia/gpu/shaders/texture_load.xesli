@@ -50,10 +50,10 @@ push_const_begin_xe(b0, space0)
 push_const_end_xe
 
 #define XE_TEXTURE_LOAD_ENTRY(source_byte_buffer_alignment)                 \
-  byte_buffer_align16_wo_declare_xe(xe_texture_load_dest, 0, 0, \
-                                    u0, space0, 1)                             \
+  byte_buffer_align16_wo_declare_xe(xe_texture_load_dest, set=0, binding=0, \
+                                    u0, space0)                             \
   byte_buffer_align##source_byte_buffer_alignment##_declare_xe(             \
-      xe_texture_load_source, 1, 0, t0, space0, 2)                 \
+      xe_texture_load_source, set=1, binding=0, t0, space0)                 \
   entry_bindings_begin_compute_xe                                           \
     XE_TEXTURE_LOAD_PUSH_CONST_BINDING                                      \
     entry_binding_next_xe                                                   \

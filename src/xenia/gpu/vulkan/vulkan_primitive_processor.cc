@@ -13,7 +13,6 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
-#include "xenia/base/profiling.h"
 #include "xenia/gpu/vulkan/deferred_command_buffer.h"
 #include "xenia/gpu/vulkan/vulkan_command_processor.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
@@ -67,7 +66,6 @@ void VulkanPrimitiveProcessor::Shutdown(bool from_destructor) {
 }
 
 void VulkanPrimitiveProcessor::CompletedSubmissionUpdated() {
-  SCOPE_profile_cpu_f("gpu");
   if (builtin_index_buffer_upload_ != VK_NULL_HANDLE &&
       command_processor_.GetCompletedSubmission() >=
           builtin_index_buffer_upload_submission_) {
@@ -83,7 +81,6 @@ void VulkanPrimitiveProcessor::CompletedSubmissionUpdated() {
 }
 
 void VulkanPrimitiveProcessor::BeginSubmission() {
-  SCOPE_profile_cpu_f("gpu");
   if (builtin_index_buffer_upload_ != VK_NULL_HANDLE &&
       builtin_index_buffer_upload_submission_ == UINT64_MAX) {
     // No need to submit deferred barriers - builtin_index_buffer_ has never
@@ -94,9 +91,6 @@ void VulkanPrimitiveProcessor::BeginSubmission() {
 
     DeferredCommandBuffer& command_buffer =
         command_processor_.deferred_command_buffer();
-
-    command_processor_.InsertDebugMarker(
-        "Builtin Index Buffer Upload: %zu bytes", builtin_index_buffer_size_);
 
     VkBufferCopy* copy_region = command_buffer.CmdCopyBufferEmplace(
         builtin_index_buffer_upload_, builtin_index_buffer_, 1);
@@ -115,7 +109,6 @@ void VulkanPrimitiveProcessor::BeginSubmission() {
 }
 
 void VulkanPrimitiveProcessor::BeginFrame() {
-  SCOPE_profile_cpu_f("gpu");
   frame_index_buffer_pool_->Reclaim(command_processor_.GetCompletedFrame());
 }
 
@@ -124,7 +117,6 @@ void VulkanPrimitiveProcessor::EndSubmission() {
 }
 
 void VulkanPrimitiveProcessor::EndFrame() {
-  SCOPE_profile_cpu_f("gpu");
   ClearPerFrameCache();
   frame_index_buffers_.clear();
 }
@@ -202,7 +194,6 @@ bool VulkanPrimitiveProcessor::InitializeBuiltinIndexBuffer(
 void* VulkanPrimitiveProcessor::RequestHostConvertedIndexBufferForCurrentFrame(
     xenos::IndexFormat format, uint32_t index_count, bool coalign_for_simd,
     uint32_t coalignment_original_address, size_t& backend_handle_out) {
-  SCOPE_profile_cpu_f("gpu");
   size_t index_size = format == xenos::IndexFormat::kInt16 ? sizeof(uint16_t)
                                                            : sizeof(uint32_t);
   VkBuffer buffer;

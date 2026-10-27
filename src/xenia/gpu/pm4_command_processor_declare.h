@@ -1,5 +1,3 @@
-// Class-body fragment, so whole-file and range formatting disagree on indent.
-// clang-format off
 #if defined(OVERRIDING_BASE_CMDPROCESSOR)
 #define PM4_OVERRIDE override
 #else
@@ -11,9 +9,7 @@ virtual uint32_t ExecutePrimaryBuffer(uint32_t start_index, uint32_t end_index)
 virtual bool ExecutePacket() PM4_OVERRIDE;
 
 public:
-// Virtual so trace playback, which only holds a CommandProcessor*, reaches the
-// backend's executor instead of the base one whose IssueDraw is a stub.
-virtual void ExecutePacket(uint32_t ptr, uint32_t count) PM4_OVERRIDE;
+void ExecutePacket(uint32_t ptr, uint32_t count);
 
 protected:
 XE_NOINLINE
@@ -110,4 +106,3 @@ XE_COLD
 bool ExecutePacketType0_CountOverflow(uint32_t count);
 
 #undef PM4_OVERRIDE
-// clang-format on

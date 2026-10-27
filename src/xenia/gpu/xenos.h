@@ -434,35 +434,6 @@ constexpr float UNorm24To32(uint32_t n24) {
   return float(n24 + (n24 >> 23)) * (1.0f / float(1 << 24));
 }
 
-// The shader ALU's RCP, RSQ, SQRT, EXP and LOG each evaluate a cubic in the low
-// bits of the mantissa, or of the fraction for EXP, using the integer
-// coefficients of one of 32 segments.
-struct ScalarEstimate {
-  // Offset bits below a sticky bit that the square leaves out.
-  uint32_t square_input_shift;
-  uint32_t square_shift;
-  // How much coarser the square in the cubic term is.
-  uint32_t square_coarse_shift;
-  // Offset bits below the block that sets the cubic coefficient.
-  uint32_t block_shift;
-  uint32_t cubic_shift;
-  bool cubic_rounds_up;
-  // C0 and the magnitudes of C1, C2 and C3 of each segment. RSQ and SQRT use
-  // segments 16-31 for operands with an odd exponent.
-  uint32_t coefficients[32][4];
-};
-extern const ScalarEstimate kRcpEstimate;
-extern const ScalarEstimate kRsqEstimate;
-extern const ScalarEstimate kSqrtEstimate;
-extern const ScalarEstimate kExpEstimate;
-extern const ScalarEstimate kLogEstimate;
-// The scalar ALU ops as the console computes them, bit for bit.
-float Rcp(float value);
-float Rsq(float value);
-float Sqrt(float value);
-float Exp(float value);
-float Log(float value);
-
 // Scale for conversion of slope scales from PA_SU_POLY_OFFSET_FRONT/BACK_SCALE
 // units to those used when the slope is computed from the difference between
 // adjacent pixels, for conversion from the guest to common host APIs or to
@@ -523,11 +494,18 @@ enum class TextureFormat : uint32_t {
   k_6_5_5 = 5,
   k_8_8_8_8 = 6,
   k_2_10_10_10 = 7,
-  // Aliases of k_8.
+  // Possibly similar to k_8, but may be storing alpha instead of red when
+  // resolving/memexporting, though not exactly known. From the point of view of
+  // sampling, it should be treated the same as k_8 (given that textures have
+  // the last - and single-component textures have the only - component
+  // replicated into all the remaining ones before the swizzle).
   // Used as:
   // - Texture in 4B4E083C - text, starting from the "Loading..." and the "This
   //   game saves data automatically" messages. The swizzle in the fetch
-  //   constant is 111W.
+  //   constant is 111W (suggesting that internally the only component may be
+  //   the alpha one, not red).
+  // TODO(Triang3l): Investigate how k_8_A and k_8_B work in resolves and
+  // memexports, whether they store alpha/blue of the input or red.
   k_8_A = 8,
   k_8_B = 9,
   k_8_8 = 10,
@@ -541,7 +519,7 @@ enum class TextureFormat : uint32_t {
   // Used for videos in 54540829.
   k_Y1_Cr_Y0_Cb_REP = 12,
   k_16_16_EDRAM = 13,
-  // Alias of k_8_8_8_8.
+  // Likely same as k_8_8_8_8.
   // Used as:
   // - Memexport destination in 4D5308BC - multiple small draws when looking
   //   back at the door behind the player in the first room of gameplay.
@@ -642,6 +620,7 @@ constexpr bool IsColorResolveFormatBitwiseEquivalent(
     // title that keeps the encoding to fetch it back with kGamma re-aliases the
     // surface as k_8_8_8_8.
     case ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
+      // TODO(Triang3l): Investigate k_8_8_8_8_A.
       return color_format == ColorFormat::k_8_8_8_8 ||
              color_format == ColorFormat::k_8_8_8_8_A ||
              color_format == ColorFormat::k_8_8_8_8_AS_16_16_16_16;
@@ -965,9 +944,6 @@ enum class EdramMode : uint32_t {
   //   from the vertex shader) as no texture alpha cutout is involved.
   // - 5454082B also has kDepthOnly draws with pretty complex shaders clearly
   //   for use only in the color pass - even fetching and filtering a shadowmap.
-  // - D3D itself switches to kDepthOnly when a null pixel shader is set
-  //   (4541096E does it in its own shader state flush) and nothing seems to
-  //   unload the previous PS from the command processor.
   // For now, based on these, let's assume the pixel shader is never used with
   // kDepthOnly.
   kDepthOnly = 5,
@@ -1021,22 +997,16 @@ enum class EdramMode : uint32_t {
 // XGAddress2D/3DTiledOffset called for left/top & ~31.
 //
 // RB_COPY_DEST_PITCH's purpose appears to be not clamping or something like
-// that, but just specifying pitch for going between rows, and height used by
-// 3D texture copies. copy_dest_pitch is rounded to 32 by Direct3D 9,
+// that, but just specifying pitch for going between rows, and height for going
+// between 3D texture slices. copy_dest_pitch is rounded to 32 by Direct3D 9,
 // copy_dest_height is not. In the 4D5307E6 sniper rifle scope example,
 // copy_dest_pitch is 320, and copy_dest_height is 192 - the same as the resolve
 // rectangle size (resolving from a 320x192 portion of the surface at 128,64 to
-// the whole texture, at 0,0). The bottom of the destination level is at 256
-// relative to RB_COPY_DEST_BASE, but this runtime writes level_height - dest_y,
-// giving 192 without including the source rectangle's top. Adreno doesn't have
-// copy_dest_height at all (as well as RB_COPY_DEST_INFO::copy_dest_slice),
-// suggesting that these fields are only needed for 3D texture copies.
-//
-// copy_dest_height can also adjusted for source_top, so it shouldn't be used to
-// determine volume slice spacing. Volume resolves separately write destination
-// pitch * level height to RB_COPY_SURFACE_SLICE without either adjustment.
-// Later D3D runtimes (4D530A26, 555308B6) add source_top, which would make the
-// same sniper scope example 256.
+// the whole texture, at 0,0). Relative to RB_COPY_DEST_BASE, the height should
+// have been 256, but it's not. Adreno doesn't have copy_dest_height at all (as
+// well as RB_COPY_DEST_INFO::copy_dest_slice), suggesting (alongside the name
+// of the register) that it exists purely to be able to go between 3D texture
+// slices.
 //
 // Window scissor must also be applied - in the jigsaw puzzle in 58410955, there
 // are 1280x720 resolve rectangles, but only the scissored 1280x256 needs to be
@@ -1064,7 +1034,7 @@ constexpr uint32_t kMaxResolveSize =
 enum class CopyCommand : uint32_t {
   kRaw = 0,
   kConvert = 1,
-  kConvertTo1111 = 2,
+  kConstantOne = 2,
   kNull = 3,  // ?
 };
 
@@ -1214,13 +1184,9 @@ constexpr uint32_t kTextureSubresourceAlignmentBytes =
 // Texture fetch constant size field widths.
 constexpr uint32_t kTexture1DMaxWidthLog2 = 24;
 constexpr uint32_t kTexture1DMaxWidth = 1 << kTexture1DMaxWidthLog2;
-// Emulation cap on rows materialized for wide (> 8192) 1D textures mapped to
-// 2D. Games may declare huge index-space widths (2^23 seen in the wild) with
-// only a little real data behind them - materializing the full width would
-// read far past the allocation, even past the 512 MB physical space. 5345084D
-// has data in all 96 rows of a 786432-texel k_8_8_8_8 texture. Must match
-// between the texture cache and the shader translators.
-constexpr uint32_t kTexture1DWideMaxRows = 128;
+// Limit the number of rows materialized when wide 1D textures are mapped to
+// 2D. Some games use very large widths with much less data behind them.
+constexpr uint32_t kTexture1DWideMaxRows = 32;
 constexpr uint32_t kTexture2DCubeMaxWidthHeightLog2 = 13;
 constexpr uint32_t kTexture2DCubeMaxWidthHeight =
     1 << kTexture2DCubeMaxWidthHeightLog2;

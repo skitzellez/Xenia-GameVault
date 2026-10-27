@@ -16,7 +16,6 @@
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/vulkan/vulkan_command_processor.h"
-#include "xenia/ui/vulkan/vulkan_instance.h"
 
 namespace xe {
 namespace gpu {
@@ -65,34 +64,6 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
               sizeof(VkClearValue) * render_pass_begin_info.clearValueCount;
         } else {
           render_pass_begin_info.pClearValues = nullptr;
-        }
-        VkAttachmentSampleLocationsEXT initial_sample_locations;
-        VkSubpassSampleLocationsEXT post_sample_locations;
-        VkRenderPassSampleLocationsBeginInfoEXT sample_locations_begin;
-        if (args.sample_locations_count) {
-          offset_bytes = xe::align(offset_bytes, alignof(VkSampleLocationEXT));
-          initial_sample_locations.attachmentIndex = 0;
-          auto& info = initial_sample_locations.sampleLocationsInfo;
-          info.sType = VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT;
-          info.pNext = nullptr;
-          info.sampleLocationsPerPixel = args.sample_locations_per_pixel;
-          info.sampleLocationGridSize = args.sample_location_grid_size;
-          info.sampleLocationsCount = args.sample_locations_count;
-          info.pSampleLocations = reinterpret_cast<const VkSampleLocationEXT*>(
-              reinterpret_cast<const uint8_t*>(stream) + offset_bytes);
-          post_sample_locations.subpassIndex = 0;
-          post_sample_locations.sampleLocationsInfo = info;
-          sample_locations_begin.sType =
-              VK_STRUCTURE_TYPE_RENDER_PASS_SAMPLE_LOCATIONS_BEGIN_INFO_EXT;
-          sample_locations_begin.pNext = nullptr;
-          sample_locations_begin.attachmentInitialSampleLocationsCount =
-              args.has_depth_attachment ? 1 : 0;
-          sample_locations_begin.pAttachmentInitialSampleLocations =
-              &initial_sample_locations;
-          sample_locations_begin.postSubpassSampleLocationsCount = 1;
-          sample_locations_begin.pPostSubpassSampleLocations =
-              &post_sample_locations;
-          render_pass_begin_info.pNext = &sample_locations_begin;
         }
         dfn.vkCmdBeginRenderPass(command_buffer, &render_pass_begin_info,
                                  args.contents);
@@ -166,22 +137,6 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
         dfn.vkCmdResetQueryPool(command_buffer, args.query_pool,
                                 args.first_query, args.query_count);
       } break;
-      case Command::kVkBeginConditionalRenderingEXT: {
-        auto& args =
-            *reinterpret_cast<const ArgsVkBeginConditionalRenderingEXT*>(
-                stream);
-        VkConditionalRenderingBeginInfoEXT begin_info;
-        begin_info.sType =
-            VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT;
-        begin_info.pNext = nullptr;
-        begin_info.buffer = args.buffer;
-        begin_info.offset = args.offset;
-        begin_info.flags = args.flags;
-        dfn.vkCmdBeginConditionalRenderingEXT(command_buffer, &begin_info);
-      } break;
-      case Command::kVkEndConditionalRenderingEXT: {
-        dfn.vkCmdEndConditionalRenderingEXT(command_buffer);
-      } break;
 
       case Command::kVkClearAttachments: {
         auto& args = *reinterpret_cast<const ArgsVkClearAttachments*>(stream);
@@ -247,16 +202,6 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
             args.filter);
       } break;
 
-      case Command::kVkCopyImage: {
-        auto& args = *reinterpret_cast<const ArgsVkCopyImage*>(stream);
-        dfn.vkCmdCopyImage(
-            command_buffer, args.src_image, args.src_image_layout,
-            args.dst_image, args.dst_image_layout, args.region_count,
-            reinterpret_cast<const VkImageCopy*>(
-                reinterpret_cast<const uint8_t*>(stream) +
-                xe::align(sizeof(ArgsVkCopyImage), alignof(VkImageCopy))));
-      } break;
-
       case Command::kVkDispatch: {
         auto& args = *reinterpret_cast<const ArgsVkDispatch*>(stream);
         dfn.vkCmdDispatch(command_buffer, args.group_count_x,
@@ -278,47 +223,6 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
 
       case Command::kVkEndRenderPass:
         dfn.vkCmdEndRenderPass(command_buffer);
-        break;
-
-      case Command::kVkBeginRendering: {
-        auto& args = *reinterpret_cast<const ArgsVkBeginRendering*>(stream);
-        size_t offset_bytes = xe::align(sizeof(ArgsVkBeginRendering),
-                                        alignof(VkRenderingAttachmentInfo));
-        const VkRenderingAttachmentInfo* color_attachments =
-            args.color_attachment_count
-                ? reinterpret_cast<const VkRenderingAttachmentInfo*>(
-                      reinterpret_cast<const uint8_t*>(stream) + offset_bytes)
-                : nullptr;
-        offset_bytes +=
-            sizeof(VkRenderingAttachmentInfo) * args.color_attachment_count;
-        const VkRenderingAttachmentInfo* depth_attachment =
-            args.has_depth_attachment
-                ? reinterpret_cast<const VkRenderingAttachmentInfo*>(
-                      reinterpret_cast<const uint8_t*>(stream) + offset_bytes)
-                : nullptr;
-        if (args.has_depth_attachment) {
-          offset_bytes += sizeof(VkRenderingAttachmentInfo);
-        }
-        const VkRenderingAttachmentInfo* stencil_attachment =
-            args.has_stencil_attachment
-                ? reinterpret_cast<const VkRenderingAttachmentInfo*>(
-                      reinterpret_cast<const uint8_t*>(stream) + offset_bytes)
-                : nullptr;
-        VkRenderingInfo rendering_info = {};
-        rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-        rendering_info.flags = args.flags;
-        rendering_info.renderArea = args.render_area;
-        rendering_info.layerCount = args.layer_count;
-        rendering_info.viewMask = args.view_mask;
-        rendering_info.colorAttachmentCount = args.color_attachment_count;
-        rendering_info.pColorAttachments = color_attachments;
-        rendering_info.pDepthAttachment = depth_attachment;
-        rendering_info.pStencilAttachment = stencil_attachment;
-        dfn.vkCmdBeginRendering(command_buffer, &rendering_info);
-      } break;
-
-      case Command::kVkEndRendering:
-        dfn.vkCmdEndRendering(command_buffer);
         break;
 
       case Command::kVkPipelineBarrier: {
@@ -353,39 +257,6 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
           barrier_offset_bytes +=
               sizeof(VkImageMemoryBarrier) * args.image_memory_barrier_count;
         }
-        if (args.sample_locations_info_count) {
-          image_barriers_with_sample_locations_.assign(
-              image_memory_barriers,
-              image_memory_barriers + args.image_memory_barrier_count);
-          barrier_sample_locations_.resize(args.sample_locations_info_count);
-          for (uint32_t i = 0; i < args.sample_locations_info_count; ++i) {
-            barrier_offset_bytes = xe::align(barrier_offset_bytes,
-                                             alignof(ArgsSampleLocationsInfo));
-            const auto& locations_args =
-                *reinterpret_cast<const ArgsSampleLocationsInfo*>(
-                    reinterpret_cast<const uint8_t*>(stream) +
-                    barrier_offset_bytes);
-            barrier_offset_bytes += sizeof(ArgsSampleLocationsInfo);
-            barrier_offset_bytes =
-                xe::align(barrier_offset_bytes, alignof(VkSampleLocationEXT));
-            auto& info = barrier_sample_locations_[i];
-            info.sType = VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT;
-            info.pNext = nullptr;
-            info.sampleLocationsPerPixel = locations_args.samples_per_pixel;
-            info.sampleLocationGridSize = locations_args.grid_size;
-            info.sampleLocationsCount = locations_args.count;
-            info.pSampleLocations =
-                reinterpret_cast<const VkSampleLocationEXT*>(
-                    reinterpret_cast<const uint8_t*>(stream) +
-                    barrier_offset_bytes);
-            barrier_offset_bytes +=
-                sizeof(VkSampleLocationEXT) * locations_args.count;
-            image_barriers_with_sample_locations_
-                [locations_args.image_memory_barrier_index]
-                    .pNext = &info;
-          }
-          image_memory_barriers = image_barriers_with_sample_locations_.data();
-        }
         dfn.vkCmdPipelineBarrier(
             command_buffer, args.src_stage_mask, args.dst_stage_mask,
             args.dependency_flags, args.memory_barrier_count, memory_barriers,
@@ -411,24 +282,6 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
         dfn.vkCmdSetDepthBias(command_buffer, args.depth_bias_constant_factor,
                               args.depth_bias_clamp,
                               args.depth_bias_slope_factor);
-      } break;
-
-      case Command::kVkSetDepthBias2EXT: {
-        auto& args = *reinterpret_cast<const ArgsVkSetDepthBias2EXT*>(stream);
-        VkDepthBiasRepresentationInfoEXT representation_info = {};
-        representation_info.sType =
-            VK_STRUCTURE_TYPE_DEPTH_BIAS_REPRESENTATION_INFO_EXT;
-        representation_info.depthBiasRepresentation =
-            args.depth_bias_representation;
-        representation_info.depthBiasExact = args.depth_bias_exact;
-        VkDepthBiasInfoEXT depth_bias_info = {};
-        depth_bias_info.sType = VK_STRUCTURE_TYPE_DEPTH_BIAS_INFO_EXT;
-        depth_bias_info.pNext = &representation_info;
-        depth_bias_info.depthBiasConstantFactor =
-            args.depth_bias_constant_factor;
-        depth_bias_info.depthBiasClamp = args.depth_bias_clamp;
-        depth_bias_info.depthBiasSlopeFactor = args.depth_bias_slope_factor;
-        dfn.vkCmdSetDepthBias2EXT(command_buffer, &depth_bias_info);
       } break;
 
       case Command::kVkSetScissor: {
@@ -470,50 +323,6 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
                 xe::align(sizeof(ArgsVkSetViewport), alignof(VkViewport))));
       } break;
 
-      case Command::kVkBeginDebugUtilsLabelEXT: {
-        const ui::vulkan::VulkanInstance::Functions& ifn =
-            command_processor_.GetVulkanDevice()
-                ->vulkan_instance()
-                ->functions();
-        if (ifn.vkCmdBeginDebugUtilsLabelEXT) {
-          auto& args = *reinterpret_cast<const ArgsVkDebugUtilsLabel*>(stream);
-          const char* label_name = reinterpret_cast<const char*>(
-              reinterpret_cast<const uint8_t*>(stream) +
-              sizeof(ArgsVkDebugUtilsLabel));
-          VkDebugUtilsLabelEXT label_info = {};
-          label_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
-          label_info.pLabelName = label_name;
-          ifn.vkCmdBeginDebugUtilsLabelEXT(command_buffer, &label_info);
-        }
-      } break;
-
-      case Command::kVkEndDebugUtilsLabelEXT: {
-        const ui::vulkan::VulkanInstance::Functions& ifn =
-            command_processor_.GetVulkanDevice()
-                ->vulkan_instance()
-                ->functions();
-        if (ifn.vkCmdEndDebugUtilsLabelEXT) {
-          ifn.vkCmdEndDebugUtilsLabelEXT(command_buffer);
-        }
-      } break;
-
-      case Command::kVkInsertDebugUtilsLabelEXT: {
-        const ui::vulkan::VulkanInstance::Functions& ifn =
-            command_processor_.GetVulkanDevice()
-                ->vulkan_instance()
-                ->functions();
-        if (ifn.vkCmdInsertDebugUtilsLabelEXT) {
-          auto& args = *reinterpret_cast<const ArgsVkDebugUtilsLabel*>(stream);
-          const char* label_name = reinterpret_cast<const char*>(
-              reinterpret_cast<const uint8_t*>(stream) +
-              sizeof(ArgsVkDebugUtilsLabel));
-          VkDebugUtilsLabelEXT label_info = {};
-          label_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
-          label_info.pLabelName = label_name;
-          ifn.vkCmdInsertDebugUtilsLabelEXT(command_buffer, &label_info);
-        }
-      } break;
-
       default:
         assert_unhandled_case(header.command);
         break;
@@ -552,23 +361,6 @@ void DeferredCommandBuffer::CmdVkPipelineBarrier(
     image_memory_barriers_offset = arguments_size;
     arguments_size += sizeof(VkImageMemoryBarrier) * image_memory_barrier_count;
   }
-  size_t sample_locations_offset = arguments_size;
-  uint32_t sample_locations_info_count = 0;
-  for (uint32_t i = 0; i < image_memory_barrier_count; ++i) {
-    const auto* info = static_cast<const VkSampleLocationsInfoEXT*>(
-        image_memory_barriers[i].pNext);
-    if (!info) {
-      continue;
-    }
-    assert_true(info->sType == VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT);
-    assert_null(info->pNext);
-    ++sample_locations_info_count;
-    arguments_size =
-        xe::align(arguments_size, alignof(ArgsSampleLocationsInfo));
-    arguments_size += sizeof(ArgsSampleLocationsInfo);
-    arguments_size = xe::align(arguments_size, alignof(VkSampleLocationEXT));
-    arguments_size += sizeof(VkSampleLocationEXT) * info->sampleLocationsCount;
-  }
   uint8_t* args_ptr = reinterpret_cast<uint8_t*>(
       WriteCommand(Command::kVkPipelineBarrier, arguments_size));
   auto& args = *reinterpret_cast<ArgsVkPipelineBarrier*>(args_ptr);
@@ -578,7 +370,6 @@ void DeferredCommandBuffer::CmdVkPipelineBarrier(
   args.memory_barrier_count = memory_barrier_count;
   args.buffer_memory_barrier_count = buffer_memory_barrier_count;
   args.image_memory_barrier_count = image_memory_barrier_count;
-  args.sample_locations_info_count = sample_locations_info_count;
   if (memory_barrier_count) {
     std::memcpy(args_ptr + memory_barriers_offset, memory_barriers,
                 sizeof(VkMemoryBarrier) * memory_barrier_count);
@@ -591,78 +382,6 @@ void DeferredCommandBuffer::CmdVkPipelineBarrier(
   if (image_memory_barrier_count) {
     std::memcpy(args_ptr + image_memory_barriers_offset, image_memory_barriers,
                 sizeof(VkImageMemoryBarrier) * image_memory_barrier_count);
-  }
-  for (uint32_t i = 0; i < image_memory_barrier_count; ++i) {
-    const auto* info = static_cast<const VkSampleLocationsInfoEXT*>(
-        image_memory_barriers[i].pNext);
-    if (!info) {
-      continue;
-    }
-    reinterpret_cast<VkImageMemoryBarrier*>(args_ptr +
-                                            image_memory_barriers_offset)[i]
-        .pNext = nullptr;
-    sample_locations_offset =
-        xe::align(sample_locations_offset, alignof(ArgsSampleLocationsInfo));
-    auto& locations_args = *reinterpret_cast<ArgsSampleLocationsInfo*>(
-        args_ptr + sample_locations_offset);
-    locations_args.image_memory_barrier_index = i;
-    locations_args.samples_per_pixel = info->sampleLocationsPerPixel;
-    locations_args.grid_size = info->sampleLocationGridSize;
-    locations_args.count = info->sampleLocationsCount;
-    sample_locations_offset += sizeof(ArgsSampleLocationsInfo);
-    sample_locations_offset =
-        xe::align(sample_locations_offset, alignof(VkSampleLocationEXT));
-    std::memcpy(args_ptr + sample_locations_offset, info->pSampleLocations,
-                sizeof(VkSampleLocationEXT) * info->sampleLocationsCount);
-    sample_locations_offset +=
-        sizeof(VkSampleLocationEXT) * info->sampleLocationsCount;
-  }
-}
-
-void DeferredCommandBuffer::CmdVkBeginRendering(
-    const VkRenderingInfo* rendering_info) {
-  assert_null(rendering_info->pNext);
-
-  size_t arguments_size = xe::align(sizeof(ArgsVkBeginRendering),
-                                    alignof(VkRenderingAttachmentInfo));
-  size_t color_attachments_offset = arguments_size;
-  arguments_size +=
-      sizeof(VkRenderingAttachmentInfo) * rendering_info->colorAttachmentCount;
-  size_t depth_attachment_offset = arguments_size;
-  if (rendering_info->pDepthAttachment) {
-    arguments_size += sizeof(VkRenderingAttachmentInfo);
-  }
-  size_t stencil_attachment_offset = arguments_size;
-  if (rendering_info->pStencilAttachment) {
-    arguments_size += sizeof(VkRenderingAttachmentInfo);
-  }
-
-  uint8_t* args_ptr = reinterpret_cast<uint8_t*>(
-      WriteCommand(Command::kVkBeginRendering, arguments_size));
-  auto& args = *reinterpret_cast<ArgsVkBeginRendering*>(args_ptr);
-  args.flags = rendering_info->flags;
-  args.render_area = rendering_info->renderArea;
-  args.layer_count = rendering_info->layerCount;
-  args.view_mask = rendering_info->viewMask;
-  args.color_attachment_count = rendering_info->colorAttachmentCount;
-  args.has_depth_attachment = rendering_info->pDepthAttachment != nullptr;
-  args.has_stencil_attachment = rendering_info->pStencilAttachment != nullptr;
-
-  if (rendering_info->colorAttachmentCount) {
-    std::memcpy(args_ptr + color_attachments_offset,
-                rendering_info->pColorAttachments,
-                sizeof(VkRenderingAttachmentInfo) *
-                    rendering_info->colorAttachmentCount);
-  }
-  if (rendering_info->pDepthAttachment) {
-    std::memcpy(args_ptr + depth_attachment_offset,
-                rendering_info->pDepthAttachment,
-                sizeof(VkRenderingAttachmentInfo));
-  }
-  if (rendering_info->pStencilAttachment) {
-    std::memcpy(args_ptr + stencil_attachment_offset,
-                rendering_info->pStencilAttachment,
-                sizeof(VkRenderingAttachmentInfo));
   }
 }
 

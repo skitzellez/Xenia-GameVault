@@ -50,11 +50,9 @@ class D3D12Provider : public GraphicsProvider {
     return graphics_analysis_;
   }
   ID3D12Device* GetDevice() const { return device_; }
+  // Game Vault: after the device was lost, what DRED recorded (d3d12_dred)
+  void LogDeviceRemovedData() const;
   ID3D12CommandQueue* GetDirectQueue() const { return direct_queue_; }
-
-  // Logs Device Removed Extended Data (breadcrumbs and page-fault allocations)
-  // after a device removal. Only produces data when started with --d3d12_dred.
-  void DumpDeviceRemovedData() const;
 
   uint32_t GetDescriptorSize(D3D12_DESCRIPTOR_HEAP_TYPE type) const {
     return descriptor_sizes_[type];
@@ -118,12 +116,8 @@ class D3D12Provider : public GraphicsProvider {
   bool AreRasterizerOrderedViewsSupported() const {
     return rasterizer_ordered_views_supported_;
   }
-  bool AreBarycentricsSupported() const { return barycentrics_supported_; }
   bool IsAlphaBlendFactorSupported() const {
     return alpha_blend_factor_supported_;
-  }
-  bool IsDynamicDepthBiasSupported() const {
-    return dynamic_depth_bias_supported_;
   }
   D3D12_RESOURCE_BINDING_TIER GetResourceBindingTier() const {
     return resource_binding_tier_;
@@ -137,11 +131,6 @@ class D3D12Provider : public GraphicsProvider {
   uint32_t GetVirtualAddressBitsPerResource() const {
     return virtual_address_bits_per_resource_;
   }
-  // Returns true if Shader Model 6.6 is supported (required for SM 6.6 DXIL).
-  bool IsShaderModel66Supported() const {
-    return highest_shader_model_ >= 0x66;
-  }
-  uint16_t GetHighestShaderModel() const { return highest_shader_model_; }
 
   // Proxies for DirectX functions since they are loaded dynamically.
   HRESULT SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC* desc,
@@ -150,6 +139,28 @@ class D3D12Provider : public GraphicsProvider {
                                  ID3DBlob** error_blob_out) const {
     return pfn_d3d12_serialize_root_signature_(desc, version, blob_out,
                                                error_blob_out);
+  }
+  HRESULT Disassemble(const void* src_data, size_t src_data_size, UINT flags,
+                      const char* comments, ID3DBlob** disassembly_out) const {
+    if (!pfn_d3d_disassemble_) {
+      return E_NOINTERFACE;
+    }
+    return pfn_d3d_disassemble_(src_data, src_data_size, flags, comments,
+                                disassembly_out);
+  }
+  HRESULT DxbcConverterCreateInstance(const CLSID& rclsid, const IID& riid,
+                                      void** ppv) const {
+    if (!pfn_dxilconv_dxc_create_instance_) {
+      return E_NOINTERFACE;
+    }
+    return pfn_dxilconv_dxc_create_instance_(rclsid, riid, ppv);
+  }
+  HRESULT DxcCreateInstance(const CLSID& rclsid, const IID& riid,
+                            void** ppv) const {
+    if (!pfn_dxcompiler_dxc_create_instance_) {
+      return E_NOINTERFACE;
+    }
+    return pfn_dxcompiler_dxc_create_instance_(rclsid, riid, ppv);
   }
 
   // Logs all pending D3D12 debug messages to xenia's log.
@@ -177,9 +188,14 @@ class D3D12Provider : public GraphicsProvider {
   PFN_D3D12_CREATE_DEVICE pfn_d3d12_create_device_;
   PFN_D3D12_SERIALIZE_ROOT_SIGNATURE pfn_d3d12_serialize_root_signature_;
 
-  // The DXIL validator that signs the shaders Mesa emits, loaded by full path
-  // so the copy in the D3D12 folder wins. May be nullptr.
-  HMODULE library_dxil_ = nullptr;
+  HMODULE library_d3dcompiler_ = nullptr;
+  pD3DDisassemble pfn_d3d_disassemble_ = nullptr;
+
+  HMODULE library_dxilconv_ = nullptr;
+  DxcCreateInstanceProc pfn_dxilconv_dxc_create_instance_ = nullptr;
+
+  HMODULE library_dxcompiler_ = nullptr;
+  DxcCreateInstanceProc pfn_dxcompiler_dxc_create_instance_ = nullptr;
 
   IDXGIFactory2* dxgi_factory_ = nullptr;
   ID3D12Device* device_ = nullptr;
@@ -199,11 +215,8 @@ class D3D12Provider : public GraphicsProvider {
   uint32_t virtual_address_bits_per_resource_;
   bool ps_specified_stencil_reference_supported_;
   bool rasterizer_ordered_views_supported_;
-  bool barycentrics_supported_;
   bool alpha_blend_factor_supported_;
-  bool dynamic_depth_bias_supported_;
   bool unaligned_block_textures_supported_;
-  uint16_t highest_shader_model_;
 };
 
 }  // namespace d3d12

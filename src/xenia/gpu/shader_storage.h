@@ -10,8 +10,6 @@
 #ifndef XENIA_GPU_SHADER_STORAGE_H_
 #define XENIA_GPU_SHADER_STORAGE_H_
 
-#include <algorithm>
-#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -21,15 +19,11 @@
 #include <functional>
 #include <mutex>
 #include <set>
-#include <string>
-#include <string_view>
-#include <utility>
 #include <vector>
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
-#include "xenia/base/clock.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
@@ -101,7 +95,7 @@ inline bool EnsureShaderStorageDirectoriesExist(
       XELOGE(
           "Failed to create shader storage directory, persistent shader "
           "storage will be disabled: {}",
-          xe::strip_pii(xe::path_to_utf8(shareable_root)));
+          xe::path_to_utf8(shareable_root));
       return false;
     }
   }
@@ -195,11 +189,11 @@ class ShaderStorageWriter {
     uint32_t version;         // Pipeline description version
   };
 
-  // Loads a shader read from storage into the backend's cache, returning it, or
-  // nullptr if it can't be created.
-  using ShaderLoadCallback = std::function<Shader*(
-      xenos::ShaderType type, const uint32_t* ucode_dwords,
-      uint32_t ucode_dword_count, uint64_t ucode_data_hash)>;
+  // Callback for loading a shader from ucode data.
+  // Return true to continue reading, false to stop.
+  using ShaderLoadCallback =
+      std::function<bool(xenos::ShaderType type, const uint32_t* ucode_dwords,
+                         uint32_t ucode_dword_count, uint64_t ucode_data_hash)>;
 
   // Callback for translating shaders. Called with the set of
   // (ucode_hash, modification) pairs that need translation.
@@ -242,12 +236,9 @@ class ShaderStorageWriter {
       XELOGE(
           "Failed to open the pipeline storage file for writing, persistent "
           "shader storage will be disabled: {}",
-          xe::strip_pii(xe::path_to_utf8(pipeline_storage_file_path)));
+          xe::path_to_utf8(pipeline_storage_file_path));
       return false;
     }
-    // "a+" leaves the read position at end of file on the BSDs, macOS included.
-    // Without this the header read finds nothing and the file looks corrupt.
-    xe::filesystem::Seek(pipeline_storage_file_, 0, SEEK_SET);
 
     // Read pipeline descriptions.
     const uint32_t pipeline_storage_version_swapped =
@@ -318,29 +309,26 @@ class ShaderStorageWriter {
       XELOGE(
           "Failed to open the guest shader storage file for writing, "
           "persistent shader storage will be disabled: {}",
-          xe::strip_pii(xe::path_to_utf8(shader_storage_file_path)));
+          xe::path_to_utf8(shader_storage_file_path));
       fclose(pipeline_storage_file_);
       pipeline_storage_file_ = nullptr;
       return false;
     }
-    xe::filesystem::Seek(shader_storage_file_, 0, SEEK_SET);
 
-    // Load shaders from storage. Each is marked as stored so a draw doesn't
-    // write it again, which also skips one stored twice.
-    std::vector<Shader*> shaders_loaded;
+    // Load shaders from storage.
+    size_t shaders_loaded = 0;
     ShaderStorageFileHeader shader_header;
     if (ValidateShaderStorageHeader(shader_storage_file_, shader_header)) {
       uint64_t shader_storage_valid_bytes = ReadShaderEntries(
           shader_storage_file_,
           [&](xenos::ShaderType type, const uint32_t* ucode_dwords,
               uint32_t ucode_dword_count, uint64_t ucode_data_hash) {
-            Shader* shader = load_shader(type, ucode_dwords, ucode_dword_count,
-                                         ucode_data_hash);
-            if (shader && shader->ucode_storage_index() != storage_index_) {
-              shader->set_ucode_storage_index(storage_index_);
-              shaders_loaded.push_back(shader);
+            if (load_shader(type, ucode_dwords, ucode_dword_count,
+                            ucode_data_hash)) {
+              ++shaders_loaded;
+              return true;
             }
-            return true;
+            return false;
           });
       xe::filesystem::TruncateStdioFile(shader_storage_file_,
                                         shader_storage_valid_bytes);
@@ -356,7 +344,7 @@ class ShaderStorageWriter {
         return false;
       }
     }
-    XELOGI("Loaded {} shaders from storage", shaders_loaded.size());
+    XELOGI("Loaded {} shaders from storage", shaders_loaded);
 
     // Collect shader translations needed from pipeline descriptions.
     std::set<std::pair<uint64_t, uint64_t>> translations_needed;
@@ -370,8 +358,6 @@ class ShaderStorageWriter {
     }
     XELOGI("Loaded {} pipeline descriptions, {} shader translations needed",
            pipeline_descriptions_out.size(), translations_needed.size());
-
-    AnalyzeStoredShaders(shaders_loaded, translations_needed);
 
     // Translate shaders (callback handles parallel translation).
     if (!translations_needed.empty() && translate_shaders) {
@@ -468,64 +454,6 @@ class ShaderStorageWriter {
   }
 
  private:
-  // Analyzes the loaded shaders a stored pipeline uses, in parallel. Analysis
-  // is per ucode, so the modification in the pair is ignored. A draw analyzes
-  // any other shader when it first uses it.
-  static void AnalyzeStoredShaders(
-      const std::vector<Shader*>& shaders_loaded,
-      const std::set<std::pair<uint64_t, uint64_t>>& translations_needed) {
-    uint64_t analysis_start = xe::Clock::QueryHostTickCount();
-    std::vector<Shader*> shaders_to_analyze;
-    for (Shader* shader : shaders_loaded) {
-      uint64_t ucode_data_hash = shader->ucode_data_hash();
-      if (!shader->is_ucode_analyzed() &&
-          translations_needed.lower_bound(
-              std::make_pair(ucode_data_hash, uint64_t(0))) !=
-              translations_needed.upper_bound(
-                  std::make_pair(ucode_data_hash, UINT64_MAX))) {
-        shaders_to_analyze.push_back(shader);
-      }
-    }
-    if (shaders_to_analyze.empty()) {
-      return;
-    }
-
-    std::atomic<size_t> analysis_index{0};
-    auto analyze_function = [&]() {
-      StringBuffer ucode_disasm_buffer;
-      while (true) {
-        size_t index = analysis_index.fetch_add(1);
-        if (index >= shaders_to_analyze.size()) {
-          break;
-        }
-        shaders_to_analyze[index]->AnalyzeUcode(ucode_disasm_buffer);
-      }
-    };
-    size_t logical_processor_count = xe::threading::logical_processor_count();
-    if (!logical_processor_count) {
-      logical_processor_count = 6;
-    }
-    size_t thread_count = std::min(logical_processor_count - size_t(1),
-                                   shaders_to_analyze.size());
-    std::vector<std::unique_ptr<xe::threading::Thread>> analysis_threads;
-    for (size_t i = 0; i < thread_count; ++i) {
-      auto thread = xe::threading::Thread::Create({}, analyze_function);
-      if (thread) {
-        thread->set_name("Shader Analysis");
-        analysis_threads.push_back(std::move(thread));
-      }
-    }
-    // The calling thread takes part too.
-    analyze_function();
-    for (auto& thread : analysis_threads) {
-      xe::threading::Wait(thread.get(), false);
-    }
-
-    XELOGI("Analyzed {} shaders in {} ms", shaders_to_analyze.size(),
-           (xe::Clock::QueryHostTickCount() - analysis_start) * 1000 /
-               xe::Clock::QueryHostTickFrequency());
-  }
-
   void WriteThread() {
     ShaderStoredHeader shader_header;
     std::memset(&shader_header, 0, sizeof(shader_header));
@@ -627,57 +555,6 @@ class ShaderStorageWriter {
   bool storage_write_flush_pipelines_ = false;
   bool storage_write_thread_shutdown_ = false;
 };
-
-// Hands each pipeline description loaded from storage to |queue_stored|, which
-// either queues the pipeline's creation, setting its Shader*& argument to the
-// vertex shader, and returns nullptr, or returns why it didn't. Logs the
-// outcome and returns how many were queued.
-template <typename TPipelineStoredDescription, typename QueueStored>
-size_t ReplayStoredPipelines(
-    const std::vector<TPipelineStoredDescription>& stored_descriptions,
-    QueueStored&& queue_stored) {
-  if (stored_descriptions.empty()) {
-    return 0;
-  }
-  uint64_t start_ticks = xe::Clock::QueryHostTickCount();
-  size_t queued_count = 0;
-  std::vector<std::pair<std::string_view, size_t>> skip_counts;
-  for (const TPipelineStoredDescription& stored_description :
-       stored_descriptions) {
-    Shader* vertex_shader = nullptr;
-    const char* skip_reason = queue_stored(stored_description, vertex_shader);
-    if (skip_reason) {
-      auto skip_it = std::find_if(skip_counts.begin(), skip_counts.end(),
-                                  [&](const auto& skip_count) {
-                                    return skip_count.first == skip_reason;
-                                  });
-      if (skip_it != skip_counts.end()) {
-        ++skip_it->second;
-      } else {
-        skip_counts.emplace_back(skip_reason, 1);
-      }
-      continue;
-    }
-    // Stored shaders count as drawn only with a pipeline queued for them here,
-    // which those only another backend or render target path drew lack.
-    vertex_shader->set_drawn();
-    ++queued_count;
-  }
-  std::string skipped;
-  for (const auto& [skip_reason, count] : skip_counts) {
-    skipped += fmt::format("{}{} {}", skipped.empty() ? " (" : ", ", count,
-                           skip_reason);
-  }
-  if (!skipped.empty()) {
-    skipped += ')';
-  }
-  XELOGI("Pipeline storage: {} of {} stored pipelines queued in {} ms{}",
-         queued_count, stored_descriptions.size(),
-         (xe::Clock::QueryHostTickCount() - start_ticks) * 1000 /
-             xe::Clock::QueryHostTickFrequency(),
-         skipped);
-  return queued_count;
-}
 
 }  // namespace gpu
 }  // namespace xe

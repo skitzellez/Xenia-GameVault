@@ -32,6 +32,8 @@ std::filesystem::path GetBundledDataPath(const std::string& subdirectory);
 // Extract title_id from a game file and load its config overrides.
 // Returns the title_id if successful, 0 otherwise.
 uint32_t LoadGameConfigForFile(const std::filesystem::path& game_path);
+// Game Vault (Xbox app): a title's config file, else its built-in settings, at title load.
+void LoadGameConfig(const std::string_view title_id);
 void SaveConfig();
 void SaveGameConfig(uint32_t title_id, const toml::table& config_table);
 // Resolves a possibly dotted category ("GPU.Debug") to a nested table.

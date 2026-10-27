@@ -10,6 +10,7 @@
 #include <ranges>
 
 #include "xenia/emulator.h"
+#include "xenia/config.h"
 
 #include <algorithm>
 #include <cstring>
@@ -628,26 +629,41 @@ X_STATUS Emulator::MountPath(const std::filesystem::path& path,
 
 Emulator::FileSignatureType Emulator::GetFileSignature(
     const std::filesystem::path& path) {
-  FILE* file = xe::filesystem::OpenFile(path, "rb");
+  // Game Vault: a game played from the network has no FILE*; its first and
+  // last bytes come through its reader (xe::filesystem::NetFile)
+  auto net = xe::filesystem::GetNetFile(path);
+  FILE* file = net ? nullptr : xe::filesystem::OpenFile(path, "rb");
 
-  if (!file) {
-    return FileSignatureType::Unknown;
+  if (!net && !file) {
+    return Emulator::FileSignatureType::Unknown;
   }
 
-  const uint64_t file_size = std::filesystem::file_size(path);
+  std::error_code size_error;
+  const uint64_t file_size = xe::filesystem::FileSizeShared(path, size_error);
   constexpr int64_t header_size = 4;
 
-  if (file_size < header_size) {
-    return FileSignatureType::Unknown;
+  if (size_error || file_size < header_size) {
+    if (file) {
+      fclose(file);
+    }
+    return Emulator::FileSignatureType::Unknown;
   }
 
   char file_magic[header_size];
-  fread(file_magic, sizeof(file_magic), 1, file);
+  if (net) {
+    if (!net->Read(0, file_magic, header_size)) {
+      return Emulator::FileSignatureType::Unknown;
+    }
+  } else {
+    const bool read = fread(file_magic, sizeof(file_magic), 1, file) == 1;
+    fclose(file);
+    if (!read) {
+      return FileSignatureType::Unknown;
+    }
+  }
 
   fourcc_t magic_value =
       make_fourcc(file_magic[0], file_magic[1], file_magic[2], file_magic[3]);
-
-  fclose(file);
 
   switch (magic_value) {
     case xe::cpu::kXEX0Signature:
@@ -659,21 +675,21 @@ Emulator::FileSignatureType Emulator::GetFileSignature(
     case xe::cpu::kXEX25Signature:
       return FileSignatureType::XEX25;
     case xe::cpu::kXEX1Signature:
-      return FileSignatureType::XEX1;
+      return Emulator::FileSignatureType::XEX1;
     case xe::cpu::kXEX2Signature:
-      return FileSignatureType::XEX2;
+      return Emulator::FileSignatureType::XEX2;
     case xe::vfs::kCONSignature:
-      return FileSignatureType::CON;
+      return Emulator::FileSignatureType::CON;
     case xe::vfs::kLIVESignature:
-      return FileSignatureType::LIVE;
+      return Emulator::FileSignatureType::LIVE;
     case xe::vfs::kPIRSSignature:
-      return FileSignatureType::PIRS;
+      return Emulator::FileSignatureType::PIRS;
     case xe::vfs::kXSFSignature:
       return FileSignatureType::XISO;
     case xe::cpu::kXBESignature:
       return FileSignatureType::XBE;
     case xe::cpu::kElfSignature:
-      return FileSignatureType::ELF;
+      return Emulator::FileSignatureType::ELF;
     default:
       break;
   }
@@ -681,19 +697,31 @@ Emulator::FileSignatureType Emulator::GetFileSignature(
   magic_value = make_fourcc(file_magic[0], file_magic[1], 0, 0);
 
   if (xe::kernel::kEXESignature == magic_value) {
-    return FileSignatureType::EXE;
+    return Emulator::FileSignatureType::EXE;
   }
 
-  file = xe::filesystem::OpenFile(path, "rb");
-  xe::filesystem::Seek(file, -header_size, SEEK_END);
-  fread(file_magic, 1, header_size, file);
-  fclose(file);
+  if (net) {
+    if (!net->Read(file_size - header_size, file_magic, header_size)) {
+      return Emulator::FileSignatureType::Unknown;
+    }
+  } else {
+    file = xe::filesystem::OpenFile(path, "rb");
+    if (!file) {
+      return FileSignatureType::Unknown;
+    }
+    if (!xe::filesystem::Seek(file, -header_size, SEEK_END) ||
+        fread(file_magic, 1, header_size, file) != header_size) {
+      fclose(file);
+      return FileSignatureType::Unknown;
+    }
+    fclose(file);
+  }
 
   magic_value =
       make_fourcc(file_magic[0], file_magic[1], file_magic[2], file_magic[3]);
 
   if (xe::vfs::kZarMagic == magic_value) {
-    return FileSignatureType::ZAR;
+    return Emulator::FileSignatureType::ZAR;
   }
 
   // Check if XISO
@@ -703,12 +731,11 @@ Emulator::FileSignatureType Emulator::GetFileSignature(
   XELOGI("Checking for XISO");
 
   if (device->Initialize()) {
-    return FileSignatureType::XISO;
+    return Emulator::FileSignatureType::XISO;
   }
 
-  XELOGE("{}: {} ({:08X})", __func__,
-         xe::strip_pii(xe::path_to_utf8(path.extension())), magic_value);
-  return FileSignatureType::Unknown;
+  XELOGE("{}: {} ({:08X})", __func__, path.extension(), magic_value);
+  return Emulator::FileSignatureType::Unknown;
 }
 
 // Whether a disc image holds an original Xbox game rather than an Xbox 360
@@ -2334,6 +2361,14 @@ X_STATUS Emulator::PrepareLaunch(const std::filesystem::path& path,
       title_version_ = format_version(title_version);
     }
   }
+
+#if XE_PLATFORM_WINRT
+  // Game Vault: the game's own config file, or the built-in settings for
+  // games known to need them (the Xbox app has no per-file launch step).
+  if (title_id_.value()) {
+    config::LoadGameConfig(fmt::format("{:08X}", title_id_.value()));
+  }
+#endif
 
   if (title_id_ == kXeFuTitleId) {
     auto compatibility_device = std::make_unique<vfs::HostPathDevice>(

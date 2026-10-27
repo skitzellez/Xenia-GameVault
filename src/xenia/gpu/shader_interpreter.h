@@ -121,11 +121,7 @@ class ShaderInterpreter {
   const std::array<float, 4> GetFloatConstant(
       uint32_t address, bool is_relative, bool relative_address_is_a0) const;
 
-  // Guest ALU sums and products, rounded toward zero with
-  // alu_round_toward_zero.
-  static float AluAdd(float a, float b);
-  static float AluSubtract(float a, float b);
-  static float AluMultiply(float a, float b);
+  static float ReduceFloatPrecision(float value, uint32_t mantissa_bits);
   void ExecuteAluInstruction(ucode::AluInstruction instr);
   void StoreFetchResult(uint32_t dest, bool is_dest_relative, uint32_t swizzle,
                         const float* value);

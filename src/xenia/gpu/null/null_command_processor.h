@@ -36,7 +36,7 @@ class NullCommandProcessor : public CommandProcessor {
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                  uint32_t frontbuffer_height) override;
 
-  Shader* LoadShader(xenos::ShaderType shader_type,
+  Shader* LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
                      const uint32_t* host_address,
                      uint32_t dword_count) override;
 
@@ -44,12 +44,6 @@ class NullCommandProcessor : public CommandProcessor {
                  IndexBufferInfo* index_buffer_info,
                  bool major_mode_explicit) override;
   bool IssueCopy() override;
-
-  // Debug marker stubs (no-op for null backend).
-  bool debug_markers_enabled() const { return false; }
-  void PushDebugMarker(const char* format, ...) {}
-  void PopDebugMarker() {}
-  void InsertDebugMarker(const char* format, ...) {}
 
   void InitializeTrace() override;
 };

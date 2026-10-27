@@ -1,3 +1,0 @@
-// XE_NO_MSL
-#define XE_RESOLVE_RESOLUTION_SCALED
-#include "resolve_clear_32bpp.xesli"

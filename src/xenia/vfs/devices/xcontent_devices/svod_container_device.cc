@@ -8,6 +8,7 @@
  */
 
 #include "xenia/vfs/devices/xcontent_devices/svod_container_device.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/vfs/devices/xcontent_devices/svod_container_entry.h"
 #include "xenia/vfs/gdfx_util.h"
@@ -36,7 +37,7 @@ SvodContainerDevice::~SvodContainerDevice() {}
 SvodContainerDevice::Result SvodContainerDevice::LoadHostFiles() {
   std::filesystem::path data_fragment_path = host_path_;
   data_fragment_path += ".data";
-  if (!std::filesystem::exists(data_fragment_path)) {
+  if (!xe::filesystem::PathExistsAny(data_fragment_path)) {  // (Game Vault: also over the network)
     XELOGE("STFS container is multi-file, but path {} does not exist.",
            xe::strip_pii(xe::path_to_utf8(data_fragment_path)));
     return Result::kFileMismatch;
@@ -72,7 +73,7 @@ SvodContainerDevice::Result SvodContainerDevice::LoadHostFiles() {
     // Size the path, not the listing entry, which reports 0 for a symlinked
     // fragment on Windows where the target size is what counts.
     std::error_code ec;
-    const uintmax_t fragment_size = std::filesystem::file_size(path, ec);
+    const uintmax_t fragment_size = xe::filesystem::FileSizeShared(path, ec);
     if (ec) {
       XELOGI("Failed to size SVOD file {}.",
              xe::strip_pii(xe::path_to_utf8(path)));

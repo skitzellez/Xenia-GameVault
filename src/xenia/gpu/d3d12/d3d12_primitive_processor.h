@@ -69,7 +69,6 @@ class D3D12PrimitiveProcessor final : public PrimitiveProcessor {
 
   Microsoft::WRL::ComPtr<ID3D12Resource> builtin_index_buffer_;
   D3D12_GPU_VIRTUAL_ADDRESS builtin_index_buffer_gpu_address_ = 0;
-  size_t builtin_index_buffer_size_ = 0;
   // Temporary buffer copied in the beginning of the first submission for
   // uploading to builtin_index_buffer_, destroyed when the submission when it
   // was uploaded is completed.

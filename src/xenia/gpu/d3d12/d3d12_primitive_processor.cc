@@ -61,8 +61,6 @@ void D3D12PrimitiveProcessor::BeginSubmission() {
     // No need to submit deferred barriers - builtin_index_buffer_ has never
     // been used yet, so it's in the initial state, and
     // builtin_index_buffer_upload_ is in an upload heap, so it's GENERIC_READ.
-    command_processor_.InsertDebugMarker(
-        "Builtin Index Buffer Upload: %zu bytes", builtin_index_buffer_size_);
     command_processor_.GetDeferredCommandList().D3DCopyResource(
         builtin_index_buffer_.Get(), builtin_index_buffer_upload_.Get());
     command_processor_.PushTransitionBarrier(builtin_index_buffer_.Get(),
@@ -135,7 +133,6 @@ bool D3D12PrimitiveProcessor::InitializeBuiltinIndexBuffer(
   builtin_index_buffer_ = std::move(draw_resource);
   builtin_index_buffer_gpu_address_ =
       builtin_index_buffer_->GetGPUVirtualAddress();
-  builtin_index_buffer_size_ = size_bytes;
   builtin_index_buffer_upload_ = std::move(upload_resource);
   // Schedule uploading in the first submission.
   builtin_index_buffer_upload_submission_ = UINT64_MAX;

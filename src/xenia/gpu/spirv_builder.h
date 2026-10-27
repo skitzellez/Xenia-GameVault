@@ -29,26 +29,6 @@ class SpirvBuilder : public spv::Builder {
                spv::SpvBuildLogger* logger)
       : spv::Builder(spv_version, user_number, logger) {}
 
-  // When true, createNoContraction* helpers emit plain operations.
-  void SetAllowContraction(bool allow) { allow_contraction_ = allow; }
-  bool AllowsContraction() const { return allow_contraction_; }
-
-  // Decorate every float arithmetic result with NoContraction.
-  void SetNoContractionAll(bool all) { no_contraction_all_ = all; }
-
-  spv::Id createUnaryOp(spv::Op op_code, spv::Id type_id, spv::Id operand) {
-    spv::Id result = spv::Builder::createUnaryOp(op_code, type_id, operand);
-    MarkNoContractionAll(op_code, result);
-    return result;
-  }
-  spv::Id createBinOp(spv::Op op_code, spv::Id type_id, spv::Id operand1,
-                      spv::Id operand2) {
-    spv::Id result =
-        spv::Builder::createBinOp(op_code, type_id, operand1, operand2);
-    MarkNoContractionAll(op_code, result);
-    return result;
-  }
-
   // Make public rather than protected.
   using spv::Builder::createSelectionMerge;
 
@@ -113,9 +93,6 @@ class SpirvBuilder : public spv::Builder {
   // Makes a constant of a float scalar or vector value_type with all
   // components set to value.
   spv::Id smearFloatConstant(float value, spv::Id value_type);
-  // The same for uint and int scalars and vectors.
-  spv::Id smearUintConstant(uint32_t value, spv::Id value_type);
-  spv::Id smearIntConstant(int32_t value, spv::Id value_type);
 
   // Helper to use for building nested control flow with if-then-else with
   // additions over SpvBuilder::If.
@@ -215,13 +192,6 @@ class SpirvBuilder : public spv::Builder {
 
     Branch current_branch_ = Branch::kSelection;
   };
-
- private:
-  // Defined in the .cc since the spv enum shim is not visible in headers.
-  void MarkNoContractionAll(spv::Op op_code, spv::Id result);
-
-  bool allow_contraction_ = false;
-  bool no_contraction_all_ = false;
 };
 
 }  // namespace gpu

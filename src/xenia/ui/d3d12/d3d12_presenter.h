@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <utility>
 
 #include "xenia/base/math.h"
@@ -292,7 +293,23 @@ class D3D12Presenter final : public Presenter {
 
   bool InitializeSurfaceIndependent();
 
+  // capture_mutex_ must be held. Retains a submitted texture and all capture
+  // objects until its queue fence completes, including on a failed wait.
+  bool AwaitGuestOutputCaptureCompletion();
+
   const D3D12Provider& provider_;
+
+  // Screenshots and streaming share capture resources, reused after the fence.
+  std::mutex capture_mutex_;
+  Microsoft::WRL::ComPtr<ID3D12Resource> capture_buffer_;
+  UINT64 capture_buffer_size_ = 0;
+  Microsoft::WRL::ComPtr<ID3D12CommandAllocator> capture_command_allocator_;
+  Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> capture_command_list_;
+  Microsoft::WRL::ComPtr<ID3D12Fence> capture_fence_;
+  uint64_t capture_fence_value_ = 0;
+  bool capture_submission_pending_ = false;
+  bool capture_fence_signaled_ = false;
+  Microsoft::WRL::ComPtr<ID3D12Resource> capture_submitted_texture_;
 
   // Whether DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING is supported by DXGI (depends in
   // particular on the Windows 10 version and hardware support), primarily for

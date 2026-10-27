@@ -51,8 +51,6 @@ void Shader::AnalyzeUcode(StringBuffer& ucode_disasm_buffer) {
   // Gather the upper bound of the control flow instructions, and label
   // addresses, which are needed for disassembly.
   cf_pair_index_bound_ = uint32_t(ucode_data_.size() / 3);
-  // Jumps back (source, target) for finding what may reenter a label.
-  std::vector<std::pair<uint32_t, uint32_t>> backward_jumps;
   for (uint32_t i = 0; i < cf_pair_index_bound_; ++i) {
     ControlFlowInstruction cf_ab[2];
     UnpackControlFlowInstructions(ucode_data_.data() + i * 3, cf_ab);
@@ -68,25 +66,15 @@ void Shader::AnalyzeUcode(StringBuffer& ucode_disasm_buffer) {
       switch (cf.opcode()) {
         case ControlFlowOpcode::kCondCall:
           label_addresses_.insert(cf.cond_call.address());
-          // The instruction after the call is the subroutine return point, so
-          // it must be a label that ret can jump back to.
-          label_addresses_.insert(i * 2 + j + 1);
-          uses_subroutine_calls_ = true;
           break;
         case ControlFlowOpcode::kCondJmp:
           label_addresses_.insert(cf.cond_jmp.address());
-          if (cf.cond_jmp.address() <= i * 2 + j) {
-            backward_jumps.emplace_back(i * 2 + j, cf.cond_jmp.address());
-          }
           break;
         case ControlFlowOpcode::kLoopStart:
           label_addresses_.insert(cf.loop_start.address());
           break;
         case ControlFlowOpcode::kLoopEnd:
           label_addresses_.insert(cf.loop_end.address());
-          if (cf.loop_end.address() <= i * 2 + j) {
-            backward_jumps.emplace_back(i * 2 + j, cf.loop_end.address());
-          }
           break;
         default:
           break;
@@ -99,7 +87,6 @@ void Shader::AnalyzeUcode(StringBuffer& ucode_disasm_buffer) {
   VertexFetchInstruction previous_vfetch_full;
   std::memset(&previous_vfetch_full, 0, sizeof(previous_vfetch_full));
   uint32_t unique_texture_bindings = 0;
-  cf_register_components_written_.assign(cf_pair_index_bound_ * 2, 0);
   for (uint32_t i = 0; i < cf_pair_index_bound_; ++i) {
     ControlFlowInstruction cf_ab[2];
     UnpackControlFlowInstructions(ucode_data_.data() + i * 3, cf_ab);
@@ -195,54 +182,6 @@ void Shader::AnalyzeUcode(StringBuffer& ucode_disasm_buffer) {
     }
   }
   ucode_disassembly_ = ucode_disasm_buffer.to_string();
-
-  // A label jumped back to may be reentered after anything within the span of
-  // the jumps back overlapping it. With subroutines, anything may be executed
-  // before returning to a label.
-  auto get_components_written = [this](uint32_t first, uint32_t last) {
-    uint64_t components_written = 0;
-    for (uint32_t cf_index = first; cf_index <= last; ++cf_index) {
-      components_written |= cf_register_components_written_[cf_index];
-    }
-    return components_written;
-  };
-  uint32_t cf_index_count = cf_pair_index_bound_ * 2;
-  reentered_label_register_components_written_.assign(cf_index_count, 0);
-  std::set<uint32_t> reentered_labels;
-  for (const auto& backward_jump : backward_jumps) {
-    reentered_labels.insert(backward_jump.second);
-  }
-  if (uses_subroutine_calls_) {
-    reentered_labels = label_addresses_;
-  }
-  for (uint32_t label : reentered_labels) {
-    if (label >= cf_index_count) {
-      continue;
-    }
-    uint32_t span_first = label, span_last = label;
-    if (uses_subroutine_calls_) {
-      span_first = 0;
-      span_last = cf_index_count - 1;
-    } else {
-      bool span_extended;
-      do {
-        span_extended = false;
-        for (const auto& backward_jump : backward_jumps) {
-          if (backward_jump.second <= span_last &&
-              backward_jump.first >= span_first &&
-              (backward_jump.first > span_last ||
-               backward_jump.second < span_first)) {
-            span_first = std::min(span_first, backward_jump.second);
-            span_last = std::max(span_last, backward_jump.first);
-            span_extended = true;
-          }
-        }
-      } while (span_extended);
-    }
-    reentered_label_register_components_written_[label] =
-        get_components_written(span_first,
-                               std::min(span_last, cf_index_count - 1));
-  }
 
   if (constant_register_map_.float_dynamic_addressing) {
     // All potentially can be referenced.
@@ -424,12 +363,11 @@ void Shader::GatherExecInformation(
     if (sequence & 0b01) {
       auto& op = *reinterpret_cast<const FetchInstruction*>(op_ptr);
       if (op.opcode() == FetchOpcode::kVertexFetch) {
-        GatherVertexFetchInformation(op.vertex_fetch(), instr.dword_index,
-                                     previous_vfetch_full, ucode_disasm_buffer);
+        GatherVertexFetchInformation(op.vertex_fetch(), previous_vfetch_full,
+                                     ucode_disasm_buffer);
       } else {
-        GatherTextureFetchInformation(op.texture_fetch(), instr.dword_index,
-                                      unique_texture_bindings,
-                                      ucode_disasm_buffer);
+        GatherTextureFetchInformation(
+            op.texture_fetch(), unique_texture_bindings, ucode_disasm_buffer);
       }
     } else {
       auto& op = *reinterpret_cast<const AluInstruction*>(op_ptr);
@@ -440,7 +378,7 @@ void Shader::GatherExecInformation(
 }
 
 void Shader::GatherVertexFetchInformation(
-    const VertexFetchInstruction& op, uint32_t exec_cf_index,
+    const VertexFetchInstruction& op,
     VertexFetchInstruction& previous_vfetch_full,
     StringBuffer& ucode_disasm_buffer) {
   ParsedVertexFetchInstruction fetch_instr;
@@ -449,7 +387,7 @@ void Shader::GatherVertexFetchInformation(
   }
   fetch_instr.Disassemble(&ucode_disasm_buffer);
 
-  GatherFetchResultInformation(fetch_instr.result, exec_cf_index);
+  GatherFetchResultInformation(fetch_instr.result);
 
   // Mini-fetches inherit the operands from full fetches.
   if (!fetch_instr.is_mini_fetch) {
@@ -495,27 +433,15 @@ void Shader::GatherVertexFetchInformation(
 }
 
 void Shader::GatherTextureFetchInformation(const TextureFetchInstruction& op,
-                                           uint32_t exec_cf_index,
                                            uint32_t& unique_texture_bindings,
                                            StringBuffer& ucode_disasm_buffer) {
   TextureBinding binding;
   ParseTextureFetchInstruction(op, binding.fetch_instr);
   binding.fetch_instr.Disassemble(&ucode_disasm_buffer);
 
-  GatherFetchResultInformation(binding.fetch_instr.result, exec_cf_index);
+  GatherFetchResultInformation(binding.fetch_instr.result);
   for (size_t i = 0; i < binding.fetch_instr.operand_count; ++i) {
     GatherOperandInformation(binding.fetch_instr.operands[i]);
-  }
-  const InstructionOperand& coordinates_operand =
-      binding.fetch_instr.operands[0];
-  if (binding.fetch_instr.CanSnapToTexelCenter(false) &&
-      coordinates_operand.storage_source ==
-          InstructionStorageSource::kRegister &&
-      coordinates_operand.storage_addressing_mode ==
-          InstructionStorageAddressingMode::kAbsolute &&
-      coordinates_operand.storage_index < 16) {
-    point_fetch_coordinate_registers_ |= UINT32_C(1)
-                                         << coordinates_operand.storage_index;
   }
 
   if (binding.fetch_instr.result.GetUsedResultComponents()) {
@@ -628,34 +554,19 @@ void Shader::GatherOperandInformation(const InstructionOperand& operand) {
   }
 }
 
-void Shader::GatherFetchResultInformation(const InstructionResult& result,
-                                          uint32_t exec_cf_index) {
+void Shader::GatherFetchResultInformation(const InstructionResult& result) {
   if (!result.GetUsedWriteMask()) {
     return;
   }
   // Fetch instructions can't export - don't need the current memexport count
   // operand.
   assert_true(result.storage_target == InstructionStorageTarget::kRegister);
-  GatherRegisterWriteInformation(result, exec_cf_index);
   if (result.storage_addressing_mode ==
       InstructionStorageAddressingMode::kAbsolute) {
     register_static_address_bound_ = std::max(
         register_static_address_bound_, result.storage_index + uint32_t(1));
   } else {
     uses_register_dynamic_addressing_ = true;
-  }
-}
-
-void Shader::GatherRegisterWriteInformation(const InstructionResult& result,
-                                            uint32_t exec_cf_index) {
-  uint64_t& cf_components_written =
-      cf_register_components_written_[exec_cf_index];
-  if (result.storage_addressing_mode !=
-      InstructionStorageAddressingMode::kAbsolute) {
-    cf_components_written = ~UINT64_C(0);
-  } else if (result.storage_index < 16) {
-    cf_components_written |= uint64_t(result.GetUsedWriteMask())
-                             << (result.storage_index * 4);
   }
 }
 
@@ -667,7 +578,6 @@ void Shader::GatherAluResultInformation(const InstructionResult& result,
   }
   switch (result.storage_target) {
     case InstructionStorageTarget::kRegister:
-      GatherRegisterWriteInformation(result, exec_cf_index);
       if (result.storage_addressing_mode ==
           InstructionStorageAddressingMode::kAbsolute) {
         register_static_address_bound_ = std::max(
@@ -764,6 +674,7 @@ bool ShaderTranslator::TranslateAnalyzedShader(
 
   translation.errors_ = std::move(errors_);
   translation.translated_binary_ = CompleteTranslation();
+  translation.is_translated_ = true;
 
   bool is_valid = true;
   for (const auto& error : translation.errors_) {
@@ -772,24 +683,12 @@ bool ShaderTranslator::TranslateAnalyzedShader(
       break;
     }
   }
-  translation.is_valid_.store(is_valid, std::memory_order_relaxed);
+  translation.is_valid_ = is_valid;
 
   PostTranslation();
 
-  // Publish last: a thread that lost TryClaimTranslation spins on
-  // is_translated() and reads the validity and the binary right after, so all
-  // of the above has to be visible once it observes this.
-  translation.is_translated_.store(true, std::memory_order_release);
-
   // In case is_valid_ is modified by PostTranslation, reload.
-  if (translation.is_valid()) {
-    XELOGI("Shader {:016X} {} translated successfully ({} bytes)",
-           shader.ucode_data_hash(),
-           shader.type() == xenos::ShaderType::kVertex ? "vertex" : "pixel",
-           translation.translated_binary_.size());
-  }
-
-  return translation.is_valid();
+  return translation.is_valid_;
 }
 
 void ShaderTranslator::EmitTranslationError(const char* message,
@@ -1222,9 +1121,7 @@ void ParseTextureFetchInstruction(const TextureFetchInstruction& op,
       opcode_info.override_component_count
           ? opcode_info.override_component_count
           : xenos::GetFetchOpDimensionComponentCount(op.dimension());
-  // getBCF goes with a tfetch and needs the same coordinates.
-  if ((op.opcode() == FetchOpcode::kTextureFetch ||
-       op.opcode() == FetchOpcode::kGetTextureBorderColorFrac) &&
+  if (op.opcode() == FetchOpcode::kTextureFetch &&
       op.dimension() == xenos::FetchOpDimension::k1D) {
     uint32_t src_swizzle = op.src_swizzle();
     uint32_t src_select_x = src_swizzle & 0x3;
@@ -1271,8 +1168,10 @@ uint32_t ParsedTextureFetchInstruction::GetNonZeroResultComponents() const {
   switch (opcode) {
     case FetchOpcode::kTextureFetch:
     case FetchOpcode::kGetTextureGradients:
-    case FetchOpcode::kGetTextureBorderColorFrac:
       components = 0b1111;
+      break;
+    case FetchOpcode::kGetTextureBorderColorFrac:
+      components = 0b0001;
       break;
     case FetchOpcode::kGetTextureComputedLod:
       // Not checking if the MipFilter is basemap because XNA doesn't accept

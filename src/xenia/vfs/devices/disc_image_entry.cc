@@ -39,13 +39,18 @@ X_STATUS DiscImageEntry::Open(uint32_t desired_access, File** out_file) {
 
 std::unique_ptr<MappedMemory> DiscImageEntry::OpenMapped(
     MappedMemory::Mode mode, size_t offset, size_t length) {
-  if (mode != MappedMemory::Mode::kRead) {
-    // Only allow reads.
+  if (mode != MappedMemory::Mode::kRead || !mmap_ || offset > data_size_ ||
+      data_offset_ > mmap_->size() || offset > mmap_->size() - data_offset_) {
+    // Only allow reads and check if mmap is valid.
     return nullptr;
   }
 
   size_t real_offset = data_offset_ + offset;
-  size_t real_length = length ? std::min(length, data_size_) : data_size_;
+  size_t real_length =
+      length ? std::min(length, data_size_ - offset) : data_size_ - offset;
+  if (real_length > mmap_->size() - real_offset) {
+    return nullptr;
+  }
   return mmap_->Slice(real_offset, real_length);
 }
 

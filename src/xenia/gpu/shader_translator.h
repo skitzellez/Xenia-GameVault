@@ -59,16 +59,6 @@ class ShaderTranslator {
     return current_shader().type() == xenos::ShaderType::kPixel;
   }
 
-  // Whether a texture fetch derives its LOD from gradients (implicit or
-  // register) rather than an explicit LOD. The single gate, shared by all
-  // backends, for gradient vs. explicit-LOD sampling and for anisotropic
-  // filtering.
-  bool TextureFetchUsesComputedLod(
-      const ParsedTextureFetchInstruction& instr) const {
-    return instr.attributes.use_computed_lod &&
-           (is_pixel_shader() || instr.attributes.use_register_gradients);
-  }
-
   // Temporary register count, accessible via static and dynamic addressing.
   uint32_t register_count() const { return register_count_; }
 

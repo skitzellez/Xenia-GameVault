@@ -34,11 +34,9 @@ class DrawExtentEstimator {
   }
 
   // The shader must have its ucode analyzed.
-  uint32_t EstimateVertexMaxY(const Shader& vertex_shader,
-                              bool window_offset_in_edram);
+  uint32_t EstimateVertexMaxY(const Shader& vertex_shader);
   uint32_t EstimateMaxY(bool try_to_estimate_vertex_max_y,
-                        const Shader& vertex_shader,
-                        bool window_offset_in_edram);
+                        const Shader& vertex_shader);
 
  private:
   class PositionYExportSink : public ShaderInterpreter::ExportSink {

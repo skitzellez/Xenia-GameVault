@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 
+#include "xenia/base/filesystem.h"
 #include "xenia/base/mapped_memory.h"
 #include "xenia/vfs/device.h"
 
@@ -33,14 +34,14 @@ class DiscImageDevice : public Device {
   void Dump(StringBuffer* string_buffer) override;
   Entry* ResolvePath(const std::string_view path) override;
 
-  bool supports_concurrent_io() const override { return true; }
-
   const std::string& name() const override { return name_; }
   uint32_t attributes() const override { return 0; }
+  bool ReadImageData(size_t file_offset, void* buffer, size_t buffer_length,
+                     size_t* out_bytes_read) const;
   uint32_t component_name_max_length() const override { return 255; }
 
   uint32_t total_allocation_units() const override {
-    return uint32_t(mmap_->size() / sectors_per_allocation_unit() /
+    return uint32_t(image_size_ / sectors_per_allocation_unit() /
                     bytes_per_sector());
   }
   uint32_t available_allocation_units() const override { return 0; }
@@ -59,7 +60,9 @@ class DiscImageDevice : public Device {
   std::string name_;
   std::filesystem::path host_path_;
   std::unique_ptr<Entry> root_entry_;
+  std::unique_ptr<filesystem::FileHandle> file_handle_;
   std::unique_ptr<MappedMemory> mmap_;
+  size_t image_size_ = 0;
 
   typedef struct {
     uint8_t* ptr;
@@ -74,7 +77,7 @@ class DiscImageDevice : public Device {
   bool VerifyMagic(ParseState* state, size_t offset);
   Error ReadAllEntries(ParseState* state, const uint8_t* root_buffer);
   bool ReadEntry(ParseState* state, const uint8_t* buffer,
-                 uint32_t entry_ordinal, DiscImageEntry* parent);
+                 uint16_t entry_ordinal, DiscImageEntry* parent);
 };
 
 }  // namespace vfs

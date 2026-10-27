@@ -14,12 +14,11 @@
 #include <vector>
 
 #include "xenia/gpu/shader.h"
+#include "xenia/gpu/spirv_shader_translator.h"
 #include "xenia/gpu/xenos.h"
 
 namespace xe {
 namespace gpu {
-
-class SpirvShaderTranslator;
 
 class SpirvShader : public Shader {
  public:
@@ -64,14 +63,6 @@ class SpirvShader : public Shader {
     return sampler_bindings_;
   }
 
-  // True once a translation has gathered the resource bindings above. Set with
-  // release ordering after the binding vectors are filled (which may happen on
-  // a pipeline creation thread), so a draw-thread reader that sees this true
-  // (acquire) is guaranteed the bindings are fully written and immutable.
-  bool bindings_ready() const {
-    return bindings_ready_.load(std::memory_order_acquire);
-  }
-
  protected:
   Translation* CreateTranslationInstance(uint64_t modification) override;
 
@@ -79,7 +70,6 @@ class SpirvShader : public Shader {
   friend class SpirvShaderTranslator;
 
   std::atomic_flag bindings_setup_entered_ = ATOMIC_FLAG_INIT;
-  std::atomic<bool> bindings_ready_{false};
   std::vector<TextureBinding> texture_bindings_;
   std::vector<SamplerBinding> sampler_bindings_;
   uint32_t used_texture_mask_ = 0;

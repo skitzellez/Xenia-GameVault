@@ -41,8 +41,7 @@ class DeferredCommandList {
   void Reset();
   void Execute(ID3D12GraphicsCommandList* command_list,
                ID3D12GraphicsCommandList1* command_list_1,
-               ID3D12GraphicsCommandList2* command_list_2,
-               ID3D12GraphicsCommandList9* command_list_9);
+               ID3D12GraphicsCommandList2* command_list_2);
 
   D3D12_RECT* ClearDepthStencilViewAllocatedRects(
       D3D12_CPU_DESCRIPTOR_HANDLE depth_stencil_view,
@@ -216,15 +215,6 @@ class DeferredCommandList {
     args.destination_offset = destination_offset;
   }
 
-  void D3DSetPredication(ID3D12Resource* buffer, UINT64 aligned_buffer_offset,
-                         D3D12_PREDICATION_OP operation) {
-    auto& args = *reinterpret_cast<D3DSetPredicationArguments*>(WriteCommand(
-        Command::kD3DSetPredication, sizeof(D3DSetPredicationArguments)));
-    args.buffer = buffer;
-    args.aligned_buffer_offset = aligned_buffer_offset;
-    args.operation = operation;
-  }
-
   void D3DIASetIndexBuffer(const D3D12_INDEX_BUFFER_VIEW* view) {
     auto& args = *reinterpret_cast<D3D12_INDEX_BUFFER_VIEW*>(WriteCommand(
         Command::kD3DIASetIndexBuffer, sizeof(D3D12_INDEX_BUFFER_VIEW)));
@@ -304,32 +294,6 @@ class DeferredCommandList {
     arg = stencil_ref;
   }
 
-  void D3DResolveSubresourceRegion(ID3D12Resource* dst_resource,
-                                   UINT dst_subresource, UINT dst_x, UINT dst_y,
-                                   ID3D12Resource* src_resource,
-                                   UINT src_subresource,
-                                   const D3D12_RECT* src_rect,
-                                   DXGI_FORMAT format,
-                                   D3D12_RESOLVE_MODE resolve_mode) {
-    auto& args = *reinterpret_cast<D3DResolveSubresourceRegionArguments*>(
-        WriteCommand(Command::kD3DResolveSubresourceRegion,
-                     sizeof(D3DResolveSubresourceRegionArguments)));
-    args.dst_resource = dst_resource;
-    args.dst_subresource = dst_subresource;
-    args.dst_x = dst_x;
-    args.dst_y = dst_y;
-    args.src_resource = src_resource;
-    args.src_subresource = src_subresource;
-    if (src_rect) {
-      args.has_src_rect = true;
-      args.src_rect = *src_rect;
-    } else {
-      args.has_src_rect = false;
-    }
-    args.format = format;
-    args.resolve_mode = resolve_mode;
-  }
-
   void D3DResourceBarrier(UINT num_barriers,
                           const D3D12_RESOURCE_BARRIER* barriers) {
     if (num_barriers == 0) {
@@ -344,15 +308,6 @@ class DeferredCommandList {
     *reinterpret_cast<UINT*>(args) = num_barriers;
     std::memcpy(args + header_size, barriers,
                 num_barriers * sizeof(D3D12_RESOURCE_BARRIER));
-  }
-
-  void D3DRSSetDepthBias(FLOAT depth_bias, FLOAT depth_bias_clamp,
-                         FLOAT slope_scaled_depth_bias) {
-    auto& args = *reinterpret_cast<D3DRSSetDepthBiasArguments*>(WriteCommand(
-        Command::kD3DRSSetDepthBias, sizeof(D3DRSSetDepthBiasArguments)));
-    args.depth_bias = depth_bias;
-    args.depth_bias_clamp = depth_bias_clamp;
-    args.slope_scaled_depth_bias = slope_scaled_depth_bias;
   }
 
   void RSSetScissorRect(const D3D12_RECT& rect) {
@@ -525,30 +480,6 @@ class DeferredCommandList {
     args.value = value;
   }
 
-  // Debug marker support for PIX/RenderDoc annotation.
-  void BeginDebugMarker(const char* label_name) {
-    size_t label_len = std::strlen(label_name);
-    uint8_t* args_ptr = reinterpret_cast<uint8_t*>(WriteCommand(
-        Command::kBeginDebugMarker, sizeof(DebugMarkerHeader) + label_len + 1));
-    auto& args = *reinterpret_cast<DebugMarkerHeader*>(args_ptr);
-    args.label_length = static_cast<uint32_t>(label_len);
-    std::memcpy(args_ptr + sizeof(DebugMarkerHeader), label_name,
-                label_len + 1);
-  }
-
-  void EndDebugMarker() { WriteCommand(Command::kEndDebugMarker, 0); }
-
-  void InsertDebugMarker(const char* label_name) {
-    size_t label_len = std::strlen(label_name);
-    uint8_t* args_ptr = reinterpret_cast<uint8_t*>(
-        WriteCommand(Command::kInsertDebugMarker,
-                     sizeof(DebugMarkerHeader) + label_len + 1));
-    auto& args = *reinterpret_cast<DebugMarkerHeader*>(args_ptr);
-    args.label_length = static_cast<uint32_t>(label_len);
-    std::memcpy(args_ptr + sizeof(DebugMarkerHeader), label_name,
-                label_len + 1);
-  }
-
  private:
   enum class Command {
     kD3DClearDepthStencilView,
@@ -564,16 +495,13 @@ class DeferredCommandList {
     kD3DBeginQuery,
     kD3DEndQuery,
     kD3DResolveQueryData,
-    kD3DSetPredication,
     kD3DIASetIndexBuffer,
     kD3DIASetPrimitiveTopology,
     kD3DIASetVertexBuffers,
     kD3DOMSetBlendFactor,
     kD3DOMSetRenderTargets,
     kD3DOMSetStencilRef,
-    kD3DResolveSubresourceRegion,
     kD3DResourceBarrier,
-    kD3DRSSetDepthBias,
     kRSSetScissorRect,
     kRSSetViewport,
     kD3DSetComputeRoot32BitConstants,
@@ -593,9 +521,6 @@ class DeferredCommandList {
     kSetPipelineStateHandle,
     kD3DSetSamplePositions,
     kD3DWriteBufferImmediate,
-    kBeginDebugMarker,
-    kEndDebugMarker,
-    kInsertDebugMarker,
   };
 
   struct CommandHeader {
@@ -694,12 +619,6 @@ class DeferredCommandList {
     UINT64 destination_offset;
   };
 
-  struct D3DSetPredicationArguments {
-    ID3D12Resource* buffer;
-    UINT64 aligned_buffer_offset;
-    D3D12_PREDICATION_OP operation;
-  };
-
   struct D3DIASetVertexBuffersHeader {
     UINT start_slot;
     UINT num_views;
@@ -735,25 +654,6 @@ class DeferredCommandList {
     ID3D12DescriptorHeap* sampler_descriptor_heap;
   };
 
-  struct D3DResolveSubresourceRegionArguments {
-    ID3D12Resource* dst_resource;
-    UINT dst_subresource;
-    UINT dst_x;
-    UINT dst_y;
-    ID3D12Resource* src_resource;
-    UINT src_subresource;
-    D3D12_RECT src_rect;
-    bool has_src_rect;
-    DXGI_FORMAT format;
-    D3D12_RESOLVE_MODE resolve_mode;
-  };
-
-  struct D3DRSSetDepthBiasArguments {
-    FLOAT depth_bias;
-    FLOAT depth_bias_clamp;
-    FLOAT slope_scaled_depth_bias;
-  };
-
   struct D3DSetSamplePositionsArguments {
     UINT num_samples_per_pixel;
     UINT num_pixels;
@@ -763,11 +663,6 @@ class DeferredCommandList {
   struct D3DWriteBufferImmediateArguments {
     D3D12_GPU_VIRTUAL_ADDRESS dest;
     UINT value;
-  };
-
-  struct DebugMarkerHeader {
-    uint32_t label_length;
-    // Followed by null-terminated label string.
   };
 
   void* WriteCommand(Command command, size_t arguments_size_bytes);

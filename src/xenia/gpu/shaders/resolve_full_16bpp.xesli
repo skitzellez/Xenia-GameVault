@@ -12,7 +12,7 @@
 #define XE_RESOLVE_COPY_EDRAM_BYTE_BUFFER_ALIGNMENT 4
 #include "resolve.xesli"
 
-byte_buffer_align8_wo_declare_xe(xe_resolve_dest, 1, 0, u0, space0, 1)
+byte_buffer_align8_wo_declare_xe(xe_resolve_dest, set=1, binding=0, u0, space0)
 #define LOCAL_SIZE_X_XE 8
 #define LOCAL_SIZE_Y_XE 8
 #define LOCAL_SIZE_Z_XE 1

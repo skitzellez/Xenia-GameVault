@@ -18,9 +18,9 @@
 #include <vector>
 
 #include "xenia/base/assert.h"
+#include "xenia/gpu/d3d12/d3d12_shader.h"
 #include "xenia/gpu/d3d12/d3d12_shared_memory.h"
 #include "xenia/gpu/register_file.h"
-#include "xenia/gpu/spirv_shader.h"
 #include "xenia/gpu/texture_cache.h"
 #include "xenia/gpu/texture_util.h"
 #include "xenia/gpu/xenos.h"
@@ -90,8 +90,13 @@ class D3D12TextureCache final : public TextureCache {
 
   ~D3D12TextureCache();
 
+  // Whether tiled resources back the draw resolution scaling memory. Otherwise
+  // it is committed per resolved range.
+  static bool IsScaledResolveTiled(const ui::d3d12::D3D12Provider& provider);
+
   void ClearCache() override;
 
+  void CompletedSubmissionUpdated(uint64_t completed_submission_index) override;
   void BeginSubmission(uint64_t new_submission_index) override;
   void BeginFrame() override;
   void EndFrame();
@@ -108,24 +113,24 @@ class D3D12TextureCache final : public TextureCache {
   // (otherwise they are incompatible - like if this function returned false).
   bool AreActiveTextureSRVKeysUpToDate(
       const TextureSRVKey* keys,
-      const SpirvShader::TextureBinding* host_shader_bindings,
+      const D3D12Shader::TextureBinding* host_shader_bindings,
       size_t host_shader_binding_count) const;
   // Exports the current binding data to texture SRV keys so they can be stored
   // for checking whether subsequent draw calls can keep using the same
   // bindings. Write host_shader_binding_count keys.
   void WriteActiveTextureSRVKeys(
       TextureSRVKey* keys,
-      const SpirvShader::TextureBinding* host_shader_bindings,
+      const D3D12Shader::TextureBinding* host_shader_bindings,
       size_t host_shader_binding_count) const;
   void WriteActiveTextureBindfulSRV(
-      const SpirvShader::TextureBinding& host_shader_binding,
+      const D3D12Shader::TextureBinding& host_shader_binding,
       D3D12_CPU_DESCRIPTOR_HANDLE handle);
   uint32_t GetActiveTextureBindlessSRVIndex(
-      const SpirvShader::TextureBinding& host_shader_binding);
+      const D3D12Shader::TextureBinding& host_shader_binding);
   void PrefetchSamplerParameters(
-      const SpirvShader::SamplerBinding& binding) const;
+      const D3D12Shader::SamplerBinding& binding) const;
   SamplerParameters GetSamplerParameters(
-      const SpirvShader::SamplerBinding& binding) const;
+      const D3D12Shader::SamplerBinding& binding) const;
   void WriteSampler(SamplerParameters parameters,
                     D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
 
@@ -148,20 +153,30 @@ class D3D12TextureCache final : public TextureCache {
     assert_true(IsDrawResolutionScaled());
     GetCurrentScaledResolveBuffer().SetUAVBarrierPending();
   }
-  // Accessors for scaled resolve range info (for readback resolve path).
+  // The range specified in the last successful MakeScaledResolveRangeCurrent
+  // call, in the scaled physical memory address space.
   uint64_t GetCurrentScaledResolveRangeStartScaled() const {
+    assert_true(IsDrawResolutionScaled());
     return scaled_resolve_current_range_start_scaled_;
   }
   uint64_t GetCurrentScaledResolveRangeLengthScaled() const {
+    assert_true(IsDrawResolutionScaled());
     return scaled_resolve_current_range_length_scaled_;
   }
-  // Returns the ID3D12Resource for the current scaled resolve buffer.
+  // The resource of the buffer containing the current scaled resolve range,
+  // and the offset of the start of the buffer within the scaled physical
+  // memory address space (the buffer index is also its gigabyte offset).
   ID3D12Resource* GetCurrentScaledResolveBufferResource() {
+    assert_true(IsDrawResolutionScaled());
     return GetCurrentScaledResolveBuffer().resource();
   }
-  // Returns the buffer index (gigabyte offset) for the current scaled resolve.
-  size_t GetCurrentScaledResolveBufferIndexPublic() const {
-    return GetCurrentScaledResolveBufferIndex();
+  uint64_t GetCurrentScaledResolveBufferBaseOffset() const {
+    assert_true(IsDrawResolutionScaled());
+    if (scaled_resolve_committed_) {
+      assert_not_null(scaled_resolve_current_segment_);
+      return scaled_resolve_current_segment_start_scaled_;
+    }
+    return uint64_t(GetCurrentScaledResolveBufferIndex()) << 30;
   }
 
   // Returns the ID3D12Resource of the front buffer texture (in
@@ -259,10 +274,9 @@ class D3D12TextureCache final : public TextureCache {
        DXGI_FORMAT_UNKNOWN, kLoadShaderIndexUnknown,
        xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR},
       // k_8_B
-      {DXGI_FORMAT_R8_TYPELESS, DXGI_FORMAT_R8_UNORM, kLoadShaderIndex8bpb,
-       DXGI_FORMAT_R8_SNORM, kLoadShaderIndexUnknown, false,
-       DXGI_FORMAT_UNKNOWN, kLoadShaderIndexUnknown,
-       xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR},
+      {DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, kLoadShaderIndexUnknown,
+       DXGI_FORMAT_UNKNOWN, kLoadShaderIndexUnknown, false, DXGI_FORMAT_UNKNOWN,
+       kLoadShaderIndexUnknown, xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR},
       // k_8_8
       {DXGI_FORMAT_R8G8_TYPELESS, DXGI_FORMAT_R8G8_UNORM, kLoadShaderIndex16bpb,
        DXGI_FORMAT_R8G8_SNORM, kLoadShaderIndexUnknown, false,
@@ -298,9 +312,8 @@ class D3D12TextureCache final : public TextureCache {
        DXGI_FORMAT_UNKNOWN, kLoadShaderIndexUnknown, false, DXGI_FORMAT_UNKNOWN,
        kLoadShaderIndexUnknown, xenos::XE_GPU_TEXTURE_SWIZZLE_RGGG},
       // k_8_8_8_8_A
-      {DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM,
-       kLoadShaderIndex32bpb, DXGI_FORMAT_R8G8B8A8_SNORM,
-       kLoadShaderIndexUnknown, false, DXGI_FORMAT_UNKNOWN,
+      {DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, kLoadShaderIndexUnknown,
+       DXGI_FORMAT_UNKNOWN, kLoadShaderIndexUnknown, false, DXGI_FORMAT_UNKNOWN,
        kLoadShaderIndexUnknown, xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA},
       // k_4_4_4_4
       // Red and blue swapped in the load shader for simplicity.
@@ -806,6 +819,10 @@ class D3D12TextureCache final : public TextureCache {
         [scaled_resolve_current_range_start_scaled_ >> 30];
   }
   ScaledResolveVirtualBuffer& GetCurrentScaledResolveBuffer() {
+    if (scaled_resolve_committed_) {
+      assert_not_null(scaled_resolve_current_segment_);
+      return *scaled_resolve_current_segment_;
+    }
     ScaledResolveVirtualBuffer* scaled_resolve_buffer =
         scaled_resolve_2gb_buffers_[GetCurrentScaledResolveBufferIndex()].get();
     assert_not_null(scaled_resolve_buffer);
@@ -817,11 +834,9 @@ class D3D12TextureCache final : public TextureCache {
   D3D12CommandProcessor& command_processor_;
   bool bindless_resources_used_;
 
-  // Bit per guest format: whether the unsigned / signed host SRV format
-  // supports linear filtering on this device (queried in Initialize). Used to
-  // fall back to point sampling for formats the device can't filter.
-  uint64_t host_format_linear_filterable_unsigned_ = 0;
-  uint64_t host_format_linear_filterable_signed_ = 0;
+  // Bits per format, for checking if the host format should be point-filtered.
+  uint64_t host_filterable_unsigned_ = 0;
+  uint64_t host_filterable_signed_ = 0;
 
   Microsoft::WRL::ComPtr<ID3D12RootSignature> load_root_signature_;
   std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, kLoadShaderCount>
@@ -829,11 +844,6 @@ class D3D12TextureCache final : public TextureCache {
   // Load pipelines for resolution-scaled resolve targets.
   std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, kLoadShaderCount>
       load_pipelines_scaled_;
-
-  // Mip generation for scaled resolve textures.
-  Microsoft::WRL::ComPtr<ID3D12RootSignature> mip_gen_root_signature_;
-  Microsoft::WRL::ComPtr<ID3D12PipelineState> mip_gen_pipeline_;
-  Microsoft::WRL::ComPtr<ID3D12PipelineState> mip_gen_3d_pipeline_;
 
   std::vector<SRVDescriptorCachePage> srv_descriptor_cache_;
   uint32_t srv_descriptor_cache_allocated_;
@@ -908,6 +918,33 @@ class D3D12TextureCache final : public TextureCache {
   std::vector<Microsoft::WRL::ComPtr<ID3D12Heap>> scaled_resolve_heaps_;
   // Number of currently resident portions of the tiled buffer, for profiling.
   uint32_t scaled_resolve_heap_count_ = 0;
+  // Committed buffers backing scaled address intervals when tiled resources
+  // are not used. Sorted by start_scaled and disjoint. A range is accessed
+  // through the one segment containing it.
+  struct ScaledResolveSegment {
+    uint64_t start_scaled;
+    uint64_t length_scaled;
+    std::unique_ptr<ScaledResolveVirtualBuffer> buffer;
+  };
+  bool scaled_resolve_committed_ = false;
+  std::vector<ScaledResolveSegment> scaled_resolve_segments_;
+  // Segment of the current range in committed mode.
+  ScaledResolveVirtualBuffer* scaled_resolve_current_segment_ = nullptr;
+  uint64_t scaled_resolve_current_segment_start_scaled_ = 0;
+  // Buffers of merged segments, released once their copy submission completes.
+  struct RetiredScaledResolveBuffer {
+    uint64_t submission;
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    uint64_t length;
+  };
+  std::vector<RetiredScaledResolveBuffer> scaled_resolve_retired_buffers_;
+  uint64_t scaled_resolve_committed_bytes_ = 0;
+  uint64_t scaled_resolve_retired_bytes_ = 0;
+  uint32_t scaled_resolve_allocation_failures_ = 0;
+  // Ensures one segment contains [first_scaled, last_scaled], merging existing
+  // ones if needed (copies are recorded to the current submission).
+  bool EnsureScaledResolveSegment(uint64_t first_scaled, uint64_t last_scaled,
+                                  size_t& segment_index_out);
   // Current scaled resolve state.
   // For aliasing barrier placement, last owning buffer index for each of 1 GB.
   size_t

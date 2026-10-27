@@ -28,7 +28,10 @@ bool SharedMemory::InitializeCommon() {
       ((kBufferSize >> page_size_log2_) + 63) / 64;
   num_system_page_flags_ = static_cast<uint32_t>(num_system_page_flags_entries);
 
-  // Two flag arrays (valid, valid_and_gpu_written), 8 bytes per 64-page entry.
+  // in total on windows the page flags take up 2048 entries per fields, with 3
+  // fields and 8 bytes per entry thats 49152 bytes. having page alignment for
+  // them is probably beneficial, we do waste 16384 bytes with this alloc though
+
   uint64_t* system_page_flags_base = (uint64_t*)memory::AllocFixed(
       nullptr, num_system_page_flags_ * 2 * sizeof(uint64_t),
       memory::AllocationType::kReserveCommit, memory::PageAccess::kReadWrite);
@@ -41,11 +44,9 @@ bool SharedMemory::InitializeCommon() {
   system_page_flags_valid_ = system_page_flags_base;
   system_page_flags_valid_and_gpu_written_ =
       system_page_flags_base + num_system_page_flags_;
-
   memset(system_page_flags_valid_, 0, 8 * num_system_page_flags_entries);
   memset(system_page_flags_valid_and_gpu_written_, 0,
          8 * num_system_page_flags_entries);
-
   memory_invalidation_callback_handle_ =
       memory_.RegisterPhysicalMemoryInvalidationCallback(
           MemoryInvalidationCallbackThunk, this);
@@ -99,29 +100,11 @@ void SharedMemory::ShutdownCommon() {
   host_gpu_memory_sparse_allocated_.clear();
   host_gpu_memory_sparse_allocated_.shrink_to_fit();
   host_gpu_memory_sparse_granularity_log2_ = UINT32_MAX;
-
-  // One AllocFixed backs both flag arrays; valid_ is its base pointer.
-  if (system_page_flags_valid_) {
-    memory::DeallocFixed(system_page_flags_valid_, 0,
-                         memory::DeallocationType::kRelease);
-    system_page_flags_valid_ = nullptr;
-  }
-
+  memory::DeallocFixed(system_page_flags_valid_, 0,
+                       memory::DeallocationType::kRelease);
+  system_page_flags_valid_ = nullptr;
   system_page_flags_valid_and_gpu_written_ = nullptr;
   num_system_page_flags_ = 0;
-}
-
-void SharedMemory::InvalidateAllPages() {
-  auto global_lock = global_critical_region_.Acquire();
-
-  std::memset(system_page_flags_valid_, 0,
-              num_system_page_flags_ * sizeof(uint64_t));
-  std::memset(system_page_flags_valid_and_gpu_written_, 0,
-              num_system_page_flags_ * sizeof(uint64_t));
-
-  // Mark all chunks dirty so the next copy refreshes everything.
-  dirty_blocks_ = 0xFFFFFFFF;
-  gpu_written_data_dirty_ = true;
 }
 
 void SharedMemory::ClearCache() {
@@ -147,33 +130,8 @@ void SharedMemory::ClearCache() {
 void SharedMemory::SetSystemPageBlocksValidWithGpuDataWritten() {
   auto global_lock = global_critical_region_.Acquire();
 
-  if (gpu_written_data_dirty_) {
-    // Only copy the chunks that changed. Read and reset the dirty bitmap.
-    uint32_t dirty_mask = dirty_blocks_;
-    dirty_blocks_ = 0;
-    gpu_written_data_dirty_ = false;
-
-    uint32_t dirty_count = xe::bit_count(dirty_mask);
-
-    // Past ~50% dirty the per-chunk bookkeeping costs more than a straight
-    // copy.
-    if (dirty_count == 0 || dirty_count > 16) {
-      std::memcpy(system_page_flags_valid_,
-                  system_page_flags_valid_and_gpu_written_,
-                  num_system_page_flags_ * sizeof(uint64_t));
-    } else {
-      while (dirty_mask) {
-        uint32_t block_index;
-        xe::bit_scan_forward(dirty_mask, &block_index);
-        dirty_mask &= ~(1u << block_index);
-
-        // Each chunk is 64 entries of 8 bytes.
-        uint32_t entry_offset = block_index * 64;
-        std::memcpy(&system_page_flags_valid_[entry_offset],
-                    &system_page_flags_valid_and_gpu_written_[entry_offset],
-                    64 * sizeof(uint64_t));
-      }
-    }
+  for (unsigned i = 0; i < num_system_page_flags_; ++i) {
+    system_page_flags_valid_[i] = system_page_flags_valid_and_gpu_written_[i];
   }
 }
 
@@ -323,8 +281,7 @@ void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last,
   }
 }
 
-void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length,
-                                     bool written_to_buffer) {
+void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
   if (length == 0 || start >= kBufferSize) {
     return;
   }
@@ -339,10 +296,7 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length,
 
   // Mark the range as valid (so pages are not reuploaded until modified by the
   // CPU) and watch it so the CPU can reuse it and this will be caught.
-  // written_to_buffer also marks it GPU-authoritative, which must not happen
-  // when the write went to guest RAM instead - that would keep the buffer's
-  // stale copy across cache clears.
-  MakeRangeValid(start, length, written_to_buffer);
+  MakeRangeValid(start, length, true);
 }
 
 bool SharedMemory::AllocateSparseHostGpuMemoryRange(
@@ -380,9 +334,6 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
       system_page_flags_valid_[i] |= valid_bits;
       if (written_by_gpu) {
         system_page_flags_valid_and_gpu_written_[i] |= valid_bits;
-        // Mark the touched chunk dirty so the next copy picks it up.
-        gpu_written_data_dirty_ = true;
-        dirty_blocks_ |= 1u << (i >> 6);
       } else {
         system_page_flags_valid_and_gpu_written_[i] &= ~valid_bits;
       }
@@ -391,8 +342,7 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
 
   if (memory_invalidation_callback_handle_) {
     // A page that isn't writable here gets no watch. A later guest
-    // protect-to-writable invalidates it unconditionally, so its writes are
-    // still caught.
+    // protect-to-writable invalidates it so its writes are still caught.
     memory().EnablePhysicalMemoryAccessCallbacks(
         valid_page_first << page_size_log2_,
         (valid_page_last - valid_page_first + 1) << page_size_log2_, true,
@@ -422,7 +372,6 @@ void SharedMemory::UnlinkWatchRange(WatchRange* range) {
   range->next_free = watch_range_first_free_;
   watch_range_first_free_ = range;
 }
-
 // todo: optimize, an enormous amount of cpu time (1.34%) is spent here.
 bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
   if (!length) {
@@ -443,42 +392,14 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
   uint32_t page_first = start >> page_size_log2_;
   uint32_t page_last = (start + length - 1) >> page_size_log2_;
 
-  uint32_t block_first = page_first >> 6;
-  uint32_t block_last = page_last >> 6;
-
-  // Lockless fast-path: check if all pages are already valid.
-  // This avoids lock acquisition for the common case where pages are resident.
-  uint64_t* valid_flags = system_page_flags_valid_;
-  if (valid_flags) {
-    bool all_valid = true;
-    for (uint32_t i = block_first; i <= block_last && all_valid; ++i) {
-      uint64_t block_valid = valid_flags[i];
-      if (i == block_first) {
-        // Mask out pages before page_first
-        uint64_t block_before = (uint64_t(1) << (page_first & 63)) - 1;
-        block_valid |= block_before;
-      }
-      if (i == block_last && (page_last & 63) != 63) {
-        // Mask out pages after page_last
-        uint64_t block_after = ~((uint64_t(1) << ((page_last & 63) + 1)) - 1);
-        block_valid |= block_after;
-      }
-      if (block_valid != ~uint64_t(0)) {
-        all_valid = false;
-      }
-    }
-    if (all_valid) {
-      // All pages already valid, nothing to upload
-      return true;
-    }
-  }
-
   upload_ranges_.clear();
 
   std::pair<uint32_t, uint32_t>* uploads =
       reinterpret_cast<std::pair<uint32_t, uint32_t>*>(upload_ranges_.data());
 
+  uint32_t block_first = page_first >> 6;
   // swcache::PrefetchL1(&system_page_flags_[block_first]);
+  uint32_t block_last = page_last >> 6;
   uint32_t range_start = UINT32_MAX;
 
   {
@@ -660,7 +581,6 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     }
   }
 
-  uint32_t dirty_blocks_mask = 0;
   for (uint32_t i = block_first; i <= block_last; ++i) {
     uint64_t invalidate_bits = UINT64_MAX;
     if (i == block_first) {
@@ -671,13 +591,7 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     }
     system_page_flags_valid_[i] &= ~invalidate_bits;
     system_page_flags_valid_and_gpu_written_[i] &= ~invalidate_bits;
-    // Track which chunks changed for partial copying.
-    dirty_blocks_mask |= (1u << (i >> 6));
   }
-
-  // GPU-written flags changed due to CPU invalidation.
-  gpu_written_data_dirty_ = true;
-  dirty_blocks_ |= dirty_blocks_mask;
 
   FireWatches(page_first, page_last, false);
 

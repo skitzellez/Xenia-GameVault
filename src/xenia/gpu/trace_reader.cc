@@ -53,7 +53,7 @@ bool TraceReader::Open(const std::string_view path) {
     return false;
   }
 
-  XELOGI("Mapped {}b trace from {}", trace_size_, xe::strip_pii(path));
+  XELOGI("Mapped {}b trace from {}", trace_size_, path);
   XELOGI("   Version: {}", header->version);
   auto commit_str = std::string(header->build_commit_sha,
                                 xe::countof(header->build_commit_sha));

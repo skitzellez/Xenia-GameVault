@@ -23,8 +23,8 @@ namespace d3d12 {
 
 // Generated with `xb buildshaders`.
 namespace shaders {
-#include "xenia/ui/shaders/bytecode/d3d12_dxil/immediate_ps.h"
-#include "xenia/ui/shaders/bytecode/d3d12_dxil/immediate_vs.h"
+#include "xenia/ui/shaders/bytecode/d3d12_5_1/immediate_ps.h"
+#include "xenia/ui/shaders/bytecode/d3d12_5_1/immediate_vs.h"
 }  // namespace shaders
 
 D3D12ImmediateDrawer::D3D12ImmediateTexture::D3D12ImmediateTexture(

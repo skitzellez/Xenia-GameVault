@@ -378,7 +378,6 @@ namespace spv {
 #define CapabilityDenormFlushToZero Capability::DenormFlushToZero
 #define CapabilitySignedZeroInfNanPreserve Capability::SignedZeroInfNanPreserve
 #define CapabilityRoundingModeRTE Capability::RoundingModeRTE
-#define CapabilityRoundingModeRTZ Capability::RoundingModeRTZ
 #define CapabilityFragmentShaderSampleInterlockEXT \
   Capability::FragmentShaderSampleInterlockEXT
 #define CapabilityFragmentShaderPixelInterlockEXT \
@@ -387,7 +386,6 @@ namespace spv {
 #define CapabilityDemoteToHelperInvocationEXT \
   Capability::DemoteToHelperInvocationEXT
 #define CapabilityStencilExportEXT Capability::StencilExportEXT
-#define CapabilityFragmentBarycentricKHR Capability::FragmentBarycentricKHR
 
 // Backward compatibility for AddressingModel
 #define AddressingModelLogical AddressingModel::Logical
@@ -413,13 +411,11 @@ namespace spv {
 #define ExecutionModeSignedZeroInfNanPreserve \
   ExecutionMode::SignedZeroInfNanPreserve
 #define ExecutionModeRoundingModeRTE ExecutionMode::RoundingModeRTE
-#define ExecutionModeRoundingModeRTZ ExecutionMode::RoundingModeRTZ
 #define ExecutionModePixelInterlockOrderedEXT \
   ExecutionMode::PixelInterlockOrderedEXT
 #define ExecutionModeSampleInterlockOrderedEXT \
   ExecutionMode::SampleInterlockOrderedEXT
 #define ExecutionModeInputPoints ExecutionMode::InputPoints
-#define ExecutionModeInputLines ExecutionMode::InputLines
 #define ExecutionModeTriangles ExecutionMode::Triangles
 #define ExecutionModeQuads ExecutionMode::Quads
 #define ExecutionModeIsolines ExecutionMode::Isolines
@@ -440,7 +436,6 @@ namespace spv {
 #define ExecutionModeLocalSize ExecutionMode::LocalSize
 
 // Backward compatibility for Decoration
-#define DecorationPerVertexKHR Decoration::PerVertexKHR
 #define DecorationRestrict Decoration::Restrict
 #define DecorationNonWritable Decoration::NonWritable
 #define DecorationBufferBlock Decoration::BufferBlock
@@ -473,9 +468,5 @@ namespace spv {
 
 // Backward compatibility for Scope
 #define ScopeDevice Scope::Device
-
-// Fragment barycentric BuiltIn values
-#define BuiltInBaryCoordKHR BuiltIn::BaryCoordKHR
-#define BuiltInBaryCoordNoPerspKHR BuiltIn::BaryCoordNoPerspKHR
 
 }  // namespace spv

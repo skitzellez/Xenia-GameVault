@@ -28,7 +28,14 @@ bool D3D12GraphicsSystem::IsAvailable() {
   return xe::ui::d3d12::D3D12Provider::IsD3D12APIAvailable();
 }
 
-std::string D3D12GraphicsSystem::name() const { return "D3D12"; }
+std::string D3D12GraphicsSystem::name() const {
+  auto d3d12_command_processor =
+      static_cast<D3D12CommandProcessor*>(command_processor());
+  if (d3d12_command_processor != nullptr) {
+    return d3d12_command_processor->GetWindowTitleText();
+  }
+  return "Direct3D 12";
+}
 
 X_STATUS D3D12GraphicsSystem::Setup(cpu::Processor* processor,
                                     kernel::KernelState* kernel_state,

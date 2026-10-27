@@ -9,12 +9,11 @@
 
 #include "../../ui/shaders/xesl.xesli"
 
+#ifdef XE_APPLY_GAMMA_COMPUTE
 #ifdef XE_APPLY_GAMMA_FXAA_LUMA
   #define XE_APPLY_GAMMA_DEST_FORMAT image_format_rgba16f_xe
-  #define XE_APPLY_GAMMA_DEST_FORMAT_SPIRV "rgba16f"
 #else
   #define XE_APPLY_GAMMA_DEST_FORMAT image_format_rgb10_a2_xe
-  #define XE_APPLY_GAMMA_DEST_FORMAT_SPIRV "rgb10_a2"
 #endif
 push_const_begin_xe(b0, space0)
   uint2_xe xe_apply_gamma_size;
@@ -25,15 +24,14 @@ push_const_end_xe
 entry_bindings_begin_compute_xe
   push_const_binding_xe(buffer(0))
   entry_binding_next_xe
-  texture_xe(texture_buffer_xe, xe_apply_gamma_ramp, 0, 0, t0,
+  texture_xe(texture_buffer_xe, xe_apply_gamma_ramp, set=0, binding=0, t0,
              space0, texture(0))
   entry_binding_next_xe
-  texture_xe(texture_2d_xe, xe_apply_gamma_source, 1, 0, t1,
+  texture_xe(texture_2d_xe, xe_apply_gamma_source, set=1, binding=0, t1,
              space0, texture(1))
   entry_binding_next_xe
-  image_wo_xe(image_2d_xe, XE_APPLY_GAMMA_DEST_FORMAT,
-              XE_APPLY_GAMMA_DEST_FORMAT_SPIRV, xe_apply_gamma_dest,
-              2, 0, u0, space0, texture(2))
+  image_wo_xe(image_2d_xe, XE_APPLY_GAMMA_DEST_FORMAT, xe_apply_gamma_dest,
+              set=2, binding=0, u0, space0, texture(2))
 entry_bindings_end_inputs_begin_compute_xe
   entry_in_global_thread_id_xe
 entry_inputs_end_code_begin_compute_xe
@@ -43,6 +41,21 @@ entry_inputs_end_code_begin_compute_xe
                                 push_const_xe(xe_apply_gamma_size)))) {
     return;
   }
+#else
+entry_outputs_begin_xe
+  entry_out_target_xe(float4_xe, xe_apply_gamma_dest, 0)
+entry_outputs_end_stage_inputs_begin_xe
+entry_stage_inputs_end_bindings_begin_pixel_xe
+  texture_xe(texture_buffer_xe, xe_apply_gamma_ramp, set=0, binding=0, t0,
+             space0, texture(0))
+  entry_binding_next_xe
+  texture_xe(texture_2d_xe, xe_apply_gamma_source, set=1, binding=0, t1,
+             space0, texture(1))
+entry_bindings_end_inputs_begin_xe
+  entry_in_pixel_coord_xe
+entry_inputs_end_code_begin_xe
+  uint2_xe pixel_index = uint2_xe(in_pixel_coord_xe.xy);
+#endif  // XE_APPLY_GAMMA_COMPUTE
   // UNORM conversion according to the Direct3D 10+ rules.
   uint3_xe apply_gamma_input = uint3_xe(
       texel_fetch_2d_xe(xe_apply_gamma_source, pixel_index, 0).rgb * 255.0f +
@@ -64,5 +77,10 @@ entry_inputs_end_code_begin_compute_xe
     // Perceptual luma.
     apply_gamma_output.a = 1.0f;
   #endif
+#ifdef XE_APPLY_GAMMA_COMPUTE
   image_store_2d_rgba_xe(xe_apply_gamma_dest, pixel_index, apply_gamma_output);
 entry_code_end_compute_xe
+#else
+  out_xe(xe_apply_gamma_dest) = apply_gamma_output;
+entry_code_end_xe
+#endif

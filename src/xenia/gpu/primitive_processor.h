@@ -136,10 +136,6 @@ class PrimitiveProcessor {
     // TODO(Triang3l): If important, split into the index count and the actual
     // index buffer size, using zeros for out-of-bounds indices.
     uint32_t host_draw_vertex_count;
-    // Guest-side draw index count before host primitive expansion / conversion.
-    // Needed by shader-side bounds checks when loading guest indices from
-    // shared memory (VS expansion, full 32-bit index loads).
-    uint32_t guest_draw_vertex_count;
     uint32_t line_loop_closing_index;
     ProcessedIndexBufferType index_buffer_type;
     uint32_t guest_index_base;
@@ -173,9 +169,6 @@ class PrimitiveProcessor {
   // shader, but geometry shaders must be supported for this.
   bool IsConvertingQuadListsToTriangleLists() const {
     return convert_quad_lists_to_triangle_lists_;
-  }
-  bool IsConvertingTriangleStripsToLists() const {
-    return convert_triangle_strips_to_lists_;
   }
   bool IsExpandingPointSpritesInVS() const {
     return expand_point_sprites_in_vs_;
@@ -212,8 +205,8 @@ class PrimitiveProcessor {
   // Also include padding for co-alignment of the source and the destination for
   // SIMD.
   static constexpr uint32_t kMinRequiredConvertedIndexBufferSize =
-      sizeof(uint32_t) * (UINT16_MAX - 2) * 3 +
-      XE_GPU_PRIMITIVE_PROCESSOR_SIMD_SIZE;
+      sizeof(uint32_t) * (UINT16_MAX - 2) * 3 *
+      +XE_GPU_PRIMITIVE_PROCESSOR_SIMD_SIZE;
 
   PrimitiveProcessor(const RegisterFile& register_file, Memory& memory,
                      TraceWriter& trace_writer, SharedMemory& shared_memory)
@@ -555,6 +548,12 @@ class PrimitiveProcessor {
       uint32_t fan_index_count) {
     return fan_index_count > 2 ? (fan_index_count - 2) * 3 : 0;
   }
+  // Triangle strip to triangle list conversion.
+  // A strip with N vertices produces (N-2) triangles, each needing 3 indices.
+  static constexpr uint32_t GetTriangleStripListIndexCount(
+      uint32_t strip_index_count) {
+    return strip_index_count > 2 ? (strip_index_count - 2) * 3 : 0;
+  }
   template <typename Index, typename IndexTransform>
   static void TriangleFanToList(Index* dest, const Index* source,
                                 uint32_t source_index_count,
@@ -630,43 +629,6 @@ class PrimitiveProcessor {
     }
   }
 
-  // Triangle strip to triangle list conversion.
-  // A strip with N vertices produces (N-2) triangles, each needing 3 indices.
-  static constexpr uint32_t GetTriangleStripListIndexCount(
-      uint32_t strip_index_count) {
-    return strip_index_count > 2 ? (strip_index_count - 2) * 3 : 0;
-  }
-  template <typename Index, typename IndexTransform>
-  static void TriangleStripToList(Index* dest, const Index* source,
-                                  uint32_t source_index_count,
-                                  const IndexTransform& index_transform) {
-    if (source_index_count <= 2) {
-      // To match GetTriangleStripListIndexCount.
-      return;
-    }
-    // For triangle strips, the winding order alternates for each triangle.
-    // Even triangles: v0, v1, v2
-    // Odd triangles: v1, v0, v2 (swapped to maintain consistent winding)
-    Index v0 = index_transform(source[0]);
-    Index v1 = index_transform(source[1]);
-    for (uint32_t i = 2; i < source_index_count; ++i) {
-      Index v2 = index_transform(source[i]);
-      if ((i & 1) == 0) {
-        // Even triangle (0, 2, 4, ...): v0, v1, v2
-        *(dest++) = v0;
-        *(dest++) = v1;
-        *(dest++) = v2;
-      } else {
-        // Odd triangle (1, 3, 5, ...): v1, v0, v2 to maintain winding
-        *(dest++) = v1;
-        *(dest++) = v0;
-        *(dest++) = v2;
-      }
-      v0 = v1;
-      v1 = v2;
-    }
-  }
-
   // Pre-gathering the ranges allows for usage of the same functions for
   // conversion with and without reset. In addition, this increases safety in
   // weird cases - there won't be mismatch between the pre-calculation of the
@@ -729,14 +691,6 @@ class PrimitiveProcessor {
           dest_write_ptr += range_it->host_index_count;
         }
         break;
-      case xenos::PrimitiveType::kTriangleStrip:
-        for (PrimitiveRangeIterator range_it = ranges_beginning;
-             range_it != ranges_end; ++range_it) {
-          TriangleStripToList(dest_write_ptr, source + range_it->guest_offset,
-                              range_it->guest_index_count, index_transform);
-          dest_write_ptr += range_it->host_index_count;
-        }
-        break;
       default:
         assert_unhandled_case(source_primitive_type);
     }
@@ -751,7 +705,6 @@ class PrimitiveProcessor {
   bool convert_triangle_fans_to_lists_ = false;
   bool convert_line_loops_to_strips_ = false;
   bool convert_quad_lists_to_triangle_lists_ = false;
-  bool convert_triangle_strips_to_lists_ = false;
   bool expand_point_sprites_in_vs_ = false;
   bool expand_rectangle_lists_in_vs_ = false;
 
@@ -759,7 +712,6 @@ class PrimitiveProcessor {
   size_t builtin_ib_offset_two_triangle_strips_ = SIZE_MAX;
   size_t builtin_ib_offset_triangle_fans_to_lists_ = SIZE_MAX;
   size_t builtin_ib_offset_quad_lists_to_triangle_lists_ = SIZE_MAX;
-  size_t builtin_ib_offset_triangle_strips_to_lists_ = SIZE_MAX;
 
   std::deque<SinglePrimitiveRange> single_primitive_ranges_;
 
@@ -824,7 +776,6 @@ class PrimitiveProcessor {
   // the reset index).
   struct CachedResult {
     uint32_t host_draw_vertex_count;
-    uint32_t guest_draw_vertex_count;
     ProcessedIndexBufferType index_buffer_type;
     xenos::IndexFormat host_index_format;
     xenos::Endian host_shader_index_endian;
@@ -924,7 +875,7 @@ class PrimitiveProcessor {
   // Modified by the processor, read by the invalidation callback.
   uint32_t cache_currently_processing_base_ = 0;
   // 0 if not in a cache transaction that hasn't found an existing entry
-  // currently, or if the range was invalidated during the transaction.
+  // currently.
   uint32_t cache_currently_processing_size_bytes_ = 0;
   // Modified by both the processor and the invalidation callback.
   size_t cache_bucket_free_first_entry_ = SIZE_MAX;

@@ -18,7 +18,7 @@
 #include <string>
 #include <thread>
 
-#include "xenia/base/delegate.h"
+#include "xenia/base/delegate.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/kernel/xthread.h"
@@ -35,28 +35,6 @@ class Emulator;
 namespace xe {
 namespace gpu {
 
-constexpr std::array<std::pair<uint16_t, uint16_t>, 17>
-    internal_display_resolution_entries = {{{640, 480},
-                                            {640, 576},
-                                            {720, 480},
-                                            {720, 576},
-                                            {800, 600},
-                                            {848, 480},
-                                            {1024, 768},
-                                            {1152, 864},
-                                            {1280, 720},
-                                            {1280, 768},
-                                            {1280, 960},
-                                            {1280, 1024},
-                                            {1360, 768},
-                                            {1440, 900},
-                                            {1680, 1050},
-                                            {1920, 540},
-                                            {1920, 1080}}};
-
-constexpr std::array<std::pair<uint16_t, uint16_t>, 3>
-    driver_display_resolution = {{{1440, 900}, {1280, 720}, {1680, 1050}}};
-
 class CommandProcessor;
 
 class GraphicsSystem {
@@ -64,10 +42,6 @@ class GraphicsSystem {
   virtual ~GraphicsSystem();
 
   virtual std::string name() const = 0;
-
-  // Whether the host can clamp depth instead of clipping at the near and far
-  // planes, which is what force_depth_clamp asks for.
-  virtual bool supports_depth_clamp() const { return true; }
 
   Memory* memory() const { return memory_; }
   cpu::Processor* processor() const { return processor_; }
@@ -80,8 +54,11 @@ class GraphicsSystem {
                          ui::WindowedAppContext* app_context,
                          bool with_presentation);
   virtual void Shutdown();
-  // Stops the vblank thread. Idempotent, and Shutdown does it too.
-  void StopFrameLimiter();
+  // Call before stopping guest threads that an active callback may wait for.
+  void StopGuestCallbacks();
+  void ShutdownGuestState();
+  X_STATUS ReinitializeGuestState(cpu::Processor* processor,
+                                 kernel::KernelState* kernel_state);
 
   // May be called from any thread any number of times, even during recovery
   // from a device loss.
@@ -101,21 +78,30 @@ class GraphicsSystem {
 
   virtual void ClearCaches();
 
-  void InvalidateGpuMemory();
-
-  // started_callback runs on the thread doing the loading right before it
-  // starts, which may be well after this call while the command processor is
-  // still setting up.
   void InitializeShaderStorage(
       const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
-      std::function<void()> started_callback = nullptr,
       std::function<void()> completion_callback = nullptr);
+  // Edge's emulator.cc calls (this renderer is Canary's, see
+  // cmake/XeniaHelpers.cmake xe_shader_rules_dxbc).
+  void InitializeShaderStorage(const std::filesystem::path& cache_root,
+                               uint32_t title_id, bool blocking,
+                               std::function<void()> started_callback,
+                               std::function<void()> completion_callback) {
+    if (started_callback) {
+      started_callback();
+    }
+    InitializeShaderStorage(cache_root, title_id, blocking,
+                            std::move(completion_callback));
+  }
+  void StopFrameLimiter();
+  // The resolution the kernel's video calls report to the game.
+  static std::pair<uint16_t, uint16_t> GetInternalDisplayResolution();
+  // Never fired by this renderer (Edge's front end shows its shader notice).
+  xe::Delegate<bool> on_shader_compilation;
 
   void RequestFrameTrace();
   void BeginTracing();
   void EndTracing();
-  void RequestEndTracing();
-  bool is_tracing_stream() const;
 
   bool is_paused() const { return paused_; }
   void Pause();
@@ -124,7 +110,7 @@ class GraphicsSystem {
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);
 
-  static std::pair<uint16_t, uint16_t> GetInternalDisplayResolution();
+  std::pair<uint32_t, uint32_t> GetResolution() const;
 
   std::pair<uint32_t, uint32_t> GetScaledAspectRatio() const {
     return {scaled_aspect_x_, scaled_aspect_y_};
@@ -133,10 +119,6 @@ class GraphicsSystem {
     scaled_aspect_x_ = x;
     scaled_aspect_y_ = y;
   };
-
-  // Whether pipelines are being created, in the background or inline, from
-  // the thread that started or finished them.
-  xe::Delegate<bool> on_shader_compilation;
 
  protected:
   GraphicsSystem();
@@ -158,18 +140,11 @@ class GraphicsSystem {
   ui::WindowedAppContext* app_context_ = nullptr;
   std::unique_ptr<ui::GraphicsProvider> provider_;
 
-  uint32_t interrupt_callback_ = 0;
-  uint32_t interrupt_callback_data_ = 0;
+  std::atomic<uint64_t> interrupt_callback_{0};
+  std::atomic<uint32_t> interrupt_callbacks_state_{0};
 
   std::atomic<bool> frame_limiter_worker_running_;
   kernel::object_ref<kernel::XHostThread> frame_limiter_worker_thread_;
-
-  // Anchors for synthesizing D1MODE_V_COUNTER. last_vblank_guest_tick_ is
-  // the guest tick at the most recent MarkVblank; vblank_period_ticks_ is
-  // the most recent measured interval between MarkVblank calls. Both are
-  // 0 before the first vblank fires.
-  std::atomic<uint64_t> last_vblank_guest_tick_{0};
-  std::atomic<uint64_t> vblank_period_ticks_{0};
 
   RegisterFile* register_file_;
   std::unique_ptr<CommandProcessor> command_processor_;

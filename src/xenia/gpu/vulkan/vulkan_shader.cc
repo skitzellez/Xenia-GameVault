@@ -20,7 +20,7 @@ namespace gpu {
 namespace vulkan {
 
 VulkanShader::VulkanTranslation::~VulkanTranslation() {
-  if (shader_module_ != VK_NULL_HANDLE) {
+  if (shader_module_) {
     const ui::vulkan::VulkanDevice* const vulkan_device =
         static_cast<const VulkanShader&>(shader()).vulkan_device_;
     vulkan_device->functions().vkDestroyShaderModule(vulkan_device->device(),
@@ -32,17 +32,11 @@ VkShaderModule VulkanShader::VulkanTranslation::GetOrCreateShaderModule() {
   if (!is_valid()) {
     return VK_NULL_HANDLE;
   }
-
-  // Lock for creation - multiple threads may try to create the same shader
-  std::lock_guard<std::mutex> lock(shader_module_mutex_);
-
   if (shader_module_ != VK_NULL_HANDLE) {
     return shader_module_;
   }
-
   const ui::vulkan::VulkanDevice* const vulkan_device =
       static_cast<const VulkanShader&>(shader()).vulkan_device_;
-
   VkShaderModuleCreateInfo shader_module_create_info;
   shader_module_create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
   shader_module_create_info.pNext = nullptr;
@@ -50,7 +44,6 @@ VkShaderModule VulkanShader::VulkanTranslation::GetOrCreateShaderModule() {
   shader_module_create_info.codeSize = translated_binary().size();
   shader_module_create_info.pCode =
       reinterpret_cast<const uint32_t*>(translated_binary().data());
-
   if (vulkan_device->functions().vkCreateShaderModule(
           vulkan_device->device(), &shader_module_create_info, nullptr,
           &shader_module_) != VK_SUCCESS) {
@@ -61,7 +54,6 @@ VkShaderModule VulkanShader::VulkanTranslation::GetOrCreateShaderModule() {
     MakeInvalid();
     return VK_NULL_HANDLE;
   }
-
   return shader_module_;
 }
 

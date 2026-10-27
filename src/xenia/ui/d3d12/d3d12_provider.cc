@@ -9,32 +9,26 @@
 
 #include "xenia/ui/d3d12/d3d12_provider.h"
 
+#include <algorithm>
+
 #include <cstdlib>
 
 #include "xenia/base/cvar.h"
-#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
-#include "xenia/base/string.h"
 #include "xenia/ui/d3d12/d3d12_immediate_drawer.h"
 #include "xenia/ui/d3d12/d3d12_presenter.h"
 #include "xenia/ui/d3d12/d3d12_util.h"
-#include "xenia/ui/redist_installer_wx.h"
 DEFINE_bool(d3d12_debug, false, "Enable Direct3D 12 and DXGI debug layer.",
-            "D3D12");
-DEFINE_bool(d3d12_gpu_validation, false,
-            "Enable Direct3D 12 GPU-based validation to catch out-of-bounds "
-            "shader resource access. Requires --d3d12_debug. Very slow.",
-            "D3D12");
-DEFINE_bool(d3d12_dred, false,
-            "Enable Direct3D 12 Device Removed Extended Data (DRED) to log the "
-            "operation and allocations involved in a device removal. Works "
-            "without the debug layer.",
             "D3D12");
 DEFINE_bool(d3d12_break_on_error, false,
             "Break on Direct3D 12 validation errors.", "D3D12");
 DEFINE_bool(d3d12_break_on_warning, false,
             "Break on Direct3D 12 validation warnings.", "D3D12");
+DEFINE_bool(d3d12_dred, false,
+            "Game Vault: record the GPU's last commands and page faults "
+            "(DRED) and log them when the graphics device is lost. Slower.",
+            "D3D12");
 DEFINE_int32(d3d12_adapter, -1,
              "Index of the DXGI adapter to use. "
              "-1 for any physical adapter, -2 for WARP software rendering.",
@@ -61,97 +55,6 @@ bool D3D12Provider::IsD3D12APIAvailable() {
 
 const std::string& D3D12Provider::GetAdapterDescription() const {
   return adapter_description_;
-}
-
-void D3D12Provider::DumpDeviceRemovedData() const {
-  ID3D12DeviceRemovedExtendedData* dred;
-  HRESULT hr = device_->QueryInterface(IID_PPV_ARGS(&dred));
-  if (FAILED(hr)) {
-    XELOGW("DRED: not available on this device (HRESULT 0x{:08X})",
-           uint32_t(hr));
-    return;
-  }
-  // Breadcrumbs and page-fault data are captured independently, so each is
-  // reported on its own - a missing half is itself a finding.
-  bool breadcrumbs_captured = false;
-  // Breadcrumbs identify the last GPU operation that ran before the removal.
-  D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs;
-  hr = dred->GetAutoBreadcrumbsOutput(&breadcrumbs);
-  if (FAILED(hr)) {
-    XELOGW("DRED: breadcrumbs unavailable (HRESULT 0x{:08X})", uint32_t(hr));
-  } else {
-    uint32_t node_count = 0, unfinished_count = 0;
-    for (const D3D12_AUTO_BREADCRUMB_NODE* node =
-             breadcrumbs.pHeadAutoBreadcrumbNode;
-         node; node = node->pNext) {
-      ++node_count;
-      uint32_t op_count = node->BreadcrumbCount;
-      uint32_t completed =
-          node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
-      if (completed >= op_count) {
-        // This command list finished, so it is not where the GPU stopped.
-        continue;
-      }
-      ++unfinished_count;
-      XELOGE(
-          "DRED: command list '{}' on queue '{}' stopped after {} of {} ops, "
-          "next op was {}",
-          node->pCommandListDebugNameA ? node->pCommandListDebugNameA
-                                       : "<unnamed>",
-          node->pCommandQueueDebugNameA ? node->pCommandQueueDebugNameA
-                                        : "<unnamed>",
-          completed, op_count, uint32_t(node->pCommandHistory[completed]));
-    }
-    breadcrumbs_captured = node_count != 0;
-    if (!node_count) {
-      XELOGW("DRED: the breadcrumb ring is empty - no command list recorded");
-    } else if (!unfinished_count) {
-      XELOGW(
-          "DRED: all {} recorded command lists completed - the fault is not "
-          "in a recorded operation",
-          node_count);
-    }
-  }
-  // Page-fault data names the allocation a bad GPU address belonged to.
-  bool page_fault_captured = false;
-  D3D12_DRED_PAGE_FAULT_OUTPUT page_fault;
-  hr = dred->GetPageFaultAllocationOutput(&page_fault);
-  if (FAILED(hr)) {
-    XELOGW("DRED: page-fault data unavailable (HRESULT 0x{:08X})",
-           uint32_t(hr));
-  } else if (!page_fault.PageFaultVA) {
-    XELOGW("DRED: the removal was not a GPU page fault");
-  } else {
-    page_fault_captured = true;
-    XELOGE("DRED: GPU page fault at virtual address 0x{:016X}",
-           uint64_t(page_fault.PageFaultVA));
-    uint32_t allocation_count = 0;
-    for (const D3D12_DRED_ALLOCATION_NODE* node =
-             page_fault.pHeadExistingAllocationNode;
-         node; node = node->pNext) {
-      ++allocation_count;
-      XELOGE("DRED:   live allocation '{}' (type {})",
-             node->ObjectNameA ? node->ObjectNameA : "<unnamed>",
-             uint32_t(node->AllocationType));
-    }
-    for (const D3D12_DRED_ALLOCATION_NODE* node =
-             page_fault.pHeadRecentFreedAllocationNode;
-         node; node = node->pNext) {
-      ++allocation_count;
-      XELOGE("DRED:   recently freed allocation '{}' (type {})",
-             node->ObjectNameA ? node->ObjectNameA : "<unnamed>",
-             uint32_t(node->AllocationType));
-    }
-    if (!allocation_count) {
-      XELOGE(
-          "DRED:   no tracked allocation - the address belongs to nothing we "
-          "own");
-    }
-  }
-  if (!breadcrumbs_captured && !page_fault_captured && !cvars::d3d12_dred) {
-    XELOGW("DRED: nothing captured; restart with --d3d12_dred");
-  }
-  dred->Release();
 }
 
 // Check for Intel Arc cards and Intel Graphics iGPUs which use
@@ -203,8 +106,14 @@ D3D12Provider::~D3D12Provider() {
     }
   }
 
-  if (library_dxil_ != nullptr) {
-    FreeLibrary(library_dxil_);
+  if (library_dxcompiler_ != nullptr) {
+    FreeLibrary(library_dxcompiler_);
+  }
+  if (library_dxilconv_ != nullptr) {
+    FreeLibrary(library_dxilconv_);
+  }
+  if (library_d3dcompiler_ != nullptr) {
+    FreeLibrary(library_d3dcompiler_);
   }
   if (library_d3d12_ != nullptr) {
     FreeLibrary(library_d3d12_);
@@ -264,51 +173,59 @@ bool D3D12Provider::Initialize() {
     return false;
   }
 
-  // Load the required DXIL validator (dxil.dll) from the D3D12 folder next to
-  // the executable. It signs every shader Mesa emits, which D3D12 rejects
-  // unsigned, so offer to download it if it's missing.
-  auto d3d12_dir = xe::filesystem::GetExecutablePath().parent_path() / "D3D12";
-  {
-#if !XE_PLATFORM_WINRT
-    EnsureShaderCompilerRuntime(d3d12_dir);
-#endif  // (the Xbox app ships dxil.dll in its package, loaded by name below)
-
-    // Load by full path, since the signer's own plain-name load skips D3D12/.
-    auto dxil_path_utf16 = xe::path_to_utf16(d3d12_dir / "dxil.dll");
-    library_dxil_ =
-        LoadLibraryW(reinterpret_cast<LPCWSTR>(dxil_path_utf16.c_str()));
-    if (library_dxil_) {
-      XELOGI("Loaded dxil.dll from the D3D12 directory");
-    } else {
-      // Fall back to the system search path (system-wide, or next to the exe).
-      library_dxil_ = LoadLibraryW(L"dxil.dll");
+  // Load optional D3DCompiler_47.dll.
+  pfn_d3d_disassemble_ = nullptr;
+  library_d3dcompiler_ = LoadLibraryW(L"D3DCompiler_47.dll");
+  if (library_d3dcompiler_) {
+    pfn_d3d_disassemble_ =
+        pD3DDisassemble(GetProcAddress(library_d3dcompiler_, "D3DDisassemble"));
+    if (pfn_d3d_disassemble_ == nullptr) {
+      XELOGD(
+          "Failed to get D3DDisassemble from D3DCompiler_47.dll, DXBC "
+          "disassembly for debugging will be unavailable");
     }
-  }
-  if (!library_dxil_) {
-    XELOGW(
-        "Failed to load dxil.dll (error {}), DXIL shaders will be unavailable "
-        "- download from "
-        "https://github.com/microsoft/DirectXShaderCompiler/releases",
-        GetLastError());
+  } else {
+    XELOGD(
+        "Failed to load D3DCompiler_47.dll, DXBC disassembly for debugging "
+        "will be unavailable");
   }
 
-  // The D3D12SDKVersion exports make d3d12.dll load D3D12Core.dll at the first
-  // device creation, which fails outright if it's missing, so fetch it first.
-  // Not on the Xbox: apps there use the console's own Direct3D 12 (no Agility
-  // SDK), and the app exports no D3D12SDKVersion.
-#if !XE_PLATFORM_WINRT
-  std::error_code ec;
-  if (!std::filesystem::exists(d3d12_dir / "D3D12Core.dll", ec)) {
-    // Returns only on decline or failure. On success it restarts.
-    EnsureAgilityRuntime(d3d12_dir);
-    if (!std::filesystem::exists(d3d12_dir / "D3D12Core.dll", ec)) {
-      XELOGE(
-          "The DirectX 12 Agility SDK runtime (D3D12Core.dll) is required but "
-          "was not installed");
-      return false;
+  // Load optional dxilconv.dll.
+  pfn_dxilconv_dxc_create_instance_ = nullptr;
+  library_dxilconv_ = LoadLibraryW(L"dxilconv.dll");
+  if (library_dxilconv_) {
+    pfn_dxilconv_dxc_create_instance_ = DxcCreateInstanceProc(
+        GetProcAddress(library_dxilconv_, "DxcCreateInstance"));
+    if (pfn_dxilconv_dxc_create_instance_ == nullptr) {
+      XELOGD(
+          "Failed to get DxcCreateInstance from dxilconv.dll, converted DXIL "
+          "disassembly for debugging will be unavailable");
     }
+  } else {
+    XELOGD(
+        "Failed to load dxilconv.dll, converted DXIL disassembly for debugging "
+        "will be unavailable - DXIL may be unsupported by your OS version");
   }
-#endif  // !XE_PLATFORM_WINRT
+
+  // Load optional dxcompiler.dll.
+  pfn_dxcompiler_dxc_create_instance_ = nullptr;
+  library_dxcompiler_ = LoadLibraryW(L"dxcompiler.dll");
+  if (library_dxcompiler_) {
+    pfn_dxcompiler_dxc_create_instance_ = DxcCreateInstanceProc(
+        GetProcAddress(library_dxcompiler_, "DxcCreateInstance"));
+    if (pfn_dxcompiler_dxc_create_instance_ == nullptr) {
+      XELOGD(
+          "Failed to get DxcCreateInstance from dxcompiler.dll, converted DXIL "
+          "disassembly for debugging will be unavailable");
+    }
+  } else {
+    XELOGD(
+        "Failed to load dxcompiler.dll, converted DXIL disassembly for "
+        "debugging will be unavailable - if needed, download the DirectX "
+        "Shader Compiler from "
+        "https://github.com/microsoft/DirectXShaderCompiler/releases and place "
+        "the DLL in the Xenia directory");
+  }
 
   // Configure the DXGI debug info queue.
   if (cvars::d3d12_break_on_error || cvars::d3d12_break_on_warning) {
@@ -333,56 +250,13 @@ bool D3D12Provider::Initialize() {
   bool debug = cvars::d3d12_debug;
   if (debug) {
     ID3D12Debug* debug_interface;
-    HRESULT debug_interface_hr =
-        pfn_d3d12_get_debug_interface_(IID_PPV_ARGS(&debug_interface));
-    if (SUCCEEDED(debug_interface_hr)) {
-      debug_interface->EnableDebugLayer();
-      // GPU-based validation catches out-of-bounds shader resource access that
-      // the CPU-side layer misses, but is very slow, so keep it opt-in.
-      bool gpu_validation = false;
-      if (cvars::d3d12_gpu_validation) {
-        ID3D12Debug1* debug_interface1;
-        HRESULT debug_interface1_hr =
-            debug_interface->QueryInterface(IID_PPV_ARGS(&debug_interface1));
-        if (SUCCEEDED(debug_interface1_hr)) {
-          debug_interface1->SetEnableGPUBasedValidation(TRUE);
-          debug_interface1->Release();
-          gpu_validation = true;
-        } else {
-          XELOGW(
-              "GPU-based validation was requested but is unavailable, "
-              "continuing without it (HRESULT 0x{:08X})",
-              uint32_t(debug_interface1_hr));
-        }
-      }
-      debug_interface->Release();
-      XELOGI("Direct3D 12 debug layer enabled{}",
-             gpu_validation ? " with GPU-based validation" : "");
-    } else {
-      // The debug layer (D3D12SDKLayers.dll) isn't redistributable on its own.
-      // Offer to fetch it from the Agility SDK and restart.
-#if !XE_PLATFORM_WINRT
-      EnsureDebugLayer(d3d12_dir);
-#endif
-      XELOGW("Failed to enable the Direct3D 12 debug layer (HRESULT 0x{:08X})",
-             uint32_t(debug_interface_hr));
-      debug = false;
-    }
-  }
-
-  // Enable Device Removed Extended Data. Must be set before device creation,
-  // and unlike the debug layer it does not need the Graphics Tools feature.
-  if (cvars::d3d12_dred) {
-    ID3D12DeviceRemovedExtendedDataSettings* dred_settings;
     if (SUCCEEDED(
-            pfn_d3d12_get_debug_interface_(IID_PPV_ARGS(&dred_settings)))) {
-      dred_settings->SetAutoBreadcrumbsEnablement(
-          D3D12_DRED_ENABLEMENT_FORCED_ON);
-      dred_settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-      dred_settings->Release();
-      XELOGI("Direct3D 12 DRED enabled");
+            pfn_d3d12_get_debug_interface_(IID_PPV_ARGS(&debug_interface)))) {
+      debug_interface->EnableDebugLayer();
+      debug_interface->Release();
     } else {
-      XELOGW("Failed to enable Direct3D 12 DRED");
+      XELOGW("Failed to enable the Direct3D 12 debug layer");
+      debug = false;
     }
   }
 
@@ -452,6 +326,22 @@ bool D3D12Provider::Initialize() {
     }
   }
 
+  // Game Vault: D3D12's device-removed recorder, before the device is made
+  // (GTA IV lost the device with DXGI_ERROR_DRIVER_INTERNAL_ERROR on the Xbox)
+  if (cvars::d3d12_dred) {
+    ID3D12DeviceRemovedExtendedDataSettings* dred_settings;
+    if (SUCCEEDED(
+            pfn_d3d12_get_debug_interface_(IID_PPV_ARGS(&dred_settings)))) {
+      dred_settings->SetAutoBreadcrumbsEnablement(
+          D3D12_DRED_ENABLEMENT_FORCED_ON);
+      dred_settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+      dred_settings->Release();
+      XELOGI("Game Vault: DRED on");
+    } else {
+      XELOGW("Game Vault: DRED not available here");
+    }
+  }
+
   // Create the Direct3D 12 device.
   ID3D12Device* device;
   if (FAILED(pfn_d3d12_create_device_(adapter, D3D_FEATURE_LEVEL_11_0,
@@ -463,36 +353,9 @@ bool D3D12Provider::Initialize() {
   }
   adapter->Release();
 
-  // Safety net: the Agility runtime should provide Shader Model 6.6 for DXIL.
-  {
-    D3D12_FEATURE_DATA_SHADER_MODEL shader_model;
-    shader_model.HighestShaderModel = D3D_SHADER_MODEL_6_6;
-    bool shader_model_6_6_supported =
-        SUCCEEDED(device->CheckFeatureSupport(
-            D3D12_FEATURE_SHADER_MODEL, &shader_model, sizeof(shader_model))) &&
-        shader_model.HighestShaderModel >= D3D_SHADER_MODEL_6_6;
-#if XE_PLATFORM_WINRT
-    // Game Vault test: the Xbox app runtime may report less than 6.6; see how
-    // far Edge's DXIL path gets with what it has.
-    XELOGI("Game Vault: Direct3D 12 highest shader model {:X}",
-           uint32_t(shader_model.HighestShaderModel));
-    shader_model_6_6_supported = true;
-#endif
-    if (!shader_model_6_6_supported) {
-      device->Release();
-      dxgi_factory->Release();
-      XELOGE(
-          "The Direct3D 12 runtime lacks Shader Model 6.6 required for DXIL "
-          "shaders");
-      return false;
-    }
-  }
-
   // Configure the Direct3D 12 debug info queue.
   ID3D12InfoQueue* d3d12_info_queue;
   if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&d3d12_info_queue)))) {
-    // Increase message storage limit for debugging.
-    d3d12_info_queue->SetMessageCountLimit(1024);
     D3D12_MESSAGE_SEVERITY d3d12_info_queue_denied_severities[] = {
         D3D12_MESSAGE_SEVERITY_INFO,
     };
@@ -616,12 +479,6 @@ bool D3D12Provider::Initialize() {
     programmable_sample_positions_tier_ =
         options2.ProgrammableSamplePositionsTier;
   }
-  barycentrics_supported_ = false;
-  D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3;
-  if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3,
-                                            &options3, sizeof(options3)))) {
-    barycentrics_supported_ = bool(options3.BarycentricsSupported);
-  }
   D3D12_FEATURE_DATA_D3D12_OPTIONS8 options8;
   if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS8,
                                             &options8, sizeof(options8)))) {
@@ -634,12 +491,6 @@ bool D3D12Provider::Initialize() {
                                             &options13, sizeof(options13)))) {
     alpha_blend_factor_supported_ = bool(options13.AlphaBlendFactorSupported);
   }
-  dynamic_depth_bias_supported_ = false;
-  D3D12_FEATURE_DATA_D3D12_OPTIONS16 options16 = {};
-  if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS16,
-                                            &options16, sizeof(options16)))) {
-    dynamic_depth_bias_supported_ = bool(options16.DynamicDepthBiasSupported);
-  }
   virtual_address_bits_per_resource_ = 0;
   D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT virtual_address_support;
   if (SUCCEEDED(device->CheckFeatureSupport(
@@ -648,29 +499,17 @@ bool D3D12Provider::Initialize() {
     virtual_address_bits_per_resource_ =
         virtual_address_support.MaxGPUVirtualAddressBitsPerResource;
   }
-  // Check highest supported shader model.
-  highest_shader_model_ = 0x51;  // Default to SM 5.1.
-  D3D12_FEATURE_DATA_SHADER_MODEL shader_model_support;
-  shader_model_support.HighestShaderModel = D3D_SHADER_MODEL_6_6;
-  if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL,
-                                            &shader_model_support,
-                                            sizeof(shader_model_support)))) {
-    highest_shader_model_ = uint16_t(shader_model_support.HighestShaderModel);
-  }
   XELOGD3D(
       "Direct3D 12 device and OS features:\n"
-      "* Highest shader model: {}.{}\n"
       "* Max GPU virtual address bits per resource: {}\n"
       "* Non-zeroed heap creation: {}\n"
       "* Pixel-shader-specified stencil reference: {}\n"
       "* Programmable sample positions: tier {}\n"
       "* Rasterizer-ordered views: {}\n"
       "* Scalar alpha blend factor: {}\n"
-      "* Dynamic depth bias: {}\n"
       "* Resource binding: tier {}\n"
       "* Tiled resources: tier {}\n"
       "* Unaligned block-compressed textures: {}",
-      (highest_shader_model_ >> 4) & 0xF, highest_shader_model_ & 0xF,
       virtual_address_bits_per_resource_,
       (heap_flag_create_not_zeroed_ & D3D12_HEAP_FLAG_CREATE_NOT_ZEROED) ? "yes"
                                                                          : "no",
@@ -678,13 +517,14 @@ bool D3D12Provider::Initialize() {
       uint32_t(programmable_sample_positions_tier_),
       rasterizer_ordered_views_supported_ ? "yes" : "no",
       alpha_blend_factor_supported_ ? "yes" : "no",
-      dynamic_depth_bias_supported_ ? "yes" : "no",
       uint32_t(resource_binding_tier_), uint32_t(tiled_resources_tier_),
       unaligned_block_textures_supported_ ? "yes" : "no");
 
   // Get the graphics analysis interface, will silently fail if PIX is not
   // attached.
+#if !XE_PLATFORM_WINRT
   pfn_dxgi_get_debug_interface1_(0, IID_PPV_ARGS(&graphics_analysis_));
+#endif
   return true;
 }
 uint32_t D3D12Provider::CreateUploadResource(
@@ -714,15 +554,11 @@ std::unique_ptr<ImmediateDrawer> D3D12Provider::CreateImmediateDrawer() {
 
 void D3D12Provider::LogD3D12DebugMessages() const {
   if (!device_) {
-    XELOGE("LogD3D12DebugMessages: No device");
     return;
   }
 
   ID3D12InfoQueue* info_queue = nullptr;
   if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&info_queue)))) {
-    XELOGE(
-        "LogD3D12DebugMessages: InfoQueue not available (debug layer not "
-        "enabled? Use --d3d12_debug)");
     return;
   }
 
@@ -773,6 +609,60 @@ void D3D12Provider::LogD3D12DebugMessages() const {
 
   info_queue->ClearStoredMessages();
   info_queue->Release();
+}
+
+void D3D12Provider::LogDeviceRemovedData() const {
+  ID3D12DeviceRemovedExtendedData* dred;
+  if (!cvars::d3d12_dred || !device_ ||
+      FAILED(device_->QueryInterface(IID_PPV_ARGS(&dred)))) {
+    return;
+  }
+  // the command lists the GPU had not finished: their last operations (op
+  // numbers are D3D12_AUTO_BREADCRUMB_OP: 3 draw, 4 draw indexed, 6 dispatch,
+  // 7-11 copies / resolve, 12-14 clears, 15 barrier...)
+  D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT crumbs = {};
+  if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&crumbs))) {
+    uint32_t list = 0;
+    for (const D3D12_AUTO_BREADCRUMB_NODE* node =
+             crumbs.pHeadAutoBreadcrumbNode;
+         node && list < 256; node = node->pNext, ++list) {
+      uint32_t done =
+          node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+      if (done >= node->BreadcrumbCount) {
+        continue;
+      }
+      XELOGE("Game Vault: DRED: command list {} stopped at operation {} of {}",
+             list, done, node->BreadcrumbCount);
+      uint32_t from = done > 12 ? done - 12 : 0;
+      uint32_t to = std::min(node->BreadcrumbCount, done + 3);
+      for (uint32_t i = from; i < to; ++i) {
+        XELOGE("Game Vault: DRED: {} {} op {}", i == done ? "->" : "  ", i,
+               uint32_t(node->pCommandHistory[i]));
+      }
+    }
+  }
+  D3D12_DRED_PAGE_FAULT_OUTPUT fault = {};
+  if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&fault))) {
+    uint32_t existing = 0, freed = 0;
+    for (auto* a = fault.pHeadExistingAllocationNode; a && existing < 1000;
+         a = a->pNext) {
+      if (existing++ < 4) {
+        XELOGE("Game Vault: DRED: allocation at the fault: type {}",
+               uint32_t(a->AllocationType));
+      }
+    }
+    for (auto* a = fault.pHeadRecentFreedAllocationNode; a && freed < 1000;
+         a = a->pNext) {
+      if (freed++ < 4) {
+        XELOGE("Game Vault: DRED: recently freed allocation: type {}",
+               uint32_t(a->AllocationType));
+      }
+    }
+    XELOGE("Game Vault: DRED: page fault at {:016X} ({} allocations there, {} "
+           "recently freed)",
+           uint64_t(fault.PageFaultVA), existing, freed);
+  }
+  dred->Release();
 }
 
 }  // namespace d3d12

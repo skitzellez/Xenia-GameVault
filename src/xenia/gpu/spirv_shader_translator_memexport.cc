@@ -111,25 +111,23 @@ void SpirvShaderTranslator::ExportToMemory(uint8_t export_eM) {
   }
 
   // Check if the address with the correct sign and exponent was written, and
-  // that the index doesn't overflow the mantissa bits. Z takes all 12 bits of
-  // const_0x4b0 rather than the top 9, so the constants the shader accepts
-  // match the ones draw_util::AddMemExportRanges derives ranges from.
-  // all((eA_vector >> uvec4(30, 23, 20, 23)) == uvec4(0x1, 0x96, 0x4B0, 0x96))
+  // that the index doesn't overflow the mantissa bits.
+  // all((eA_vector >> uvec4(30, 23, 23, 23)) == uvec4(0x1, 0x96, 0x96, 0x96))
   spv::Id eA_vector = builder_->createUnaryOp(
       spv::OpBitcast, type_uint4_,
       builder_->createLoad(var_main_memexport_address_, spv::NoPrecision));
   id_vector_temp_.clear();
   id_vector_temp_.push_back(builder_->makeUintConstant(30));
   id_vector_temp_.push_back(builder_->makeUintConstant(23));
-  id_vector_temp_.push_back(builder_->makeUintConstant(20));
-  id_vector_temp_.push_back(builder_->makeUintConstant(23));
+  id_vector_temp_.push_back(id_vector_temp_.back());
+  id_vector_temp_.push_back(id_vector_temp_.back());
   spv::Id address_validation_shift =
       builder_->makeCompositeConstant(type_uint4_, id_vector_temp_);
   id_vector_temp_.clear();
   id_vector_temp_.push_back(builder_->makeUintConstant(0x1));
   id_vector_temp_.push_back(builder_->makeUintConstant(0x96));
-  id_vector_temp_.push_back(builder_->makeUintConstant(0x4B0));
-  id_vector_temp_.push_back(builder_->makeUintConstant(0x96));
+  id_vector_temp_.push_back(id_vector_temp_.back());
+  id_vector_temp_.push_back(id_vector_temp_.back());
   spv::Id address_validation_value =
       builder_->makeCompositeConstant(type_uint4_, id_vector_temp_);
   SpirvBuilder::IfBuilder if_address_valid(
@@ -449,6 +447,7 @@ void SpirvShaderTranslator::ExportToMemory(uint8_t export_eM) {
   // k_8, k_8_A, k_8_B
   format_switch.makeBeginCase(
       static_cast<unsigned int>(xenos::ColorFormat::k_8));
+  // TODO(Triang3l): Investigate how input should be treated for k_8_A, k_8_B.
   format_switch.addCurrentCaseLiteral(
       static_cast<unsigned int>(xenos::ColorFormat::k_8_A));
   format_switch.addCurrentCaseLiteral(
@@ -473,6 +472,7 @@ void SpirvShaderTranslator::ExportToMemory(uint8_t export_eM) {
   // k_8_8_8_8, k_8_8_8_8_A, k_8_8_8_8_AS_16_16_16_16
   format_switch.makeBeginCase(
       static_cast<unsigned int>(xenos::ColorFormat::k_8_8_8_8));
+  // TODO(Triang3l): Investigate how input should be treated for k_8_8_8_8_A.
   format_switch.addCurrentCaseLiteral(
       static_cast<unsigned int>(xenos::ColorFormat::k_8_8_8_8_A));
   format_switch.addCurrentCaseLiteral(
@@ -841,18 +841,14 @@ void SpirvShaderTranslator::ExportToMemory(uint8_t export_eM) {
   // Left-shift the stream base address by 2 to both convert it from dwords to
   // bytes and drop the upper bits.
   spv::Id const_uint_2 = builder_->makeUintConstant(2);
-  // Masked to physical - the guest may use a mirror window.
   spv::Id eM0_address_bytes = builder_->createBinOp(
-      spv::OpBitwiseAnd, type_uint_,
+      spv::OpIAdd, type_uint_,
       builder_->createBinOp(
-          spv::OpIAdd, type_uint_,
-          builder_->createBinOp(
-              spv::OpShiftLeftLogical, type_uint_,
-              builder_->createCompositeExtract(eA_vector, type_uint_, 0),
-              const_uint_2),
-          builder_->createBinOp(spv::OpShiftLeftLogical, type_uint_, eM0_index,
-                                element_bytes_log2)),
-      builder_->makeUintConstant(0x1FFFFFFF));
+          spv::OpShiftLeftLogical, type_uint_,
+          builder_->createCompositeExtract(eA_vector, type_uint_, 0),
+          const_uint_2),
+      builder_->createBinOp(spv::OpShiftLeftLogical, type_uint_, eM0_index,
+                            element_bytes_log2));
 
   // Store based on the element size.
   auto store_needed_eM = [&](std::function<void(uint32_t eM_index)> fn) {

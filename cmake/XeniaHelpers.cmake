@@ -508,3 +508,12 @@ function(xe_test_suite name base_path)
   endif()
   xe_target_defaults(${name})
 endfunction()
+
+# xe_shader_rules_dxbc(target shader_dir)
+#
+# Game Vault's Xbox app keeps Canary's Direct3D 12 renderer (DXBC, Shader Model
+# 5.1): Edge's DXIL renderer needs Shader Model 6.6, the Xbox app runtime has
+# 6.4. Its shaders come as prebuilt headers in <shader_dir>/bytecode/d3d12_5_1
+# (built with fxc on the Canary tree), so there is nothing to compile here.
+function(xe_shader_rules_dxbc target shader_dir)
+endfunction()

@@ -84,11 +84,18 @@ bool GetPackedMipOffset(uint32_t width, uint32_t height, uint32_t depth,
 //
 // Note that the mip tail can be used both for the base level and mips (1...) if
 // the entire texture has width or height of 16 or smaller. Therefore, both the
-// base and the mips are loaded from the same tail at base_address, even if
-// mip_address is nonzero. Host texture loading code still needs separate
-// layouts for the base pitch and the mip strides. For 17...32 texture sizes,
-// the base is not packed, but the mips are still packed within an image that's
-// stored like level 0, at mip_address rather than base_address. The base level
+// base and the mips would be loaded from a mip tail that would be stored like
+// the level 0 of the texture. But, in this case, under base_address and
+// mip_address there are two separate mip tails, and the former likely uses the
+// pitch from the fetch constant and no power of two size rounding, while for
+// the latter the strides are likely calculated like for usual mips. The same
+// applies to 17...32 texture sizes, though in this case the base is not packed
+// tail, but the mips are still packed within an image that's stored like the
+// level 0 of the texture. So, "storage level 0" is an ambiguous concept - host
+// texture loading code should distinguish between "base level 0" and "mip tail
+// for the mips 1... stored like level 0" and load the actual host level 0 from
+// base_address, with all the base addressing properties, and host levels 1...
+// from mip_address, with all the mips addressing properties. The base level
 // being packed is evident from the function that tiles textures in game
 // disassembly, which only checks the flag whether the data is packed passed to
 // it, not the level, to see if it needs to calculate the offset in the mip
@@ -98,8 +105,8 @@ bool GetPackedMipOffset(uint32_t width, uint32_t height, uint32_t depth,
 // 545407E0 (8x8 linear DXT1 - pairs of orange lights in the bottom of gambling
 // machines).
 //
-// Linear texture rows are aligned to max(256 / block size, 32), for both the
-// base and the mips (for the base, Direct3D 9 writes the aligned pitch to the
+// Linear texture rows are aligned to 256 bytes, for both the base and the mips
+// (for the base, Direct3D 9 writes an already 256-byte-aligned pitch to the
 // fetch constant).
 //
 // However, all the 32x32x4 padding, being just padding, is not necessarily
@@ -281,17 +288,9 @@ void GetTextureTotalSize(xenos::DataDimension dimension,
 // bytes_per_block_log2 is log2_floor according to how Direct3D 9 calculates it,
 // but k_32_32_32 textures are never tiled anyway likely.
 
-XE_NOINLINE
-XE_NOALIAS
-int32_t GetTiledOffset2D(int32_t x, int32_t y, uint32_t pitch,
-                         uint32_t bytes_per_block_log2);
-XE_NOINLINE
-XE_NOALIAS
-int32_t GetTiledOffset3D(int32_t x, int32_t y, int32_t z, uint32_t pitch,
-                         uint32_t height, uint32_t bytes_per_block_log2);
-// The tiled address grows monotonically between tiles with Z/4, then Y/32,
-// then X/32 blocks. Within 3D tiles, the bank swap in odd Z/4 groups makes
-// Y=8 the first stored row, not Y=0.
+// Because (0, 0, 0) within each 32x32x4-block tile is stored in memory first,
+// and the tiled address grows monotonically with Z/4, then Y/32, then X/32
+// blocks.
 inline uint32_t GetTiledAddressLowerBound2D(uint32_t left, uint32_t top,
                                             uint32_t pitch_aligned,
                                             uint32_t bytes_per_block_log2) {
@@ -305,14 +304,10 @@ inline uint64_t GetTiledAddressLowerBound3D(uint32_t left, uint32_t top,
                                             uint32_t pitch_aligned,
                                             uint32_t height_aligned,
                                             uint32_t bytes_per_block_log2) {
-  uint32_t front_aligned = front & ~(xenos::kTextureTileDepth - 1);
-  uint32_t top_aligned = top & ~(xenos::kTextureTileWidthHeight - 1);
-  if (front_aligned & xenos::kTextureTileDepth) {
-    top_aligned += 8;
-  }
   return uint64_t(texture_address::Tiled3D(
       int32_t(left & ~(xenos::kTextureTileWidthHeight - 1)),
-      int32_t(top_aligned), int32_t(front_aligned), pitch_aligned,
+      int32_t(top & ~(xenos::kTextureTileWidthHeight - 1)),
+      int32_t(front & ~(xenos::kTextureTileDepth)), pitch_aligned,
       height_aligned, bytes_per_block_log2));
 }
 // Supporting the right > pitch and bottom > height (in tiles) cases also, for
@@ -323,8 +318,6 @@ XE_NOALIAS
 uint32_t GetTiledAddressUpperBound2D(uint32_t right, uint32_t bottom,
                                      uint32_t pitch_aligned,
                                      uint32_t bytes_per_block_log2);
-XE_NOINLINE
-XE_NOALIAS
 uint64_t GetTiledAddressUpperBound3D(uint32_t right, uint32_t bottom,
                                      uint32_t back, uint32_t pitch_aligned,
                                      uint32_t height_aligned,

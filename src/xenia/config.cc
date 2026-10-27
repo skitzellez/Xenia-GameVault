@@ -10,6 +10,7 @@
 #include "config.h"
 
 #include <algorithm>
+#include <charconv>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -43,7 +44,7 @@ DEFINE_uint32(
     "Config");
 
 namespace config {
-std::string config_name = "xenia-edge.config.toml";
+std::string config_name = "xenia-canary-netplay.config.toml";  // Game Vault writes this one
 std::filesystem::path config_folder;
 std::filesystem::path config_path;
 std::string game_config_suffix = ".config.toml";
@@ -722,6 +723,75 @@ void SetupConfig(const std::filesystem::path& config_folder) {
     // parameters to the user, if new options were added, descriptions were
     // updated, or default values were changed.
     SaveConfig();
+  }
+}
+
+// Game Vault: settings a game needs that are off by default, so the player does not have to find them. Applied
+// only when the player has no <title id>.config.toml of their own. Kept as game values: never written to the
+// player's main config file.
+struct BuiltInGameConfig {
+  const char* title_id;
+  const char* toml;
+};
+const BuiltInGameConfig kBuiltInGameConfigs[] = {
+    // WWE 2K17: freezes when a match starts (xenia-canary issue 235); custom wrestlers' pictures (drawn by the
+    // game, then read back) are garbled without resolve read-back (same engine: game-compatibility issue 32).
+    {"545408BA",
+     "[Memory]\nignore_offset_for_ranged_allocations = true\n"},
+    // (readback_resolve is on by default in Edge, which Blur needed too)
+    // Naruto: The Broken Bond (+ demo): black, stretched textures
+    // (xenia-canary game-compatibility issue 87, xenia-canary issue 906).
+    {"55530825",
+     "[GPU]\nclear_memory_page_state = true\n"
+     "gpu_allow_invalid_upload_range = true\n"},
+    {"5553882E",
+     "[GPU]\nclear_memory_page_state = true\n"
+     "gpu_allow_invalid_upload_range = true\n"},
+};
+
+void ApplyBuiltInGameConfig(const std::string_view title_id) {
+  for (const auto& game : kBuiltInGameConfigs) {
+    if (title_id == game.title_id) {
+      const auto config = toml::parse(game.toml);
+      for (auto& it : *cvar::ConfigVars) {
+        auto config_var = static_cast<cvar::IConfigVar*>(it.second);
+        const auto node = config.at_path(
+            toml::path(config_var->category() + "." + config_var->name()));
+        if (node) {
+          config_var->LoadGameConfigValue(node.node());
+        }
+      }
+      XELOGI("Loaded built-in game config: {}", title_id);
+    }
+  }
+}
+
+
+// Game Vault (Xbox app): at title load, the game's own config file, or the
+// built-in settings for games known to need them.
+void LoadGameConfig(const std::string_view title_id) {
+  if (!cvar::ConfigVars) {
+    return;
+  }
+  for (auto& it : *cvar::ConfigVars) {
+    static_cast<cvar::IConfigVar*>(it.second)->ClearGameConfigValue();
+  }
+  uint32_t id = 0;
+  std::from_chars(title_id.data(), title_id.data() + title_id.size(), id, 16);
+  const auto game_config_path = GetGameConfigPath(id);
+  if (!game_config_path.empty() && std::filesystem::exists(game_config_path)) {
+    const auto config = ParseConfig(game_config_path);
+    for (auto& it : *cvar::ConfigVars) {
+      auto config_var = static_cast<cvar::IConfigVar*>(it.second);
+      const auto node = config.at_path(
+          toml::path(config_var->category() + "." + config_var->name()));
+      if (node && !LoadAliasedGameConfigValue(config_var, *node.node())) {
+        config_var->LoadGameConfigValue(node.node());
+      }
+    }
+    XELOGI("Loaded game config: {}", title_id);
+  } else {
+    ApplyBuiltInGameConfig(title_id);
   }
 }
 

@@ -1,17 +1,17 @@
 add_library(xenia-gpu STATIC)
 xe_platform_sources(xenia-gpu ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(xenia-gpu PRIVATE
-  ${PROJECT_SOURCE_DIR}/third_party/glslang
-  ${PROJECT_SOURCE_DIR}/third_party/Vulkan-Headers/include
-)
-target_link_libraries(xenia-gpu PUBLIC fmt snappy xxhash xenia-base xenia-ui)
-target_link_libraries(xenia-gpu PRIVATE glslang-spirv)
-# spirv_to_dxil_compiler.cc wraps Mesa for the backends that take the guest
-# SPIR-V to DXIL: D3D12 on Windows, and Metal (by way of the Metal Shader
-# Converter) on macOS. Mesa is built on those two platforms only. dxbc is there
-# for DXBCChecksum, which stamps the container digest of the produced DXIL.
-if(WIN32 OR APPLE)
-  target_link_libraries(xenia-gpu PUBLIC spirv_to_dxil dxbc)
+if(APPLE)
+  # No Vulkan/SPIR-V backend on macOS — remove spirv_* sources
+  get_target_property(_gpu_srcs xenia-gpu SOURCES)
+  list(FILTER _gpu_srcs EXCLUDE REGEX "spirv_")
+  set_target_properties(xenia-gpu PROPERTIES SOURCES "${_gpu_srcs}")
+  target_link_libraries(xenia-gpu PUBLIC dxbc fmt snappy xxhash xenia-base xenia-ui)
+else()
+  target_include_directories(xenia-gpu PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/Vulkan-Headers/include
+    ${PROJECT_SOURCE_DIR}/third_party/glslang
+  )
+  target_link_libraries(xenia-gpu PUBLIC dxbc fmt glslang-spirv snappy xxhash xenia-base xenia-ui)
 endif()
 xe_target_defaults(xenia-gpu)
 
@@ -31,20 +31,8 @@ if(XENIA_BUILD_MISC)
     ${PROJECT_SOURCE_DIR}/third_party/Vulkan-Headers/include
     ${PROJECT_SOURCE_DIR}/third_party/glslang
   )
-  # The shader translators only need xenia-gpu, but linking it drags in
-  # command_processor and graphics_system, so the kernel side comes with it.
   target_link_libraries(xenia-gpu-shader-compiler PRIVATE
-    xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
-    xenia-gpu xenia-hid xenia-hid-nop xenia-hid-portal
-    xenia-kernel xenia-patcher xenia-ui xenia-ui-vulkan xenia-vfs
-    capstone fmt glslang-spirv imgui libavcodec libavutil mspack
-    snappy xxhash
+    dxbc fmt glslang-spirv snappy xenia-base xenia-gpu xenia-ui xenia-ui-vulkan
   )
-  if(XE_TARGET_X86_64)
-    target_link_libraries(xenia-gpu-shader-compiler PRIVATE xenia-cpu-backend-x64)
-  endif()
-  if(XE_TARGET_AARCH64)
-    target_link_libraries(xenia-gpu-shader-compiler PRIVATE xenia-cpu-backend-a64)
-  endif()
   xe_target_defaults(xenia-gpu-shader-compiler)
 endif()

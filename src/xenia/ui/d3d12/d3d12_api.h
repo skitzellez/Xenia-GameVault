@@ -23,10 +23,14 @@
 #include "third_party/DirectX-Headers/include/directx/d3d12sdklayers.h"
 
 #include <DXProgrammableCapture.h>
+#include <d3dcompiler.h>
 #include <dxgi1_6.h>
 #include <dxgidebug.h>
 // For Microsoft::WRL::ComPtr.
 #include <wrl/client.h>
+
+#include "third_party/DirectXShaderCompiler/include/dxc/dxcapi.h"
+#include "third_party/DirectXShaderCompiler/projects/dxilconv/include/DxbcConverter.h"
 
 #define XELOGD3D XELOGI
 

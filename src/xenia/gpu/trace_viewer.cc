@@ -63,7 +63,7 @@ TraceViewer::TraceViewer(xe::ui::WindowedAppContext& app_context,
 TraceViewer::~TraceViewer() = default;
 
 bool TraceViewer::OnInitialize() {
-  std::string path = xe::path_to_utf8(cvars::target_trace_file);
+  std::string path = cvars::target_trace_file.string();
 
   // If no path passed, ask the user.
   // On Android, however, there's no synchronous file picker, and the trace file
@@ -78,7 +78,7 @@ bool TraceViewer::OnInitialize() {
     file_picker->set_title("Select Trace File");
     file_picker->set_extensions({
         {"Supported Files", "*.xtr"},
-        {"All Files", "*"},
+        {"All Files (*.*)", "*.*"},
     });
     if (file_picker->Show()) {
       auto selected_files = file_picker->selected_files();
@@ -132,12 +132,6 @@ bool TraceViewer::Setup() {
       [this]() { return CreateGraphicsSystem(); }, nullptr);
   if (XFAILED(result)) {
     XELOGE("Failed to setup emulator: {:08X}", result);
-    return false;
-  }
-  // Setup only stores the factories; the graphics system is created here.
-  result = emulator_->SetupSubsystems();
-  if (XFAILED(result)) {
-    XELOGE("Failed to setup emulator subsystems: {:08X}", result);
     return false;
   }
   memory_ = emulator_->memory();

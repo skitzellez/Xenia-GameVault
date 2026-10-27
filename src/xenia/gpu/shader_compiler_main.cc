@@ -20,11 +20,17 @@
 #include "xenia/base/platform.h"
 #include "xenia/base/string.h"
 #include "xenia/base/string_buffer.h"
+#include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/shader_translator.h"
 #include "xenia/gpu/spirv_shader_translator.h"
 #include "xenia/gpu/xenos.h"
+#include "xenia/ui/vulkan/spirv_tools_context.h"
 
-DECLARE_bool(precise_interpolation);
+// For D3DDisassemble:
+#if XE_PLATFORM_WIN32
+#include "xenia/ui/d3d12/d3d12_api.h"
+#endif  // XE_PLATFORM_WIN32
+
 DEFINE_path(shader_input, "", "Input shader binary file path.", "GPU");
 DEFINE_string(shader_input_type, "",
               "'vs', 'ps', or unspecified to infer from the given filename.",
@@ -36,7 +42,8 @@ DEFINE_bool(
     "GPU");
 DEFINE_path(shader_output, "", "Output shader file path.", "GPU");
 DEFINE_string(shader_output_type, "ucode",
-              "Translator to use: [ucode, spirv, spirvtext].", "GPU");
+              "Translator to use: [ucode, spirv, spirvtext, dxbc, dxbctext].",
+              "GPU");
 DEFINE_string(
     vertex_shader_output_type, "",
     "Type of the host interface to produce the vertex or domain shader for: "
@@ -87,8 +94,7 @@ int shader_compiler_main(const std::vector<std::string>& args) {
 
   auto input_file = filesystem::OpenFile(cvars::shader_input, "rb");
   if (!input_file) {
-    XELOGE("Unable to open input file: {}",
-           xe::strip_pii(xe::path_to_utf8(cvars::shader_input)));
+    XELOGE("Unable to open input file: {}", cvars::shader_input);
     return 1;
   }
   size_t input_file_size = std::filesystem::file_size(cvars::shader_input);
@@ -96,8 +102,7 @@ int shader_compiler_main(const std::vector<std::string>& args) {
   fread(ucode_dwords.data(), 4, ucode_dwords.size(), input_file);
   fclose(input_file);
 
-  XELOGI("Opened {} as a {} shader, {} words ({} bytes).",
-         xe::strip_pii(xe::path_to_utf8(cvars::shader_input)),
+  XELOGI("Opened {} as a {} shader, {} words ({} bytes).", cvars::shader_input,
          shader_type == xenos::ShaderType::kVertex ? "vertex" : "pixel",
          ucode_dwords.size(), ucode_dwords.size() * 4);
 
@@ -116,9 +121,14 @@ int shader_compiler_main(const std::vector<std::string>& args) {
   if (cvars::shader_output_type == "spirv" ||
       cvars::shader_output_type == "spirvtext") {
     translator = std::make_unique<SpirvShaderTranslator>(
-        spirv_features, true, true, cvars::shader_output_pixel_shader_interlock,
-        cvars::precise_interpolation, /*draw_resolution_scale_x=*/1,
-        /*draw_resolution_scale_y=*/1);
+        spirv_features, true, true,
+        cvars::shader_output_pixel_shader_interlock);
+  } else if (cvars::shader_output_type == "dxbc" ||
+             cvars::shader_output_type == "dxbctext") {
+    translator = std::make_unique<DxbcShaderTranslator>(
+        ui::GraphicsProvider::GpuVendorID(0),
+        cvars::shader_output_bindless_resources,
+        cvars::shader_output_pixel_shader_interlock);
   } else {
     // Just output microcode disassembly generated during microcode information
     // gathering.
@@ -187,14 +197,60 @@ int shader_compiler_main(const std::vector<std::string>& args) {
                             source_data_size / sizeof(unsigned int));
     spv::Disassemble(spirv_disasm_stream, spirv_source);
     spirv_disasm = std::move(spirv_disasm_stream.str());
+    ui::vulkan::SpirvToolsContext spirv_tools_context;
+    if (spirv_tools_context.Initialize(spirv_features.spirv_version)) {
+      std::string spirv_validation_error;
+      spirv_tools_context.Validate(
+          reinterpret_cast<const uint32_t*>(spirv_source.data()),
+          spirv_source.size(), &spirv_validation_error);
+      if (!spirv_validation_error.empty()) {
+        spirv_disasm.append(1, '\n');
+        spirv_disasm.append(spirv_validation_error);
+      }
+    }
     source_data = spirv_disasm.c_str();
     source_data_size = spirv_disasm.size();
   }
+#if XE_PLATFORM_WIN32
+  ID3DBlob* dxbc_disasm_blob = nullptr;
+  if (cvars::shader_output_type == "dxbctext") {
+    HMODULE d3d_compiler = LoadLibraryW(L"D3DCompiler_47.dll");
+    if (d3d_compiler != nullptr) {
+      pD3DDisassemble d3d_disassemble =
+          pD3DDisassemble(GetProcAddress(d3d_compiler, "D3DDisassemble"));
+      if (d3d_disassemble != nullptr) {
+        // Disassemble DXBC.
+        if (SUCCEEDED(d3d_disassemble(source_data, source_data_size,
+                                      D3D_DISASM_ENABLE_INSTRUCTION_NUMBERING |
+                                          D3D_DISASM_ENABLE_INSTRUCTION_OFFSET,
+                                      nullptr, &dxbc_disasm_blob))) {
+          source_data = dxbc_disasm_blob->GetBufferPointer();
+          source_data_size = dxbc_disasm_blob->GetBufferSize();
+          // Stop at the null terminator.
+          for (size_t i = 0; i < source_data_size; ++i) {
+            if (reinterpret_cast<const char*>(source_data)[i] == '\0') {
+              source_data_size = i;
+              break;
+            }
+          }
+        }
+      }
+      FreeLibrary(d3d_compiler);
+    }
+  }
+#endif  // XE_PLATFORM_WIN32
+
   if (!cvars::shader_output.empty()) {
     auto output_file = filesystem::OpenFile(cvars::shader_output, "wb");
     fwrite(source_data, 1, source_data_size, output_file);
     fclose(output_file);
   }
+
+#if XE_PLATFORM_WIN32
+  if (dxbc_disasm_blob != nullptr) {
+    dxbc_disasm_blob->Release();
+  }
+#endif  // XE_PLATFORM_WIN32
 
   return 0;
 }

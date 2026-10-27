@@ -9,7 +9,6 @@
 
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
 
-#include "xenia/base/logging.h"
 #include "xenia/gpu/vulkan/vulkan_command_processor.h"
 #include "xenia/ui/vulkan/vulkan_provider.h"
 #include "xenia/xbox.h"
@@ -22,15 +21,13 @@ VulkanGraphicsSystem::VulkanGraphicsSystem() {}
 
 VulkanGraphicsSystem::~VulkanGraphicsSystem() {}
 
-std::string VulkanGraphicsSystem::name() const { return "Vulkan"; }
-
-bool VulkanGraphicsSystem::supports_depth_clamp() const {
-  auto vulkan_provider =
-      static_cast<const xe::ui::vulkan::VulkanProvider*>(provider());
-  if (!vulkan_provider) {
-    return false;
+std::string VulkanGraphicsSystem::name() const {
+  auto vulkan_command_processor =
+      static_cast<VulkanCommandProcessor*>(command_processor());
+  if (vulkan_command_processor != nullptr) {
+    return vulkan_command_processor->GetWindowTitleText();
   }
-  return vulkan_provider->vulkan_device()->properties().depthClamp;
+  return "Vulkan";
 }
 
 X_STATUS VulkanGraphicsSystem::Setup(cpu::Processor* processor,
@@ -38,17 +35,6 @@ X_STATUS VulkanGraphicsSystem::Setup(cpu::Processor* processor,
                                      ui::WindowedAppContext* app_context,
                                      bool with_presentation) {
   provider_ = xe::ui::vulkan::VulkanProvider::Create(true, with_presentation);
-  if (!provider_) {
-    XELOGE("Vulkan provider creation failed");
-    xe::FatalError(
-        "Unable to initialize the Vulkan graphics subsystem.\n"
-        "\n"
-        "Ensure that you have the latest drivers for your GPU and that it "
-        "supports Vulkan.\n"
-        "\n"
-        "See https://xenia.jp/faq/ for more information and a list of "
-        "supported GPUs.");
-  }
   return GraphicsSystem::Setup(processor, kernel_state, app_context,
                                with_presentation);
 }

@@ -25,8 +25,6 @@
 #include "xenia/gpu/d3d12/d3d12_shared_memory.h"
 #include "xenia/gpu/d3d12/d3d12_texture_cache.h"
 #include "xenia/gpu/draw_util.h"
-#include "xenia/gpu/edram_dump_shader.h"
-#include "xenia/gpu/edram_transfer_shader.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/trace_writer.h"
 #include "xenia/gpu/xenos.h"
@@ -48,20 +46,14 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
                          const Memory& memory, TraceWriter& trace_writer,
                          uint32_t draw_resolution_scale_x,
                          uint32_t draw_resolution_scale_y,
-                         D3D12CommandProcessor& command_processor)
+                         D3D12CommandProcessor& command_processor,
+                         bool bindless_resources_used)
       : RenderTargetCache(register_file, memory, &trace_writer,
                           draw_resolution_scale_x, draw_resolution_scale_y),
         command_processor_(command_processor),
-        trace_writer_(trace_writer) {}
+        trace_writer_(trace_writer),
+        bindless_resources_used_(bindless_resources_used) {}
   ~D3D12RenderTargetCache() override;
-
-  // Shader code for resolve copy operations.
-  struct ResolveCopyShaderCode {
-    const void* unscaled;
-    size_t unscaled_size;
-    const void* scaled;
-    size_t scaled_size;
-  };
 
   bool Initialize();
   void Shutdown(bool from_destructor = false);
@@ -73,8 +65,8 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
 
   bool Update(bool is_rasterization_done,
               reg::RB_DEPTHCONTROL normalized_depth_control,
-              uint32_t normalized_color_mask, const Shader& vertex_shader,
-              int32_t window_offset_tiles) override;
+              uint32_t normalized_color_mask,
+              const Shader& vertex_shader) override;
 
   void InvalidateCommandListRenderTargets() {
     are_current_command_list_render_targets_valid_ = false;
@@ -103,6 +95,9 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
                reg::RB_COPY_DEST_INFO* copy_dest_info_out = nullptr,
                bool* written_scaled_out = nullptr);
 
+  // Returns true if any downloads were submitted to the command processor.
+  bool InitializeTraceSubmitDownloads();
+  void InitializeTraceCompleteDownloads();
   void RestoreEdramSnapshot(const void* snapshot);
 
   // For host render targets.
@@ -176,6 +171,7 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
 
   D3D12CommandProcessor& command_processor_;
   TraceWriter& trace_writer_;
+  bool bindless_resources_used_;
 
   Path path_ = Path::kHostRenderTargets;
 
@@ -219,6 +215,14 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   // Parameter 1 - destination (shared memory or a part of it).
   // Parameter 2 - source (EDRAM).
   ID3D12RootSignature* resolve_copy_root_signature_ = nullptr;
+  struct ResolveCopyShaderCode {
+    const void* unscaled;
+    size_t unscaled_size;
+    const void* scaled;
+    size_t scaled_size;
+  };
+  static const ResolveCopyShaderCode
+      kResolveCopyShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)];
   ID3D12PipelineState* resolve_copy_pipelines_[size_t(
       draw_util::ResolveCopyShaderIndex::kCount)] = {};
   // Unscaled variants for fully native resolves. Only created with resolution
@@ -231,7 +235,6 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
 
   // For traces.
   ID3D12Resource* edram_snapshot_download_buffer_ = nullptr;
-  bool edram_snapshot_download_mapped_ = false;
   std::unique_ptr<ui::d3d12::D3D12UploadBufferPool>
       edram_snapshot_restore_pool_;
 
@@ -317,74 +320,191 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
     uint32_t temporary_sort_index_ = 0;
   };
 
-  // Transitions render targets using their sample positions for depth.
-  // Multisampled depth drawn at Xenos sample positions is decompressed in place
-  // before leaving DEPTH_WRITE. Otherwise, shader reads may use the default
-  // positions to interpret compressed depth.
-  // https://microsoft.github.io/DirectX-Specs/d3d/ProgrammableSamplePositions.html
-  void TransitionRenderTarget(D3D12RenderTarget& render_target,
-                              D3D12_RESOURCE_STATES new_state);
-
-  // Root parameters of the ownership transfer pixel shaders, in the register
-  // layout Mesa's spirv_to_dxil emits for the emitter's descriptor sets: each
-  // set becomes the register space of the same number, the host depth copy's
-  // storage buffer becomes a UAV, and the push constants land in Mesa's push
-  // constant CBV.
+  enum TransferCBVRegister : uint32_t {
+    kTransferCBVRegisterStencilMask,
+    kTransferCBVRegisterAddress,
+    kTransferCBVRegisterHostDepthAddress,
+  };
+  enum TransferSRVRegister : uint32_t {
+    kTransferSRVRegisterColor,
+    kTransferSRVRegisterDepth,
+    kTransferSRVRegisterStencil,
+    kTransferSRVRegisterHostDepth,
+    kTransferSRVRegisterCount,
+  };
   enum TransferUsedRootParameter : uint32_t {
-    // The address, the host depth address and the stencil mask (changed 8
-    // times per transfer) are dwords of Mesa's one push constant CBV.
-    kTransferUsedRootParameterPushConstants,
+    // Changed 8 times per transfer.
+    kTransferUsedRootParameterStencilMaskConstant,
     kTransferUsedRootParameterColorSRV,
     // Mutually exclusive with ColorSRV.
     kTransferUsedRootParameterDepthSRV,
     // Mutually exclusive with ColorSRV.
     kTransferUsedRootParameterStencilSRV,
+    // May happen to be the same for different sources.
+    kTransferUsedRootParameterAddressConstant,
     kTransferUsedRootParameterHostDepthSRV,
-    // Mutually exclusive with HostDepthSRV - the copy modes read the previous
-    // owner's depth back out of the EDRAM buffer, which the emitter declares
-    // as a read-only storage buffer, so Mesa gives it a raw buffer SRV rather
-    // than the UAV the written EDRAM buffer of a dump shader gets.
-    kTransferUsedRootParameterHostDepthBuffer,
+    kTransferUsedRootParameterHostDepthAddressConstant,
     kTransferUsedRootParameterCount,
 
-    kTransferUsedRootParameterPushConstantsBit =
-        uint32_t(1) << kTransferUsedRootParameterPushConstants,
+    kTransferUsedRootParameterStencilMaskConstantBit =
+        uint32_t(1) << kTransferUsedRootParameterStencilMaskConstant,
     kTransferUsedRootParameterColorSRVBit =
         uint32_t(1) << kTransferUsedRootParameterColorSRV,
     kTransferUsedRootParameterDepthSRVBit =
         uint32_t(1) << kTransferUsedRootParameterDepthSRV,
     kTransferUsedRootParameterStencilSRVBit =
         uint32_t(1) << kTransferUsedRootParameterStencilSRV,
+    kTransferUsedRootParameterAddressConstantBit =
+        uint32_t(1) << kTransferUsedRootParameterAddressConstant,
     kTransferUsedRootParameterHostDepthSRVBit =
         uint32_t(1) << kTransferUsedRootParameterHostDepthSRV,
-    kTransferUsedRootParameterHostDepthBufferBit =
-        uint32_t(1) << kTransferUsedRootParameterHostDepthBuffer,
+    kTransferUsedRootParameterHostDepthAddressConstantBit =
+        uint32_t(1) << kTransferUsedRootParameterHostDepthAddressConstant,
+
+    kTransferUsedRootParametersDescriptorMask =
+        kTransferUsedRootParameterColorSRVBit |
+        kTransferUsedRootParameterDepthSRVBit |
+        kTransferUsedRootParameterStencilSRVBit |
+        kTransferUsedRootParameterHostDepthSRVBit,
+  };
+  enum class TransferRootSignatureIndex {
+    kColor,
+    kDepth,
+    kDepthStencil,
+    kColorToStencilBit,
+    kStencilToStencilBit,
+    kColorAndHostDepth,
+    kDepthAndHostDepth,
+    kDepthStencilAndHostDepth,
+    kCount,
+  };
+  static const uint32_t
+      kTransferUsedRootParameters[size_t(TransferRootSignatureIndex::kCount)];
+  enum class TransferMode : uint32_t {
+    // 1 SRV (color texture), source constant.
+    kColorToDepth,
+    // 1 SRV (color texture), source constant.
+    kColorToColor,
+
+    // 1 or 2 SRVs (depth texture, stencil texture if SV_StencilRef is
+    // supported), source constant.
+    kDepthToDepth,
+    // 2 SRVs (depth texture, stencil texture), source constant.
+    kDepthToColor,
+
+    // 1 SRV (color texture), mask constant (most frequently changed, 8 times
+    // per transfer), source constant.
+    kColorToStencilBit,
+    // 1 SRV (stencil texture), mask constant, source constant.
+    kDepthToStencilBit,
+
+    // Two-source modes, using the host depth if it, when converted to the guest
+    // format, matches what's in the owner source (not modified, keep host
+    // precision), or the guest data otherwise (significantly modified, possibly
+    // cleared). Stencil for SV_StencilRef is always taken from the guest
+    // source.
+
+    // 2 SRVs (color texture, host depth texture or buffer), source constant,
+    // host depth source constant.
+    kColorAndHostDepthToDepth,
+    // When using different source and destination depth formats. 2 or 3 SRVs
+    // (depth texture, stencil texture if SV_StencilRef is supported, host depth
+    // texture or buffer), source constant, host depth source constant.
+    kDepthAndHostDepthToDepth,
+
+    kCount,
+  };
+  enum class TransferOutput {
+    kColor,
+    kDepth,
+    // With this output, kTransferCBVRegisterStencilMask is used.
+    kStencilBit,
+  };
+  struct TransferModeInfo {
+    TransferOutput output;
+    TransferRootSignatureIndex root_signature_no_stencil_ref;
+    TransferRootSignatureIndex root_signature_with_stencil_ref;
+  };
+  static const TransferModeInfo kTransferModes[size_t(TransferMode::kCount)];
+
+  union TransferShaderKey {
+    uint32_t key;
+    struct {
+      xenos::MsaaSamples dest_msaa_samples : xenos::kMsaaSamplesBits;
+      uint32_t dest_resource_format : xenos::kRenderTargetFormatBits;
+      xenos::MsaaSamples source_msaa_samples : xenos::kMsaaSamplesBits;
+      // Always 1x when host_depth_source_is_copy is true not to create the same
+      // pipeline for different MSAA sample counts as it doesn't matter in this
+      // case.
+      xenos::MsaaSamples host_depth_source_msaa_samples
+          : xenos::kMsaaSamplesBits;
+      uint32_t source_resource_format : xenos::kRenderTargetFormatBits;
+      // If host depth is also fetched, whether it's pre-copied to the EDRAM
+      // buffer (but since it's just a scratch buffer, with tiles laid out
+      // linearly with the same pitch as in the original render target; also no
+      // swapping of 40-sample columns as opposed to the host render target -
+      // this is done only for the color source).
+      uint32_t host_depth_source_is_copy : 1;
+      // Scale classes of the two sides - the shader bakes each side's tile
+      // size and the conversion between the scale spaces.
+      uint32_t dest_scale_native : 1;
+      uint32_t source_scale_native : 1;
+
+      // Last bits because this affects the root signature - after sorting, only
+      // change it as fewer times as possible. Depth buffers have an additional
+      // stencil SRV.
+      static_assert(size_t(TransferMode::kCount) <= (size_t(1) << 3));
+      TransferMode mode : 3;
+    };
+
+    TransferShaderKey() : key(0) { static_assert_size(*this, sizeof(key)); }
+
+    struct Hasher {
+      size_t operator()(const TransferShaderKey& key) const {
+        return std::hash<uint32_t>{}(key.key);
+      }
+    };
+    bool operator==(const TransferShaderKey& other_key) const {
+      return key == other_key.key;
+    }
+    bool operator!=(const TransferShaderKey& other_key) const {
+      return !(*this == other_key);
+    }
+    bool operator<(const TransferShaderKey& other_key) const {
+      return key < other_key.key;
+    }
   };
 
-  // Mesa sizes the push constant CBV from the dwords the shader actually
-  // loads, rounded up to a 16-byte row - no layout uses more than two.
-  static constexpr uint32_t kTransferRootPushConstantDwords = 4;
-
-  // What one mode's root signature has to declare: which of the root
-  // parameters above its shader uses, and the register space Mesa gives each
-  // of the emitter's descriptor sets. The mode fixes both, since
-  // use_stencil_reference_output_ doesn't change for the lifetime of the
-  // cache.
-  struct TransferRootSignatureInfo {
-    uint32_t used_root_parameters;
-    // Of the color or the depth / stencil source textures.
-    uint32_t space_source;
-    // Of the host depth source, texture or buffer.
-    uint32_t space_host_depth;
+  union TransferAddressConstant {
+    uint32_t constant;
+    struct {
+      // All in tiles.
+      uint32_t dest_pitch : xenos::kEdramPitchTilesBits;
+      uint32_t source_pitch : xenos::kEdramPitchTilesBits;
+      // Destination base in tiles minus source base in tiles (not vice versa
+      // because this is a transform of the coordinate system, not addresses
+      // themselves).
+      // + 1 bit because this is a signed difference between two EDRAM bases.
+      // 0 for host_depth_source_is_copy (ignored in this case anyway as
+      // destination == source anyway).
+      int32_t source_to_dest : xenos::kEdramBaseTilesBits + 1;
+    };
+    TransferAddressConstant() : constant(0) {
+      static_assert_size(*this, sizeof(constant));
+    }
+    bool operator==(const TransferAddressConstant& other_constant) const {
+      return constant == other_constant.constant;
+    }
+    bool operator!=(const TransferAddressConstant& other_constant) const {
+      return !(*this == other_constant);
+    }
   };
-  TransferRootSignatureInfo GetTransferRootSignatureInfo(
-      EdramTransferMode mode) const;
 
   struct TransferInvocation {
     Transfer transfer;
-    EdramTransferShaderKey shader_key;
+    TransferShaderKey shader_key;
     TransferInvocation(const Transfer& transfer,
-                       const EdramTransferShaderKey& shader_key)
+                       const TransferShaderKey& shader_key)
         : transfer(transfer), shader_key(shader_key) {}
     bool operator<(const TransferInvocation& other_invocation) const {
       // TODO(Triang3l): See if it may be better to sort by the source in the
@@ -425,41 +545,106 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
     kHostDepthStoreRootParameterCount,
   };
 
-  // Descriptor sets of the dump shaders, which Mesa's spirv_to_dxil turns into
-  // the register spaces of the same number.
-  enum DumpDescriptorSet : uint32_t {
-    kDumpDescriptorSetEdram,
-    kDumpDescriptorSetSource,
+  union DumpPipelineKey {
+    uint32_t key;
+    struct {
+      xenos::MsaaSamples msaa_samples : 2;
+      uint32_t resource_format : 4;
+      // Last bit because this affects the root signature - after sorting, only
+      // change it at most once. Depth buffers have an additional stencil SRV.
+      uint32_t is_depth : 1;
+      // Dumping to the scaled EDRAM layout duplicates this native render
+      // target's guest pixels.
+      uint32_t source_scale_native : 1;
+      // source_scale_native only.
+      // Address the EDRAM buffer with the plain 1x1 tile layout.
+      uint32_t native_layout : 1;
+    };
+
+    DumpPipelineKey() : key(0) { static_assert_size(*this, sizeof(key)); }
+
+    struct Hasher {
+      size_t operator()(const DumpPipelineKey& key) const {
+        return std::hash<uint32_t>{}(key.key);
+      }
+    };
+    bool operator==(const DumpPipelineKey& other_key) const {
+      return key == other_key.key;
+    }
+    bool operator!=(const DumpPipelineKey& other_key) const {
+      return !(*this == other_key);
+    }
+    bool operator<(const DumpPipelineKey& other_key) const {
+      return key < other_key.key;
+    }
+
+    xenos::ColorRenderTargetFormat GetColorFormat() const {
+      assert_false(is_depth);
+      return xenos::ColorRenderTargetFormat(resource_format);
+    }
+    xenos::DepthRenderTargetFormat GetDepthFormat() const {
+      assert_true(is_depth);
+      return xenos::DepthRenderTargetFormat(resource_format);
+    }
   };
 
-  // Mesa sizes the push constant CBV from the dwords the shader actually
-  // loads, rounded up to a 16-byte row. A direct resolve reads all of them,
-  // which is what the root constants have to cover - a plain dump reads only
-  // the pitches and the offsets and leaves the rest of the rows unread.
-  static constexpr uint32_t kDumpRootPushConstantDwords =
-      (kEdramDumpShaderPushConstantCount + 3) & ~uint32_t(3);
+  union DumpOffsets {
+    uint32_t offsets;
+    struct {
+      // May be beyond the EDRAM tile count in case of EDRAM addressing
+      // wrapping, thus + 1 bit.
+      uint32_t dispatch_first_tile : xenos::kEdramBaseTilesBits + 1;
+      uint32_t source_base_tiles : xenos::kEdramBaseTilesBits;
+    };
+    DumpOffsets() : offsets(0) { static_assert_size(*this, sizeof(offsets)); }
+    bool operator==(const DumpOffsets& other_offsets) const {
+      return offsets == other_offsets.offsets;
+    }
+    bool operator!=(const DumpOffsets& other_offsets) const {
+      return !(*this == other_offsets);
+    }
+  };
 
-  // Root parameters of the dump compute shaders, in the register layout Mesa
-  // emits for the emitter's descriptor sets: the EDRAM buffer is set 0
-  // binding 0, so UAV u0 space0; the source and its stencil are set 1 bindings
-  // 0 and 1, so SRV t0 and t1 of space1; the push constants land in Mesa's
-  // push constant CBV at b1 space31.
+  union DumpPitches {
+    uint32_t pitches;
+    struct {
+      // Both in tiles.
+      uint32_t dest_pitch : xenos::kEdramPitchTilesBits;
+      uint32_t source_pitch : xenos::kEdramPitchTilesBits;
+    };
+    DumpPitches() : pitches(0) { static_assert_size(*this, sizeof(pitches)); }
+    bool operator==(const DumpPitches& other_pitches) const {
+      return pitches == other_pitches.pitches;
+    }
+    bool operator!=(const DumpPitches& other_pitches) const {
+      return !(*this == other_pitches);
+    }
+  };
+
+  enum DumpCbuffer : uint32_t {
+    kDumpCbufferOffsets,
+    kDumpCbufferPitches,
+    kDumpCbufferCount,
+  };
+
   enum DumpRootParameter : uint32_t {
-    // Pitches and offsets in one root constants parameter - the offsets may be
-    // changed multiple times for the same source.
-    kDumpRootParameterPushConstants,
+    // May be changed multiple times for the same source.
+    kDumpRootParameterOffsets,
     // One resolve may need multiple sources.
     kDumpRootParameterSource,
 
+    // May be different for different sources.
+    kDumpRootParameterColorPitches = kDumpRootParameterSource + 1,
     // Not changed.
-    kDumpRootParameterColorEdram = kDumpRootParameterSource + 1,
+    kDumpRootParameterColorEdram,
 
     kDumpRootParameterColorCount,
 
-    // Same change frequency than the source (t1 of the same space, but in a
-    // table of its own because the command processor can't contiguously
-    // allocate multiple descriptors with bindless).
+    // Same change frequency than the source (though currently the command
+    // processor can't contiguously allocate multiple descriptors with bindless,
+    // when such functionality is added, switch to one root signature).
     kDumpRootParameterDepthStencil = kDumpRootParameterSource + 1,
+    kDumpRootParameterDepthPitches,
     kDumpRootParameterDepthEdram,
 
     kDumpRootParameterDepthCount,
@@ -467,9 +652,9 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
 
   struct DumpInvocation {
     ResolveCopyDumpRectangle rectangle;
-    EdramDumpShaderKey pipeline_key;
+    DumpPipelineKey pipeline_key;
     DumpInvocation(const ResolveCopyDumpRectangle& rectangle,
-                   const EdramDumpShaderKey& pipeline_key)
+                   const DumpPipelineKey& pipeline_key)
         : rectangle(rectangle), pipeline_key(pipeline_key) {}
     bool operator<(const DumpInvocation& other_invocation) const {
       // Sort by the pipeline key primarily to reduce pipeline state (context)
@@ -503,7 +688,28 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   //   depending on whether they have one bit set, from 1 << 0 to 1 << 7.
   // - Null if failed to create.
   ID3D12PipelineState* const* GetOrCreateTransferPipelines(
-      EdramTransferShaderKey key);
+      TransferShaderKey key);
+
+  static TransferMode GetTransferMode(bool dest_is_stencil_bit,
+                                      bool dest_is_depth, bool source_is_depth,
+                                      bool source_has_host_depth) {
+    assert_true(dest_is_depth ||
+                (!dest_is_stencil_bit && !source_has_host_depth));
+    if (dest_is_stencil_bit) {
+      return source_is_depth ? TransferMode::kDepthToStencilBit
+                             : TransferMode::kColorToStencilBit;
+    }
+    if (dest_is_depth) {
+      if (source_is_depth) {
+        return source_has_host_depth ? TransferMode::kDepthAndHostDepthToDepth
+                                     : TransferMode::kDepthToDepth;
+      }
+      return source_has_host_depth ? TransferMode::kColorAndHostDepthToDepth
+                                   : TransferMode::kColorToDepth;
+    }
+    return source_is_depth ? TransferMode::kDepthToColor
+                           : TransferMode::kColorToColor;
+  }
 
   // Do ownership transfers for render targets - each render target / vector may
   // be null / empty in case there's nothing to do for them.
@@ -521,25 +727,7 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   void SetCommandListRenderTargets(
       RenderTarget* const* depth_and_color_render_targets);
 
-  ID3D12PipelineState* GetOrCreateDumpPipeline(EdramDumpShaderKey key);
-
-  // Assigns temporary sort and SRV descriptor indices to the render targets of
-  // dump_rectangles_ and uploads their descriptors to a shader-visible heap.
-  // Returns false if the heap request failed, in which case nothing has been
-  // written to the command list yet.
-  bool PrepareDumpSourceDescriptors();
-
-  // Reads the render targets owning the resolve source straight into shared
-  // memory in the guest texture layout, doing in one pass what dumping to the
-  // EDRAM buffer and copying back out of it do in two. Returns false without
-  // encoding anything if the resolve can't be done this way, leaving the
-  // caller to take the round trip.
-  bool DirectResolveRenderTargets(
-      const draw_util::ResolveInfo& resolve_info,
-      const draw_util::ResolveCopyShaderConstants& copy_shader_constants,
-      uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
-      uint32_t dump_pitch, bool copy_dest_scaled,
-      D3D12SharedMemory& shared_memory, D3D12TextureCache& texture_cache);
+  ID3D12PipelineState* GetOrCreateDumpPipeline(DumpPipelineKey key);
 
   // Writes contents of host render targets within rectangles from
   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_ - with the plain 1x1
@@ -547,11 +735,6 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   void DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used,
                          uint32_t dump_rows, uint32_t dump_pitch,
                          bool native_layout);
-
-  void DumpAllRenderTargetsToEdram() override;
-  bool BeginEdramSnapshotReadback() override;
-  const void* MapEdramSnapshotReadback() override;
-  void EndEdramSnapshotReadback() override;
 
   bool use_stencil_reference_output_ = false;
 
@@ -605,15 +788,13 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   std::unique_ptr<ui::d3d12::D3D12UploadBufferPool>
       transfer_vertex_buffer_pool_;
 
-  // One per transfer mode - the mode is what fixes the shader's bindings.
-  ID3D12RootSignature*
-      transfer_root_signatures_[size_t(EdramTransferMode::kCount)] = {};
-  std::unordered_map<EdramTransferShaderKey, ID3D12PipelineState*,
-                     EdramTransferShaderKey::Hasher>
+  ID3D12RootSignature* transfer_root_signatures_[size_t(
+      TransferRootSignatureIndex::kCount)] = {};
+  std::unordered_map<TransferShaderKey, ID3D12PipelineState*,
+                     TransferShaderKey::Hasher>
       transfer_pipelines_;
-  std::unordered_map<EdramTransferShaderKey,
-                     std::array<ID3D12PipelineState*, 8>,
-                     EdramTransferShaderKey::Hasher>
+  std::unordered_map<TransferShaderKey, std::array<ID3D12PipelineState*, 8>,
+                     TransferShaderKey::Hasher>
       transfer_stencil_bit_pipelines_;
 
   // Temporary storage for PerformTransfersAndResolveClears.
@@ -627,8 +808,8 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   ID3D12RootSignature* dump_root_signature_depth_ = nullptr;
   // Compute pipelines for copying host render target contents to the EDRAM
   // buffer. May be null if failed to create.
-  std::unordered_map<EdramDumpShaderKey, ID3D12PipelineState*,
-                     EdramDumpShaderKey::Hasher>
+  std::unordered_map<DumpPipelineKey, ID3D12PipelineState*,
+                     DumpPipelineKey::Hasher>
       dump_pipelines_;
 
   // Parameter 0 - 2 root constants (red, green).
@@ -638,6 +819,9 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
       uint32_rtv_clear_pipelines_[2][size_t(xenos::MsaaSamples::k4X) + 1] = {};
 
   std::vector<Transfer> clear_transfers_[2];
+
+  // Temporary storage for DXBC building.
+  std::vector<uint32_t> built_shader_;
 
   // For rasterizer-ordered view (pixel shader interlock).
 

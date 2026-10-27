@@ -10,9 +10,7 @@
 #ifndef XENIA_GPU_VULKAN_VULKAN_SHADER_H_
 #define XENIA_GPU_VULKAN_VULKAN_SHADER_H_
 
-#include <atomic>
 #include <cstdint>
-#include <mutex>
 
 #include "xenia/gpu/spirv_shader.h"
 #include "xenia/gpu/xenos.h"
@@ -33,15 +31,8 @@ class VulkanShader : public SpirvShader {
     VkShaderModule GetOrCreateShaderModule();
     VkShaderModule shader_module() const { return shader_module_; }
 
-    // Replace the translated binary with an optimized version.
-    // Must be called before GetOrCreateShaderModule() creates the module.
-    void SetOptimizedBinary(std::vector<uint8_t>&& binary) {
-      translated_binary_ = std::move(binary);
-    }
-
    private:
     VkShaderModule shader_module_ = VK_NULL_HANDLE;
-    std::mutex shader_module_mutex_;
   };
 
   explicit VulkanShader(const ui::vulkan::VulkanDevice* vulkan_device,
