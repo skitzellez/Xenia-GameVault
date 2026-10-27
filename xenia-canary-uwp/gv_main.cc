@@ -275,6 +275,38 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
   if (installed || failed) XELOGI("Game Vault: add-ons: {} installed, {} failed", installed, failed);
 }
 
+// Xenia opened without a game (from the Xbox's app list): a line saying where
+// games are started, rather than a black screen. Gone once a game runs.
+class NoGameMessage final : public ui::ImGuiDialog {
+ public:
+  NoGameMessage(ui::ImGuiDrawer* drawer, Emulator* emulator)
+      : ui::ImGuiDialog(drawer), emulator_(emulator) {}
+
+ protected:
+  void OnDraw(ImGuiIO& io) override {
+    if (emulator_->is_title_open()) {
+      Close();  // (deletes this dialog)
+      return;
+    }
+    const char* lines[] = {"Start an Xbox 360 game from Game Vault.",
+                           "Xenia opens with it."};
+    ImDrawList* list = ImGui::GetForegroundDrawList();
+    ImFont* font = ImGui::GetFont();
+    float y = io.DisplaySize.y * 0.45f;
+    for (int i = 0; i < 2; ++i) {
+      const float size = ImGui::GetFontSize() * (i ? 1.4f : 2.0f);
+      const ImVec2 text = font->CalcTextSizeA(size, FLT_MAX, 0.0f, lines[i]);
+      list->AddText(font, size,
+                    ImVec2((io.DisplaySize.x - text.x) * 0.5f, y),
+                    IM_COL32(255, 255, 255, i ? 180 : 235), lines[i]);
+      y += text.y * 1.5f;
+    }
+  }
+
+ private:
+  Emulator* emulator_;
+};
+
 class GameVaultXeniaApp final : public ui::WindowedApp {
  public:
   static std::unique_ptr<ui::WindowedApp> Create(
@@ -532,7 +564,33 @@ void GameVaultXeniaApp::EmulatorThread() {
     StartTitle(cvars::target);
   } else if (UWP::HasGamePath()) {
     StartTitle(std::filesystem::u8path(UWP::ConsumeGamePath()));
+  } else {
+    app_context().CallInUIThread([this]() {
+      new NoGameMessage(imgui_drawer_.get(), emulator_.get());
+    });
   }
+
+  // The game's frame rate in the log every 30 s (test runs and player
+  // reports show the speed without a screenshot).
+  std::thread([this]() {
+    uint64_t last = 0;
+    auto last_time = std::chrono::steady_clock::now();
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(30));
+      auto* presenter = presenter_painting_;
+      if (!presenter || !emulator_->is_title_open()) {
+        continue;
+      }
+      const uint64_t frames = presenter->guest_output_refresh_count();
+      const auto now = std::chrono::steady_clock::now();
+      if (last && frames >= last) {
+        XELOGI("Game Vault: frame rate {:.1f}",
+               double(frames - last) /
+                   std::chrono::duration<double>(now - last_time).count());
+      }
+      last = frames, last_time = now;
+    }
+  }).detach();
 
   emulator_->WaitUntilExit();
 }
