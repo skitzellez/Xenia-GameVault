@@ -16,6 +16,7 @@
 #include <functional>
 #include <fstream>
 #include <map>
+#include <vector>
 #include <memory>
 #include <string>
 #include <thread>
@@ -35,6 +36,10 @@
 #include "xenia/base/profiling.h"
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
+#include "xenia/cpu/backend/backend.h"
+#include "xenia/cpu/backend/code_cache.h"
+#include "xenia/cpu/function.h"
+#include "xenia/cpu/processor.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/shader_storage.h"
@@ -59,6 +64,13 @@
 DEFINE_string(apu, "any", "Audio system. Use: [any, nop, xaudio2]", "APU");
 DEFINE_string(gpu, "any", "Graphics system. Use: [any, d3d12]", "GPU");
 DEFINE_string(hid, "any", "Input system. Use: [any, nop, xinput]", "HID");
+DEFINE_int32(gv_profile_ms, 0,
+             "Game Vault testing: every this many ms, note what each emulated "
+             "CPU is running, and log the top spots every 30 s (game "
+             "functions, or Xenia's own code as an offset in the exe). 0 = "
+             "off.",
+             "Logging");
+
 // (the in-game menu's resolution scale; Xenia's own settings)
 DECLARE_int32(draw_resolution_scale_x);
 DECLARE_int32(draw_resolution_scale_y);
@@ -224,6 +236,94 @@ class LoadMeter {
   uint64_t wall_ = 0, process_ = 0, thread_ = 0;
   uint64_t cpu_threads_[kernel::GuestScheduler::cpu_count()] = {};
   std::string per_cpu_;
+};
+
+// Game Vault testing (gv_profile_ms): where each emulated CPU spends its time.
+// The CPU's dispatch thread is stopped for a moment, its instruction pointer
+// noted, and it goes on; nothing is allocated while a thread is stopped (it may
+// hold the heap's lock). Every 30 s the most frequent spots per CPU go to the
+// log: a game function by its address, or Xenia's own code as an offset in
+// xeniacanary.exe (looked up in the .pdb on the PC).
+class CpuSampler {
+ public:
+  explicit CpuSampler(Emulator* emulator) : emulator_(emulator) {
+    for (auto& samples : samples_) samples.reserve(kMaxSamples);
+    HMODULE exe = GetModuleHandleW(nullptr);
+    MODULEINFO info = {};
+    if (exe && K32GetModuleInformation(GetCurrentProcess(), exe, &info,
+                                       sizeof(info))) {
+      exe_base_ = uint64_t(info.lpBaseOfDll);
+      exe_size_ = info.SizeOfImage;
+    }
+  }
+  void Run(int interval_ms) {
+    XELOGI("Game Vault profile: on, every {} ms", interval_ms);
+    auto next_report = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+      Sample();
+      if (std::chrono::steady_clock::now() >= next_report) {
+        Report();
+        next_report += std::chrono::seconds(30);
+      }
+    }
+  }
+
+ private:
+  static constexpr size_t kMaxSamples = 65536;
+  void Sample() {
+    auto* kernel = emulator_->kernel_state();
+    auto* scheduler = kernel ? kernel->guest_scheduler() : nullptr;
+    if (!scheduler || !emulator_->is_title_open()) return;
+    for (int i = 0; i < kernel::GuestScheduler::cpu_count(); ++i) {
+      auto* thread = scheduler->cpu_host_thread(i);
+      if (!thread || samples_[i].size() >= kMaxSamples) continue;
+      HANDLE handle = HANDLE(thread->native_handle());
+      if (SuspendThread(handle) == DWORD(-1)) continue;
+      CONTEXT context = {};
+      context.ContextFlags = CONTEXT_CONTROL;
+      const bool got = GetThreadContext(handle, &context) != 0;
+      ResumeThread(handle);
+      if (got) samples_[i].push_back(context.Rip);
+    }
+  }
+  void Report() {
+    auto* backend = emulator_->processor()
+                        ? emulator_->processor()->backend()
+                        : nullptr;
+    auto* code_cache = backend ? backend->code_cache() : nullptr;
+    for (int i = 0; i < kernel::GuestScheduler::cpu_count(); ++i) {
+      auto& samples = samples_[i];
+      if (samples.empty()) continue;
+      std::map<std::string, uint32_t> counts;
+      for (uint64_t pc : samples) {
+        std::string key;
+        if (exe_size_ && pc >= exe_base_ && pc < exe_base_ + exe_size_) {
+          // 64-byte steps: one spot per small stretch of Xenia's code
+          key = fmt::format("xenia +{:08X}", (pc - exe_base_) & ~uint64_t(63));
+        } else if (auto* function =
+                       code_cache ? code_cache->LookupFunction(pc) : nullptr) {
+          key = fmt::format("game  {:08X} {}", function->address(),
+                            function->name());
+        } else {
+          key = "other (system / driver / waiting)";
+        }
+        ++counts[key];
+      }
+      std::vector<std::pair<uint32_t, std::string>> top;
+      for (auto& [key, n] : counts) top.emplace_back(n, key);
+      std::sort(top.rbegin(), top.rend());
+      XELOGI("Game Vault profile: CPU {}: {} samples", i, samples.size());
+      for (size_t j = 0; j < top.size() && j < 12; ++j) {
+        XELOGI("Game Vault profile:   {:5.1f}% {}",
+               100.0 * top[j].first / samples.size(), top[j].second);
+      }
+      samples.clear();
+    }
+  }
+  Emulator* emulator_;
+  std::vector<uint64_t> samples_[kernel::GuestScheduler::cpu_count()];
+  uint64_t exe_base_ = 0, exe_size_ = 0;
 };
 
 // Game Vault's "Show frame rate" (fps=1 in the link that sent the game): the
@@ -939,6 +1039,12 @@ void GameVaultXeniaApp::EmulatorThread() {
     app_context().CallInUIThread([this]() {
       new NoGameMessage(imgui_drawer_.get(), emulator_.get());
     });
+  }
+
+  if (cvars::gv_profile_ms > 0) {
+    std::thread([this]() {
+      CpuSampler(emulator_.get()).Run(cvars::gv_profile_ms);
+    }).detach();
   }
 
   // The game's frame rate, CPU and GPU load and memory in the log every 30 s
