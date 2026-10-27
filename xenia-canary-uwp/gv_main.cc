@@ -8,6 +8,9 @@
 // window, LaunchPath; RelaunchTitle for the next game.
 
 #include <atomic>
+#include <cfloat>
+#include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <fstream>
@@ -34,6 +37,7 @@
 #include "xenia/hid/xinput/xinput_hid.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/xam_module.h"
+#include "third_party/imgui/imgui.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/immediate_drawer.h"
@@ -109,6 +113,15 @@ class Factory {
         }
       }
     }
+    // A name this app doesn't have (Edge's desktop default hid = "sdl" ended
+    // up in the config): all of the ones it has, rather than none.
+    if (instances.empty() && name != "nop") {
+      for (const auto& c : creators_) {
+        if (auto instance = c.instantiate(args...)) {
+          instances.emplace_back(std::move(instance));
+        }
+      }
+    }
     return instances;
   }
 
@@ -120,6 +133,147 @@ class Factory {
   std::vector<Creator> creators_;
 };
 }  // namespace
+
+// Game Vault's "Show frame rate" (fps=1 in the link that sent the game): the
+// game's frames per second (frames it sent to the screen, as in xemu's
+// counter), measured over half a second, small in the top left corner. Drawn
+// on the foreground list: no window, so the controller stays with the game.
+class FpsOverlay final : public ui::ImGuiDialog {
+ public:
+  FpsOverlay(ui::ImGuiDrawer* drawer, std::function<ui::Presenter*()> presenter)
+      : ui::ImGuiDialog(drawer), presenter_(std::move(presenter)) {}
+  void set_shown(bool shown) { shown_ = shown; }
+
+ protected:
+  void OnDraw(ImGuiIO& io) override {
+    ui::Presenter* presenter = presenter_();
+    if (!shown_ || !presenter) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const uint64_t frames = presenter->guest_output_refresh_count();
+    if (start_ == std::chrono::steady_clock::time_point()) {
+      start_ = now, frames_ = frames;
+    } else if (now - start_ >= std::chrono::milliseconds(500)) {
+      const double seconds =
+          std::chrono::duration<double>(now - start_).count();
+      snprintf(text_, sizeof(text_), "%.0f FPS",
+               double(frames - frames_) / seconds);
+      start_ = now, frames_ = frames;
+    }
+    if (!text_[0]) {
+      return;
+    }
+    ImDrawList* list = ImGui::GetForegroundDrawList();
+    ImFont* font = ImGui::GetFont();
+    const float size = ImGui::GetFontSize() * 1.6f;
+    const ImVec2 text = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text_);
+    const ImVec2 at(io.DisplaySize.x * 0.02f, io.DisplaySize.y * 0.03f);
+    const float pad = size * 0.3f;
+    list->AddRectFilled(ImVec2(at.x - pad, at.y - pad * 0.5f),
+                        ImVec2(at.x + text.x + pad, at.y + text.y + pad * 0.5f),
+                        IM_COL32(0, 0, 0, 150), pad);
+    list->AddText(font, size, at, IM_COL32(255, 255, 255, 235), text_);
+  }
+
+ private:
+  std::function<ui::Presenter*()> presenter_;
+  bool shown_ = false;
+  std::chrono::steady_clock::time_point start_;
+  uint64_t frames_ = 0;
+  char text_[16] = {};
+};
+
+// Game Vault: Xbox 360 title updates and DLC from the player's USB drive. Game Vault finds the packages (in "Game
+// Vault\xbox 360 add-ons" on the drive), copies the new ones into the shared folder and lists them in "xbox 360
+// add-ons.txt" there; each start installs the ones not installed yet, the way Xenia's own "Install content" does, and writes what happened
+// to "xbox 360 add-ons done.txt" there ("<size>\t<installed|failed ...>\t<path>" per package) for Game Vault to show.
+// A package that failed is tried again only when its size changes (a new copy), so a broken file costs one try.
+static void InstallGameVaultAddOns(Emulator* emulator) {
+  // what happened, also in Xenia's own LocalState (Device Portal can read that one; the shared folder's log it cannot)
+  std::ofstream trace(std::filesystem::path(xe::to_path(UWP::GetLocalState())) / "gv_addons.txt", std::ios::trunc);
+  const std::string games = UWP::GetPublisherGames();
+  trace << "shared folder: " << games << "\n";
+  if (games.empty()) return;
+  const auto shared = std::filesystem::path(xe::to_path(games));
+  const auto list = shared / "xbox 360 add-ons.txt", done = shared / "xbox 360 add-ons done.txt";
+  std::ifstream in(list);
+  trace << "list " << (in ? "read" : "not there") << "\n";
+  if (!in) return;
+  std::map<std::string, std::pair<uint64_t, std::string>> before;   // path -> size, result
+  if (std::ifstream d(done); d) {
+    std::string line;
+    while (std::getline(d, line)) {
+      const size_t a = line.find('\t'), b = a == std::string::npos ? a : line.find('\t', a + 1);
+      if (b == std::string::npos) continue;
+      before[line.substr(b + 1)] = {std::strtoull(line.substr(0, a).c_str(), nullptr, 10), line.substr(a + 1, b - a - 1)};
+    }
+  }
+  std::map<std::string, std::pair<uint64_t, std::string>> after;
+  // the results so far plus `extra`, written at once: a package that brings Xenia down is on file as failed before
+  // it is tried, so the next start skips it instead of going down again
+  auto write_done = [&](const std::string* extra, uint64_t extra_size) {
+    std::map<std::string, std::pair<uint64_t, std::string>> all = after;
+    for (auto& [path, v] : before) all.emplace(path, v);   // packages on a drive not plugged in now keep theirs
+    if (extra) all[*extra] = {extra_size, "failed (Xenia stopped while installing it)"};
+    std::ofstream out(done, std::ios::trunc);
+    for (auto& [path, v] : all) out << v.first << '\t' << v.second << '\t' << path << '\n';
+  };
+  std::string line;
+  int installed = 0, failed = 0;
+  while (std::getline(in, line)) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+    if (line.empty()) continue;
+    // "<copy in the shared folder>\t<the file on the USB drive>\t<size>": Xenia cannot open the drive's file by its
+    // path, so Game Vault copies it here first; results are kept under the drive's path
+    const size_t t1 = line.find('\t'), t2 = t1 == std::string::npos ? t1 : line.find('\t', t1 + 1);
+    if (t2 == std::string::npos) continue;
+    const std::string copy = line.substr(0, t1), original = line.substr(t1 + 1, t2 - t1 - 1);
+    const uint64_t size = std::strtoull(line.substr(t2 + 1).c_str(), nullptr, 10);
+    const auto path = std::filesystem::path(xe::to_path(copy));
+    std::error_code ec;
+    auto was = before.find(original);
+    trace << "line [" << line << "]\n";
+    if (was != before.end() && was->second.first == size) {
+      trace << "  done before: " << was->second.second << "\n";
+      after[original] = was->second;   // installed before, or failed with this very file
+      std::filesystem::remove(path, ec);
+      continue;
+    }
+    trace << "package " << original << " (copy " << copy << ", " << size << " bytes)\n";
+    if (!std::filesystem::exists(path, ec)) {   // Game Vault has not copied it yet
+      trace << "  copy not there\n";
+      continue;
+    }
+    std::string result;
+    write_done(&original, size);
+    XELOGI("Game Vault: installing add-on {}", original);
+    try {
+      Emulator::ContentInstallEntry entry(path);
+      const X_STATUS status = emulator->InstallContentPackage(path, entry);
+      if (status == X_STATUS_SUCCESS) {
+        result = "installed";
+        installed++;
+      } else {
+        result = fmt::format("failed {:08X}{}{}", status, entry.installation_error_message_.empty() ? "" : " ",
+                             entry.installation_error_message_);
+        failed++;
+      }
+    } catch (const std::exception& e) {
+      result = std::string("failed ") + e.what();
+      failed++;
+    } catch (...) {
+      result = "failed";
+      failed++;
+    }
+    XELOGI("Game Vault: add-on {}: {}", original, result);
+    trace << "  " << result << "\n";
+    after[original] = {size, result};
+    std::filesystem::remove(path, ec);   // the copy has done its job (the installed content is in Xenia now)
+  }
+  write_done(nullptr, 0);
+  if (installed || failed) XELOGI("Game Vault: add-ons: {} installed, {} failed", installed, failed);
+}
 
 class GameVaultXeniaApp final : public ui::WindowedApp {
  public:
@@ -158,6 +312,7 @@ class GameVaultXeniaApp final : public ui::WindowedApp {
   std::unique_ptr<ui::ImGuiDrawer> imgui_drawer_;
   std::unique_ptr<ui::ImmediateDrawer> immediate_drawer_;
   ui::Presenter* presenter_painting_ = nullptr;
+  FpsOverlay* fps_overlay_ = nullptr;  // owned by the ImGui drawer
   std::atomic<bool> emulator_ready_{false};
   std::atomic<bool> switching_{false};
   std::thread emulator_thread_;
@@ -291,7 +446,17 @@ void GameVaultXeniaApp::StartTitle(const std::filesystem::path& path) {
                       ->GetKernelModule<kernel::xam::XamModule>("xam.xex")) {
     xam->loader_data().host_path = xe::path_to_utf8(path);
   }
-  XELOGI("Game Vault: starting {}", path);
+  app_context().CallInUIThread([this]() {
+    if (!fps_overlay_ && UWP::GetShowFps()) {
+      fps_overlay_ = new FpsOverlay(imgui_drawer_.get(),
+                                    [this]() { return presenter_painting_; });
+    }
+    if (fps_overlay_) {
+      fps_overlay_->set_shown(UWP::GetShowFps());
+    }
+  });
+  XELOGI("Game Vault: starting {} (frame rate shown: {})", path,
+         UWP::GetShowFps());
   const X_STATUS result = emulator_->LaunchPath(path);
   if (XFAILED(result)) {
     XELOGE("Game Vault: starting {} failed: {:08X}", path, result);
@@ -316,8 +481,28 @@ void GameVaultXeniaApp::EmulatorThread() {
   }
 
   // A relaunch makes a new graphics system: its frames go to the window again.
+  // Edge binds controllers to the game's player slots only when a driver
+  // reports devices (SDL does on hotplug); XInput doesn't, so ask for it now
+  // and after each relaunch (new input drivers). Without it the game asks to
+  // reconnect the controller.
+  emulator_->input_system()->NotifyDevicesChanged();
+  {
+    // What the controllers look like to the game (a game that sees none asks
+    // to reconnect the controller).
+    auto* input = emulator_->input_system();
+    auto lock = input->lock();
+    for (uint32_t slot = 0; slot < 4; ++slot) {
+      hid::X_INPUT_CAPABILITIES caps = {};
+      const X_RESULT r = input->GetCapabilities(slot, 1, &caps);
+      XELOGI("Game Vault: controllers: {} driver(s), player {}: {} device(s) "
+             "bound, capabilities {:08X}",
+             input->driver_count(), slot + 1,
+             input->GetSlotBindings(slot).size(), r);
+    }
+  }
   emulator_->on_launch.AddListener([this](auto, const auto&) {
     app_context().CallInUIThread([this]() { SetupPresenter(); });
+    emulator_->input_system()->NotifyDevicesChanged();
   });
   emulator_->on_before_shutdown.AddListener([this]() {
     app_context().CallInUIThreadSynchronous([this]() { ShutdownPresenter(); });
@@ -327,6 +512,9 @@ void GameVaultXeniaApp::EmulatorThread() {
     app_context().CallInUIThread([]() { UWP::RequestQuit(); });
     return false;
   });
+
+  // Title updates and DLC Game Vault found on the USB drive
+  InstallGameVaultAddOns(emulator_.get());
 
   app_context().CallInUIThreadSynchronous([this]() {
     SetupPresenter();

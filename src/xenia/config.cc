@@ -737,8 +737,8 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     // WWE 2K17: freezes when a match starts (xenia-canary issue 235); custom wrestlers' pictures (drawn by the
     // game, then read back) are garbled without resolve read-back (same engine: game-compatibility issue 32).
     {"545408BA",
-     "[Memory]\nignore_offset_for_ranged_allocations = true\n"},
-    // (readback_resolve is on by default in Edge, which Blur needed too)
+     "[Memory]\nignore_offset_for_ranged_allocations = true\n"
+     "[GPU]\nreadback_resolve = \"fast\"\n"},
     // Naruto: The Broken Bond (+ demo): black, stretched textures
     // (xenia-canary game-compatibility issue 87, xenia-canary issue 906).
     {"55530825",
@@ -747,6 +747,9 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     {"5553882E",
      "[GPU]\nclear_memory_page_state = true\n"
      "gpu_allow_invalid_upload_range = true\n"},
+    // Blur: 3D far too bright without resolve read-back (its brightness adaptation reads the picture back; xenia-canary
+    // game-compatibility issue 549, label gpu-readback). A player's Blur also lost the graphics device (2026-10-19).
+    {"41560845", "[GPU]\nreadback_resolve = \"fast\"\n"},
 };
 
 void ApplyBuiltInGameConfig(const std::string_view title_id) {

@@ -331,6 +331,11 @@ class Presenter {
   void SetGuestOutputPaintConfigFromUIThread(
       const GuestOutputPaintConfig& new_config);
 
+  // Guest frames sent to the screen so far (Game Vault's frame rate counter).
+  uint64_t guest_output_refresh_count() const {
+    return guest_output_refresh_count_.load(std::memory_order_relaxed);
+  }
+
   void AddUIDrawerFromUIThread(UIDrawer* drawer, size_t z_order);
   void RemoveUIDrawerFromUIThread(UIDrawer* drawer);
 
