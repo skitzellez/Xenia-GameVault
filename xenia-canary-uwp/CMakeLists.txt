@@ -43,6 +43,9 @@ set_target_properties(xenia-uwp PROPERTIES
   VS_GLOBAL_AppxAutoIncrementPackageRevision false
   VS_GLOBAL_AppxBundle Never
 )
+# Game Vault: a map of every function's address, to name the profiler's spots
+# (gv_profile_ms) on the PC with xenia-edge-tools/sym.py
+target_link_options(xenia-uwp PRIVATE /MAP)
 
 # Relative deployment locations preserve the exact paths the Blades UI loads.
 file(GLOB_RECURSE _uwp_assets CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Assets/*")

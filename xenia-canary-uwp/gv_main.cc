@@ -94,6 +94,11 @@ DEFINE_transient_path(target, "",
                       "General");
 
 namespace xe {
+namespace gpu {
+namespace d3d12 {
+void GameVaultTakeSubmitStats(uint64_t out[7]);
+}  // namespace d3d12
+}  // namespace gpu
 namespace app {
 
 namespace {
@@ -1159,6 +1164,18 @@ void GameVaultXeniaApp::EmulatorThread() {
                double(frames - last) /
                    std::chrono::duration<double>(now - last_time).count(),
                cpu, gpu, memory_mb, load.PerCpu());
+        uint64_t st[7];
+        gpu::d3d12::GameVaultTakeSubmitStats(st);
+        const double secs =
+            std::chrono::duration<double>(now - last_time).count();
+        const auto pct = [secs](uint64_t ns) {
+          return 100.0 * double(ns) / (secs * 1e9);
+        };
+        XELOGI("Game Vault: GPU submits {:.0f}/s; time in replay {:.0f}%, "
+               "close {:.0f}%, execute {:.0f}%, signal {:.0f}%; waits for the "
+               "GPU {:.0f}/s, {:.0f}% of the time",
+               st[0] / secs, pct(st[1]), pct(st[2]), pct(st[3]), pct(st[4]),
+               st[5] / secs, pct(st[6]));
       }
       last = frames, last_time = now;
     }

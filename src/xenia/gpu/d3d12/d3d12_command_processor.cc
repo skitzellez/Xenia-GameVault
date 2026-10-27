@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include <cstdlib>
+#include <atomic>
+#include <chrono>
 #include <cstring>
 #include "xenia/apu/audio_system.h"
 #include "xenia/base/assert.h"
@@ -3536,6 +3538,20 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   return true;
 }
 
+// Game Vault: where the GPU thread's submissions spend their time (for the
+// frame rate log line): submissions, then ns in the replay of the recorded
+// commands, Close, ExecuteCommandLists and the fence signal, and waits for the
+// GPU to finish (count, ns).
+static std::atomic<uint64_t> gv_submit_stats[7];
+static uint64_t GvNowNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
+void GameVaultTakeSubmitStats(uint64_t out[7]) {
+  for (int i = 0; i < 7; ++i) out[i] = gv_submit_stats[i].exchange(0);
+}
+
 void D3D12CommandProcessor::CheckSubmissionCompletion(
     uint64_t await_submission) {
   if (await_submission >= GetCurrentSubmission()) {
@@ -3564,7 +3580,13 @@ void D3D12CommandProcessor::CheckSubmissionCompletion(
     await_submission = GetCurrentSubmission() - 1;
   }
 
+  const uint64_t gv_w0 = GvNowNs();
+  const uint64_t gv_done_before = GetCompletedSubmission();
   completion_timeline_->AwaitSubmissionAndUpdateCompleted(await_submission);
+  if (await_submission > gv_done_before) {
+    gv_submit_stats[5]++;
+    gv_submit_stats[6] += GvNowNs() - gv_w0;
+  }
 
   const uint64_t completed_submission = GetCompletedSubmission();
 
@@ -3850,13 +3872,21 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     // happens between Xenia submissions.
     ID3D12CommandAllocator* command_allocator =
         command_allocator_writable_first_->command_allocator;
+    const uint64_t gv_t0 = GvNowNs();
     command_allocator->Reset();
     command_list_->Reset(command_allocator, nullptr);
     deferred_command_list_.Execute(command_list_, command_list_1_,
                                    command_list_2_);
+    const uint64_t gv_t1 = GvNowNs();
     command_list_->Close();
+    const uint64_t gv_t2 = GvNowNs();
     ID3D12CommandList* execute_command_lists[] = {command_list_};
     direct_queue->ExecuteCommandLists(1, execute_command_lists);
+    const uint64_t gv_t3 = GvNowNs();
+    gv_submit_stats[0]++;
+    gv_submit_stats[1] += gv_t1 - gv_t0;
+    gv_submit_stats[2] += gv_t2 - gv_t1;
+    gv_submit_stats[3] += gv_t3 - gv_t2;
     command_allocator_writable_first_->last_usage_submission =
         GetCurrentSubmission();
     if (command_allocator_submitted_last_) {
@@ -3871,7 +3901,9 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     if (!command_allocator_writable_first_) {
       command_allocator_writable_last_ = nullptr;
     }
+    const uint64_t gv_t4 = GvNowNs();
     completion_timeline_->SignalAndAdvance(direct_queue);
+    gv_submit_stats[4] += GvNowNs() - gv_t4;
 
     submission_open_ = false;
 
