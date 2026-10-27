@@ -1541,6 +1541,10 @@ void GuestScheduler::RunLoop(int cpu_index) {
   XELOGI("GuestScheduler: CPU {} dispatch loop started", cpu_index);
 
   while (!shutting_down_.load()) {
+    // Game Vault: the in-game menu holds the game here, between fibers.
+    while (paused_.load(std::memory_order_relaxed) && !shutting_down_.load()) {
+      xe::threading::Sleep(std::chrono::milliseconds(10));
+    }
     if (cpu_index == 0) {
       ReportStatsIfDue();
     }

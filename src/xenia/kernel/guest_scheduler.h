@@ -53,6 +53,12 @@ class GuestScheduler {
   void EnsureStarted();
   void Shutdown();
 
+  // Game Vault: holds every CPU's dispatch loop between fibers (the in-game
+  // menu), so no guest thread runs until false again. Unlike suspending the
+  // host threads, nothing is stopped while holding a lock.
+  void SetPaused(bool paused) { paused_.store(paused); }
+  bool paused() const { return paused_.load(); }
+
   // Adds |thread| to its CPU's ready queue by guest affinity and wakes that
   // CPU. Idempotent and safe to call from any host thread. A thread already
   // running, queued, blocked or suspended is left alone.
@@ -340,6 +346,7 @@ class GuestScheduler {
   // Set once Shutdown has joined the dispatch threads and reclaimed every
   // leftover fiber. TerminateThread then frees threads directly.
   std::atomic<bool> stopped_{false};
+  std::atomic<bool> paused_{false};  // Game Vault: SetPaused
   // Until something has been dispatched, idle CPUs poll slowly instead of
   // sleeping so a title that never starts can be reported.
   std::atomic<bool> dispatched_any_{false};

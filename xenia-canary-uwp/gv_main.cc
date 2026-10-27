@@ -40,6 +40,7 @@
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/hid/xinput/xinput_hid.h"
+#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "third_party/imgui/imgui.h"
@@ -375,6 +376,123 @@ class NoGameMessage final : public ui::ImGuiDialog {
   Emulator* emulator_;
 };
 
+// View + Menu during a game: the game stops and a small menu comes up over
+// it. Resume (or B) goes on, "Show frame rate" turns the counter on or off,
+// "Back to Game Vault" leaves the game. While it is open the controller only
+// moves through the menu.
+class GameMenu final : public ui::ImGuiDialog {
+ public:
+  GameMenu(ui::ImGuiDrawer* drawer, Emulator* emulator,
+           std::function<void()> fps_changed, std::function<void()> leave,
+           GameMenu** open_menu)
+      : ui::ImGuiDialog(drawer),
+        emulator_(emulator),
+        fps_changed_(std::move(fps_changed)),
+        leave_(std::move(leave)),
+        open_menu_(open_menu) {
+    *open_menu_ = this;
+    if (auto* input = emulator_->input_system()) {
+      input->AddUIInputBlocker();
+    }
+    auto* scheduler = emulator_->kernel_state()
+                          ? emulator_->kernel_state()->guest_scheduler()
+                          : nullptr;
+    if (scheduler && kernel::GuestScheduler::enabled()) {
+      scheduler_ = scheduler;
+      scheduler_->SetPaused(true);
+      if (emulator_->audio_system()) emulator_->audio_system()->Pause();
+      if (emulator_->graphics_system()) emulator_->graphics_system()->Pause();
+    } else {
+      emulator_->Pause();
+    }
+    XELOGI("Game Vault: in-game menu open, game paused");
+  }
+  ~GameMenu() override {
+    if (scheduler_) {
+      if (emulator_->graphics_system()) emulator_->graphics_system()->Resume();
+      if (emulator_->audio_system()) emulator_->audio_system()->Resume();
+      scheduler_->SetPaused(false);
+    } else {
+      emulator_->Resume();
+    }
+    if (auto* input = emulator_->input_system()) {
+      input->RemoveUIInputBlocker();
+    }
+    *open_menu_ = nullptr;
+    XELOGI("Game Vault: in-game menu closed, game goes on");
+  }
+
+ protected:
+  void OnDraw(ImGuiIO& io) override {
+    ++frames_;
+    const float scale = io.DisplaySize.y / 1080.0f;
+    const ImVec2 size(520.0f * scale, 0.0f);
+    ImGui::SetNextWindowPos(
+        ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
+        ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.92f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f * scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                        ImVec2(28.0f * scale, 24.0f * scale));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f * scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                        ImVec2(10.0f * scale, 12.0f * scale));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(12, 18, 32, 255));
+    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(32, 44, 70, 255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(40, 110, 220, 255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(60, 140, 255, 255));
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, IM_COL32(120, 180, 255, 255));
+    ImGui::Begin("##gamevault_menu", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::SetWindowFontScale(1.6f * scale);
+    ImGui::TextUnformatted("Paused");
+    ImGui::SetWindowFontScale(1.25f * scale);
+    ImGui::Spacing();
+    const ImVec2 button(-FLT_MIN, 64.0f * scale);
+    if (frames_ == 1) {
+      ImGui::SetKeyboardFocusHere();
+    }
+    bool close = ImGui::Button("Resume", button);
+    const bool fps = UWP::GetShowFps();
+    if (ImGui::Button(fps ? "Show frame rate: On" : "Show frame rate: Off",
+                      button)) {
+      UWP::SetShowFps(!fps);
+      if (fps_changed_) fps_changed_();
+    }
+    bool leave = ImGui::Button("Back to Game Vault", button);
+    ImGui::SetWindowFontScale(1.0f * scale);
+    ImGui::TextDisabled("B: resume");
+    ImGui::End();
+    ImGui::PopStyleColor(5);
+    ImGui::PopStyleVar(4);
+    // (the View button that opened the menu is still down for a moment)
+    if (frames_ > 10 && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight)) {
+      close = true;
+    }
+    if (leave) {
+      XELOGI("Game Vault: in-game menu: back to Game Vault");
+      Close();
+      if (leave_) leave_();
+      return;
+    }
+    if (close) {
+      Close();
+    }
+  }
+
+ private:
+  Emulator* emulator_;
+  std::function<void()> fps_changed_;
+  std::function<void()> leave_;
+  GameMenu** open_menu_;
+  kernel::GuestScheduler* scheduler_ = nullptr;
+  uint64_t frames_ = 0;
+};
+
 class GameVaultXeniaApp final : public ui::WindowedApp {
  public:
   static std::unique_ptr<ui::WindowedApp> Create(
@@ -413,6 +531,7 @@ class GameVaultXeniaApp final : public ui::WindowedApp {
   std::unique_ptr<ui::ImmediateDrawer> immediate_drawer_;
   ui::Presenter* presenter_painting_ = nullptr;
   FpsOverlay* fps_overlay_ = nullptr;  // owned by the ImGui drawer
+  GameMenu* game_menu_ = nullptr;      // owned by the ImGui drawer, when open
   std::atomic<bool> emulator_ready_{false};
   std::atomic<bool> switching_{false};
   std::thread emulator_thread_;
@@ -624,9 +743,31 @@ void GameVaultXeniaApp::EmulatorThread() {
     SetupPresenter();
     UWP::RegisterInputSystem(emulator_->input_system());
     UWP::SetCompanionTick([this]() { CompanionTick(); });
-    // View + Menu held: back to Game Vault.
+    // ImGui reads the controller for the in-game menu
+    imgui_drawer_->LoadInputSystem(emulator_->input_system());
+    // View + Menu held: the in-game menu (Game Vault when no game runs).
     UWP::SetHostGuideAction([this]() {
-      UWP::ReturnToFrontend(imgui_drawer_.get());
+      if (game_menu_) {
+        return;
+      }
+      if (!emulator_->is_title_open() || switching_) {
+        UWP::ReturnToFrontend(imgui_drawer_.get());
+        return;
+      }
+      new GameMenu(
+          imgui_drawer_.get(), emulator_.get(),
+          [this]() {
+            if (!fps_overlay_ && UWP::GetShowFps()) {
+              fps_overlay_ = new FpsOverlay(
+                  imgui_drawer_.get(), [this]() { return presenter_painting_; },
+                  emulator_.get());
+            }
+            if (fps_overlay_) {
+              fps_overlay_->set_shown(UWP::GetShowFps());
+            }
+          },
+          [this]() { UWP::ReturnToFrontend(imgui_drawer_.get()); },
+          &game_menu_);
     });
   });
   emulator_ready_ = true;
