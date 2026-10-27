@@ -129,7 +129,10 @@ ReadbackResolveMode GetReadbackResolveMode() {
   const std::string& mode = cvars::readback_resolve;
   if (mode == "full") {
     return ReadbackResolveMode::kFull;
-  } else if (mode == "none") {
+  } else if (mode == "none" || mode == "false") {
+    // Game Vault: Edge's config migration (ui/config_helpers.h) saves "none" as
+    // "false" (and "fast" as "true"), which read as fast here before, so read-back
+    // could never be turned off (2026-10-27).
     return ReadbackResolveMode::kDisabled;
   } else {
     // Default to "fast" for any unrecognized value
