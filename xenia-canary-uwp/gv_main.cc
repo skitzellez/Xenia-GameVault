@@ -434,12 +434,11 @@ class GameMenu final : public ui::ImGuiDialog {
                           ? emulator_->kernel_state()->guest_scheduler()
                           : nullptr;
     if (scheduler && kernel::GuestScheduler::enabled()) {
-      // Sound and graphics first: they stop at a point of their own, which
-      // may need the game's threads to get to (the audio worker runs the
-      // game's sound callbacks), so those are held last.
+      // Only the game's threads are held: with them stopped no new sound or
+      // drawing comes, so both go quiet by themselves. (Xenia's own sound
+      // pause waits for its worker to notice, which a worker running late,
+      // as in GTA IV, never does: the menu froze the app.)
       scheduler_ = scheduler;
-      if (emulator_->audio_system()) emulator_->audio_system()->Pause();
-      if (emulator_->graphics_system()) emulator_->graphics_system()->Pause();
       scheduler_->SetPaused(true);
     } else {
       emulator_->Pause();
@@ -449,8 +448,6 @@ class GameMenu final : public ui::ImGuiDialog {
   ~GameMenu() override {
     if (scheduler_) {
       scheduler_->SetPaused(false);
-      if (emulator_->graphics_system()) emulator_->graphics_system()->Resume();
-      if (emulator_->audio_system()) emulator_->audio_system()->Resume();
     } else {
       emulator_->Resume();
     }
@@ -849,6 +846,9 @@ void GameVaultXeniaApp::EmulatorThread() {
     app_context().RequestDeferredQuit();
     return;
   }
+  // The hard drive's cache partitions and the other standard drives, as
+  // Edge's xenia_main.cc does (GTA IV streams the city through cache:).
+  emulator_->MountStandardDrives();
 
   // A relaunch makes a new graphics system: its frames go to the window again.
   // Edge binds controllers to the game's player slots only when a driver
