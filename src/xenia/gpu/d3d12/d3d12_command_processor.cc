@@ -51,10 +51,15 @@ DEFINE_string(d3d12_skip_vertex_shader, "",
               "Empty = off.",
               "D3D12");
 
-DEFINE_bool(d3d12_submit_on_primary_buffer_end, true,
+// Off on the Xbox: there each ExecuteCommandLists blocks for ~5 ms, so the
+// extra submissions cost more than the latency they save (GTA IV: 24 -> 30
+// fps, Game Vault 2026-10-27).
+DEFINE_bool(d3d12_submit_on_primary_buffer_end, !XE_PLATFORM_WINRT,
             "Submit the command list when a PM4 primary buffer ends if it's "
-            "possible to submit immediately to try to reduce frame latency.",
+            "possible to submit immediately to try to reduce frame latency. "
+            "Off by default on UWP, where each submission is costly.",
             "D3D12");
+UPDATE_from_bool(d3d12_submit_on_primary_buffer_end, 2026, 10, 27, 15, true);
 
 DECLARE_bool(clear_memory_page_state);
 DECLARE_bool(readback_resolve_half_pixel_offset);
