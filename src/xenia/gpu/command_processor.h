@@ -183,6 +183,8 @@ class CommandProcessor {
                        uint32_t n_values);
 
   bool is_paused() const { return paused_; }
+  // Game Vault: the GPU thread, for the frame rate counter's GPU load.
+  kernel::XHostThread* worker_thread() const { return worker_thread_.get(); }
   void Pause();
   void Resume();
 

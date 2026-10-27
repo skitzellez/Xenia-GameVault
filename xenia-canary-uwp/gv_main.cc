@@ -7,6 +7,7 @@
 // another while a game runs. The steps follow Edge's xenia_main.cc: Setup, SetupSubsystems, the presenter on the
 // window, LaunchPath; RelaunchTitle for the next game.
 
+#include <algorithm>
 #include <atomic>
 #include <cfloat>
 #include <chrono>
@@ -21,6 +22,9 @@
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/platform.h"
+#include "xenia/base/platform_win.h"
+
+#include <psapi.h>
 
 #include "xenia/apu/nop/nop_audio_system.h"
 #include "xenia/apu/xaudio2/xaudio2_audio_system.h"
@@ -32,6 +36,7 @@
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
 #include "xenia/emulator.h"
+#include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/hid/xinput/xinput_hid.h"
@@ -134,14 +139,72 @@ class Factory {
 };
 }  // namespace
 
+// CPU and GPU load for the frame rate counter and the log, since the last
+// Sample(). CPU: the whole app's CPU time over all the cores it can use. GPU:
+// how busy the thread that runs the 360's GPU (the command processor) is; near
+// 100% it never waits for the game, so the GPU side holds the game back.
+// Memory: the app's private bytes.
+class LoadMeter {
+ public:
+  explicit LoadMeter(Emulator* emulator) : emulator_(emulator) {}
+  void Sample(double* cpu, double* gpu, double* memory_mb) {
+    const uint64_t now = Now();
+    FILETIME c, e, k, u;
+    uint64_t process = 0, thread = 0;
+    if (GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) {
+      process = Ticks(k) + Ticks(u);
+    }
+    HANDLE gpu_thread = GpuThread();
+    if (gpu_thread && GetThreadTimes(gpu_thread, &c, &e, &k, &u)) {
+      thread = Ticks(k) + Ticks(u);
+    }
+    const double wall = double(now - wall_);
+    const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+    *cpu = wall_ && wall > 0
+               ? 100.0 * double(process - process_) / (wall * cores) : 0;
+    *gpu = wall_ && wall > 0 && thread >= thread_
+               ? std::min(100.0, 100.0 * double(thread - thread_) / wall) : 0;
+    PROCESS_MEMORY_COUNTERS_EX memory = {sizeof(memory)};
+    *memory_mb = K32GetProcessMemoryInfo(
+                     GetCurrentProcess(),
+                     reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),
+                     sizeof(memory))
+                     ? memory.PrivateUsage / (1024.0 * 1024.0) : 0;
+    wall_ = now, process_ = process, thread_ = thread;
+  }
+
+ private:
+  static uint64_t Ticks(const FILETIME& t) {  // 100 ns
+    return (uint64_t(t.dwHighDateTime) << 32) | t.dwLowDateTime;
+  }
+  static uint64_t Now() {
+    FILETIME t;
+    GetSystemTimeAsFileTime(&t);
+    return Ticks(t);
+  }
+  HANDLE GpuThread() const {
+    auto* graphics = emulator_ ? emulator_->graphics_system() : nullptr;
+    auto* processor = graphics ? graphics->command_processor() : nullptr;
+    auto* worker = processor ? processor->worker_thread() : nullptr;
+    auto* thread = worker ? worker->thread() : nullptr;
+    return thread ? HANDLE(thread->native_handle()) : nullptr;
+  }
+  Emulator* emulator_;
+  uint64_t wall_ = 0, process_ = 0, thread_ = 0;
+};
+
 // Game Vault's "Show frame rate" (fps=1 in the link that sent the game): the
 // game's frames per second (frames it sent to the screen, as in xemu's
-// counter), measured over half a second, small in the top left corner. Drawn
+// counter) with the CPU and GPU load (LoadMeter), measured over half a
+// second, small in the top left corner. Drawn
 // on the foreground list: no window, so the controller stays with the game.
 class FpsOverlay final : public ui::ImGuiDialog {
  public:
-  FpsOverlay(ui::ImGuiDrawer* drawer, std::function<ui::Presenter*()> presenter)
-      : ui::ImGuiDialog(drawer), presenter_(std::move(presenter)) {}
+  FpsOverlay(ui::ImGuiDrawer* drawer, std::function<ui::Presenter*()> presenter,
+             Emulator* emulator)
+      : ui::ImGuiDialog(drawer),
+        presenter_(std::move(presenter)),
+        load_(emulator) {}
   void set_shown(bool shown) { shown_ = shown; }
 
  protected:
@@ -154,11 +217,15 @@ class FpsOverlay final : public ui::ImGuiDialog {
     const uint64_t frames = presenter->guest_output_refresh_count();
     if (start_ == std::chrono::steady_clock::time_point()) {
       start_ = now, frames_ = frames;
+      double cpu, gpu, memory_mb;
+      load_.Sample(&cpu, &gpu, &memory_mb);
     } else if (now - start_ >= std::chrono::milliseconds(500)) {
       const double seconds =
           std::chrono::duration<double>(now - start_).count();
-      snprintf(text_, sizeof(text_), "%.0f FPS",
-               double(frames - frames_) / seconds);
+      double cpu, gpu, memory_mb;
+      load_.Sample(&cpu, &gpu, &memory_mb);
+      snprintf(text_, sizeof(text_), "%.0f FPS  CPU %.0f%%  GPU %.0f%%",
+               double(frames - frames_) / seconds, cpu, gpu);
       start_ = now, frames_ = frames;
     }
     if (!text_[0]) {
@@ -181,7 +248,8 @@ class FpsOverlay final : public ui::ImGuiDialog {
   bool shown_ = false;
   std::chrono::steady_clock::time_point start_;
   uint64_t frames_ = 0;
-  char text_[16] = {};
+  LoadMeter load_;
+  char text_[48] = {};
 };
 
 // Game Vault: Xbox 360 title updates and DLC from the player's USB drive. Game Vault finds the packages (in "Game
@@ -481,7 +549,8 @@ void GameVaultXeniaApp::StartTitle(const std::filesystem::path& path) {
   app_context().CallInUIThread([this]() {
     if (!fps_overlay_ && UWP::GetShowFps()) {
       fps_overlay_ = new FpsOverlay(imgui_drawer_.get(),
-                                    [this]() { return presenter_painting_; });
+                                    [this]() { return presenter_painting_; },
+                                    emulator_.get());
     }
     if (fps_overlay_) {
       fps_overlay_->set_shown(UWP::GetShowFps());
@@ -570,9 +639,10 @@ void GameVaultXeniaApp::EmulatorThread() {
     });
   }
 
-  // The game's frame rate in the log every 30 s (test runs and player
-  // reports show the speed without a screenshot).
+  // The game's frame rate, CPU and GPU load and memory in the log every 30 s
+  // (test runs and player reports show the speed without a screenshot).
   std::thread([this]() {
+    LoadMeter load(emulator_.get());
     uint64_t last = 0;
     auto last_time = std::chrono::steady_clock::now();
     for (;;) {
@@ -583,10 +653,14 @@ void GameVaultXeniaApp::EmulatorThread() {
       }
       const uint64_t frames = presenter->guest_output_refresh_count();
       const auto now = std::chrono::steady_clock::now();
+      double cpu, gpu, memory_mb;
+      load.Sample(&cpu, &gpu, &memory_mb);
       if (last && frames >= last) {
-        XELOGI("Game Vault: frame rate {:.1f}",
+        XELOGI("Game Vault: frame rate {:.1f}, CPU {:.0f}%, GPU {:.0f}%, "
+               "memory {:.0f} MB",
                double(frames - last) /
-                   std::chrono::duration<double>(now - last_time).count());
+                   std::chrono::duration<double>(now - last_time).count(),
+               cpu, gpu, memory_mb);
       }
       last = frames, last_time = now;
     }
