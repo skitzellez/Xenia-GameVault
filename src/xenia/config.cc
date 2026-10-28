@@ -736,9 +736,12 @@ struct BuiltInGameConfig {
 const BuiltInGameConfig kBuiltInGameConfigs[] = {
     // WWE 2K17: freezes when a match starts (xenia-canary issue 235); custom wrestlers' pictures (drawn by the
     // game, then read back) are garbled without resolve read-back (same engine: game-compatibility issue 32).
+    // Wrestlers lost clothes, hair and lower legs (heads floating, referee invisible) with forward-only shaders
+    // translated without the main loop (user check, 2026-10-27: whole bodies with it off for this game).
     {"545408BA",
      "[Memory]\nignore_offset_for_ranged_allocations = true\n"
-     "[GPU]\nreadback_resolve = \"fast\"\n"},
+     "[GPU]\nreadback_resolve = \"fast\"\n"
+     "[GPU.Debug]\ndxbc_forward_jumps_without_loop = false\n"},
     // Naruto: The Broken Bond (+ demo): black, stretched textures
     // (xenia-canary game-compatibility issue 87, xenia-canary issue 906).
     {"55530825",
