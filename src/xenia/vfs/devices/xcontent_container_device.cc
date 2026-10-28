@@ -8,6 +8,7 @@
  */
 
 #include "xenia/vfs/devices/xcontent_container_device.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/vfs/devices/xcontent_devices/stfs_container_device.h"
 #include "xenia/vfs/devices/xcontent_devices/svod_container_device.h"
@@ -18,6 +19,20 @@ namespace vfs {
 std::unique_ptr<XContentContainerDevice>
 XContentContainerDevice::CreateContentDevice(
     const std::string_view mount_path, const std::filesystem::path& host_path) {
+  // Game Vault: a package read from the network (an Xbox Live Arcade game): its header through the reader
+  if (xe::filesystem::GetNetFile(host_path)) {
+    const auto header = ReadContainerHeader(host_path);
+    if (!header || !header->content_header.is_magic_valid()) {
+      return nullptr;
+    }
+    if (header->content_metadata.volume_type == XContentVolumeType::kStfs) {
+      return std::make_unique<StfsContainerDevice>(mount_path, host_path);
+    }
+    if (header->content_metadata.volume_type == XContentVolumeType::kSvod) {
+      return std::make_unique<SvodContainerDevice>(mount_path, host_path);
+    }
+    return nullptr;
+  }
   if (!std::filesystem::exists(host_path)) {
     XELOGE("Path to XContent container does not exist: {}",
            xe::strip_pii(xe::path_to_utf8(host_path)));
@@ -75,6 +90,22 @@ XContentContainerDevice::XContentContainerDevice(
 XContentContainerDevice::~XContentContainerDevice() {}
 
 bool XContentContainerDevice::Initialize() {
+  // Game Vault: a package read from the network: header and size through the reader
+  if (auto net = xe::filesystem::GetNetFile(host_path_)) {
+    files_total_size_ = net->size();
+    auto header = ReadContainerHeader(host_path_);
+    if (!header || !header->content_header.is_magic_valid()) {
+      XELOGE("Error reading XContent header from the network");
+      return false;
+    }
+    header_ = std::move(header);
+    SetupContainer();
+    if (LoadHostFiles() != Result::kSuccess) {
+      XELOGE("Error loading XContent host files.");
+      return false;
+    }
+    return Read() == Result::kSuccess;
+  }
   if (!std::filesystem::exists(host_path_)) {
     XELOGE("Path to XContent container does not exist: {}",
            xe::strip_pii(xe::path_to_utf8(host_path_)));
@@ -114,6 +145,15 @@ bool XContentContainerDevice::Initialize() {
 std::unique_ptr<XContentContainerHeader>
 XContentContainerDevice::ReadContainerHeader(
     const std::filesystem::path& file_path) {
+  // Game Vault: a package read from the network
+  if (auto net = xe::filesystem::GetNetFile(file_path)) {
+    auto header = std::make_unique<XContentContainerHeader>();
+    if (net->size() < sizeof(XContentContainerHeader) ||
+        !net->Read(0, header.get(), sizeof(XContentContainerHeader))) {
+      return {};
+    }
+    return header;
+  }
   if (!std::filesystem::exists(file_path)) {
     return {};
   }

@@ -594,6 +594,23 @@ std::string Open(const std::string& url, const std::string& cred_file) {
   // Its whole folder is read over the network; the program keeps its place in it.
   size_t cut = path.find_last_of('\\');
   std::string program = path.substr(cut == std::string::npos ? 0 : cut + 1);
+  // a package with no extension that is the whole game in one file (an Xbox Live Arcade game, content type
+  // 0x000D0000, in "<title ID>\000D0000\"): read as one file like a disc image, not as a folder game (the
+  // package loader cannot open a file in a folder game: "Path to XContent container does not exist", 2026-10-27)
+  if (cut != std::string::npos && program.find('.') == std::string::npos) {
+    auto one = std::make_shared<SmbGame>(api, cred, path);
+    uint8_t head[0x348] = {};
+    if (one->Connect() && one->size() >= sizeof(head) && one->Read(0, head, sizeof(head)) &&
+        (!std::memcmp(head, "LIVE", 4) || !std::memcmp(head, "PIRS", 4) || !std::memcmp(head, "CON ", 4)) &&
+        (uint32_t(head[0x344]) << 24 | uint32_t(head[0x345]) << 16 | uint32_t(head[0x346]) << 8 | head[0x347]) ==
+            0x000D0000) {
+      XELOGI("network: {}\\{}\\{} is an Xbox Live Arcade package, {} bytes", server, share, path, one->size());
+      std::string stand_in = "N:\\Game Vault network\\" + PlainName(program);
+      xe::filesystem::SetNetFile(std::filesystem::path(Wide(stand_in)), one);
+      Wipe(cred.password);
+      return stand_in;
+    }
+  }
   if (cut != std::string::npos &&
       (!_stricmp(program.c_str(), "default.xex") || program.find('.') == std::string::npos)) {
     std::string base = path.substr(0, cut);
