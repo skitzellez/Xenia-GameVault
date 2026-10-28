@@ -32,8 +32,13 @@ std::filesystem::path GetBundledDataPath(const std::string& subdirectory);
 // Extract title_id from a game file and load its config overrides.
 // Returns the title_id if successful, 0 otherwise.
 uint32_t LoadGameConfigForFile(const std::filesystem::path& game_path);
-// Game Vault (Xbox app): a title's config file, else its built-in settings, at title load.
-void LoadGameConfig(const std::string_view title_id);
+// Game Vault (Xbox app): a title's config file, else its built-in settings, at title load; then the player's
+// choices from Game Vault's 360 game settings page. |arcade|: an Xbox Live Arcade package, which plays as the full
+// game unless a setting says otherwise.
+void LoadGameConfig(const std::string_view title_id, bool arcade = false);
+// Game Vault: the "xenia-config" folder in Game Vault's shared folder, where its 360 game settings page writes
+// <title id>.config.toml for a game the player changed. Empty: not used.
+extern std::filesystem::path gamevault_settings_folder;
 void SaveConfig();
 void SaveGameConfig(uint32_t title_id, const toml::table& config_table);
 // Resolves a possibly dotted category ("GPU.Debug") to a nested table.

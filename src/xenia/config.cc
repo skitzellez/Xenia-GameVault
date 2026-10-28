@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <functional>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -777,14 +778,117 @@ void ApplyBuiltInGameConfig(const std::string_view title_id) {
 }
 
 
+std::filesystem::path gamevault_settings_folder;
+
+static cvar::IConfigVar* FindConfigVar(std::string_view category, std::string_view name) {
+  for (auto& it : *cvar::ConfigVars) {
+    auto config_var = static_cast<cvar::IConfigVar*>(it.second);
+    if (config_var->category() == category && config_var->name() == name) {
+      return config_var;
+    }
+  }
+  return nullptr;
+}
+
+// A home-network or this-device IPv4 address (10/8, 172.16/12, 192.168/16, 127/8): where an XLink Kai engine may be.
+static bool PrivateIPv4(std::string_view s) {
+  int part[4], n = 0;
+  size_t i = 0;
+  while (n < 4) {
+    int v = 0, digits = 0;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9' && digits < 3) {
+      v = v * 10 + (s[i++] - '0');
+      digits++;
+    }
+    if (!digits || v > 255) return false;
+    part[n++] = v;
+    if (n < 4) {
+      if (i >= s.size() || s[i] != '.') return false;
+      i++;
+    }
+  }
+  if (i != s.size()) return false;
+  return part[0] == 10 || part[0] == 127 || (part[0] == 172 && part[1] >= 16 && part[1] <= 31) ||
+         (part[0] == 192 && part[1] == 168);
+}
+
+// The player's choices for one game from Game Vault's 360 game settings page (x360_game.inc in Game Vault). Only
+// the settings that page offers are taken, each only with a value it offers: the file sits in a folder other apps
+// of the same publisher can write, so nothing else in it may change Xenia.
+static void ApplyGameVaultSettings(const std::string_view title_id) {
+  if (gamevault_settings_folder.empty()) return;
+  const auto path = gamevault_settings_folder / (std::string(title_id) + game_config_suffix);
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec)) return;
+  toml::table table;
+  try {
+    table = ParseFile(path);
+  } catch (const std::exception& e) {
+    XELOGE("Game Vault: 360 game settings for {} could not be read: {}", title_id, e.what());
+    return;
+  }
+  auto int_in = [](const toml::node* n, std::initializer_list<int64_t> ok) {
+    auto v = n->value<int64_t>();
+    return v && std::find(ok.begin(), ok.end(), *v) != ok.end();
+  };
+  auto text_in = [](const toml::node* n, std::initializer_list<std::string_view> ok) {
+    auto v = n->value<std::string>();
+    return v && std::find(ok.begin(), ok.end(), std::string_view(*v)) != ok.end();
+  };
+  struct Allowed {
+    const char* category;
+    const char* name;
+    std::function<bool(const toml::node*)> valid;
+  };
+  const Allowed allowed[] = {
+      {"GPU", "draw_resolution_scale_x", [&](const toml::node* n) { return int_in(n, {1, 2, 3}); }},
+      {"GPU", "draw_resolution_scale_y", [&](const toml::node* n) { return int_in(n, {1, 2, 3}); }},
+      {"GPU", "framerate_limit", [&](const toml::node* n) { return int_in(n, {0, 30, 60}); }},
+      {"GPU", "vsync", [](const toml::node* n) { return n->is_boolean(); }},
+      {"GPU", "readback_resolve", [&](const toml::node* n) { return text_in(n, {"fast", "full", "none"}); }},
+      {"Content", "license_mask", [&](const toml::node* n) { return int_in(n, {0, 1}); }},
+      {"Console", "user_language",
+       [&](const toml::node* n) { return int_in(n, {1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 16}); }},
+      {"Network", "systemlink_transport", [&](const toml::node* n) { return text_in(n, {"tunnel", "kai", "off"}); }},
+      {"Network", "systemlink_kai_engine",
+       [](const toml::node* n) {
+         auto v = n->value<std::string>();
+         return v && PrivateIPv4(*v);
+       }},
+  };
+  int taken = 0, dropped = 0;
+  for (const auto& a : allowed) {
+    const auto node = table.at_path(toml::path(std::string(a.category) + "." + a.name));
+    if (!node) continue;
+    auto* config_var = FindConfigVar(a.category, a.name);
+    if (config_var && a.valid(node.node())) {
+      config_var->LoadGameConfigValue(node.node());
+      taken++;
+    } else {
+      XELOGW("Game Vault: 360 game settings for {}: {}.{} left out (not a value the page offers)", title_id,
+             a.category, a.name);
+      dropped++;
+    }
+  }
+  XELOGI("Game Vault: 360 game settings for {}: {} taken, {} left out", title_id, taken, dropped);
+}
+
 // Game Vault (Xbox app): at title load, the game's own config file, or the
-// built-in settings for games known to need them.
-void LoadGameConfig(const std::string_view title_id) {
+// built-in settings for games known to need them, then the player's choices from Game Vault.
+void LoadGameConfig(const std::string_view title_id, bool arcade) {
   if (!cvar::ConfigVars) {
     return;
   }
   for (auto& it : *cvar::ConfigVars) {
     static_cast<cvar::IConfigVar*>(it.second)->ClearGameConfigValue();
+  }
+  if (arcade) {
+    // An Arcade package the player has is the full game: without a licence it plays as its trial
+    if (auto* license = FindConfigVar("Content", "license_mask")) {
+      const auto full = toml::parse("[Content]\nlicense_mask = 1\n");
+      license->LoadGameConfigValue(full.at_path("Content.license_mask").node());
+      XELOGI("Game Vault: Xbox Live Arcade game, played as the full game");
+    }
   }
   uint32_t id = 0;
   std::from_chars(title_id.data(), title_id.data() + title_id.size(), id, 16);
@@ -803,6 +907,7 @@ void LoadGameConfig(const std::string_view title_id) {
   } else {
     ApplyBuiltInGameConfig(title_id);
   }
+  ApplyGameVaultSettings(title_id);
 }
 
 }  // namespace config

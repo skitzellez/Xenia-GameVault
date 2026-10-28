@@ -941,6 +941,10 @@ bool GameVaultXeniaApp::OnInitialize() {
   storage_root = std::filesystem::absolute(storage_root);
   config::SetupConfig(storage_root);
   XELOGI("Storage root: {}", storage_root);
+  // the 360 game settings Game Vault writes for a game the player changed (read at title load, config.cc)
+  if (const std::string games = UWP::GetPublisherGames(); !games.empty()) {
+    config::gamevault_settings_folder = std::filesystem::path(xe::to_path(games)) / "xenia-config";
+  }
 
   std::filesystem::path content_root = cvars::content_root;
   if (content_root.empty()) {

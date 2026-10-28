@@ -2366,7 +2366,12 @@ X_STATUS Emulator::PrepareLaunch(const std::filesystem::path& path,
   // Game Vault: the game's own config file, or the built-in settings for
   // games known to need them (the Xbox app has no per-file launch step).
   if (title_id_.value()) {
-    config::LoadGameConfig(fmt::format("{:08X}", title_id_.value()));
+    auto* package = dynamic_cast<vfs::XContentContainerDevice*>(
+        file_system_->GetDevice("\\Device\\Package_0"));
+    const bool arcade =
+        package && package->content_type() ==
+                       static_cast<uint32_t>(XContentType::kArcadeTitle);
+    config::LoadGameConfig(fmt::format("{:08X}", title_id_.value()), arcade);
   }
 #endif
 
