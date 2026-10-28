@@ -51,6 +51,7 @@
 #include "xenia/hid/xinput/xinput_hid.h"
 #include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xam/content_manager.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "third_party/imgui/imgui.h"
 #include "xenia/ui/imgui_dialog.h"
@@ -510,6 +511,40 @@ class FpsOverlay final : public ui::ImGuiDialog {
 // add-ons.txt" there; each start installs the ones not installed yet, the way Xenia's own "Install content" does, and writes what happened
 // to "xbox 360 add-ons done.txt" there ("<size>\t<installed|failed ...>\t<path>" per package) for Game Vault to show.
 // A package that failed is tried again only when its size changes (a new copy), so a broken file costs one try.
+// A title update just installed replaces the ones before it for the same disc (media ID) with the same or a lower
+// version: a player who swaps in another update would otherwise keep every one side by side.
+static void RemoveOlderTitleUpdates(Emulator* emulator, const Emulator::ContentInstallEntry& entry,
+                                    std::ofstream& trace) {
+  using xe::kernel::xam::ContentManager;
+  const auto folder = emulator->content_root() / entry.data_installation_path_;
+  std::error_code ec;
+  // the game's patch: default.xexp, or one per disc of a multi-disc game
+  auto patch_of = [&](const std::filesystem::path& dir, uint32_t& media, uint32_t& version) {
+    if (ContentManager::ReadXexExecutionInfo(dir / "default.xexp", media, version)) return true;
+    for (const auto& e : std::filesystem::recursive_directory_iterator(dir, ec))
+      if (e.path().extension() == ".xexp" && ContentManager::ReadXexExecutionInfo(e.path(), media, version))
+        return true;
+    return false;
+  };
+  uint32_t media = 0, version = 0;
+  if (!patch_of(folder, media, version)) return;
+  const auto type_folder = folder.parent_path();
+  const auto headers = type_folder.parent_path() / "Headers" / type_folder.filename();
+  std::vector<std::filesystem::path> older;
+  for (const auto& e : std::filesystem::directory_iterator(type_folder, ec)) {
+    uint32_t m = 0, v = 0;
+    if (e.is_directory() && e.path().filename() != folder.filename() && patch_of(e.path(), m, v) && m == media &&
+        v <= version)
+      older.push_back(e.path());
+  }
+  for (const auto& p : older) {
+    trace << "  older update " << xe::path_to_utf8(p.filename()) << " removed\n";
+    XELOGI("Game Vault: older title update {} removed", xe::path_to_utf8(p.filename()));
+    std::filesystem::remove_all(p, ec);
+    std::filesystem::remove(headers / std::filesystem::path(p.filename()).concat(".header"), ec);
+  }
+}
+
 static void InstallGameVaultAddOns(Emulator* emulator) {
   // what happened, also in Xenia's own LocalState (Device Portal can read that one; the shared folder's log it cannot)
   std::ofstream trace(std::filesystem::path(xe::to_path(UWP::GetLocalState())) / "gv_addons.txt", std::ios::trunc);
@@ -528,6 +563,25 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
       const size_t a = line.find('\t'), b = a == std::string::npos ? a : line.find('\t', a + 1);
       if (b == std::string::npos) continue;
       before[line.substr(b + 1)] = {std::strtoull(line.substr(0, a).c_str(), nullptr, 10), line.substr(a + 1, b - a - 1)};
+    }
+  }
+  // Up to 1.1.8.122 the header was not read first, so every add-on was unpacked loose into the content folder (a
+  // ".header" there gives it away) and still reported "installed". Those files go and those results are forgotten:
+  // Game Vault copies the packages again and the next start installs them where games look.
+  {
+    const auto root = emulator->content_root();
+    std::error_code ec;
+    if (std::filesystem::exists(root / ".header", ec)) {
+      for (const auto& e : std::filesystem::directory_iterator(root, ec)) {
+        const std::string name = xe::path_to_utf8(e.path().filename());
+        // a profile's content (or the shared 0000000000000000): where packages belong
+        if (name.size() == 16 && name.find_first_not_of("0123456789ABCDEFabcdef") == std::string::npos) continue;
+        std::filesystem::remove_all(e.path(), ec);
+        trace << "loose " << name << " removed\n";
+      }
+      for (auto it = before.begin(); it != before.end();)
+        it = it->second.second == "installed" ? before.erase(it) : std::next(it);
+      XELOGI("Game Vault: add-ons: loose files from the old install removed; installed add-ons go in again");
     }
   }
   std::map<std::string, std::pair<uint64_t, std::string>> after;
@@ -571,10 +625,15 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
     XELOGI("Game Vault: installing add-on {}", original);
     try {
       Emulator::ContentInstallEntry entry(path);
-      const X_STATUS status = emulator->InstallContentPackage(path, entry);
+      // where it goes (<profile>\<title ID>\<type>\<name>) comes from its header; without it the package was
+      // unpacked loose into the content folder, where no game looks
+      X_STATUS status = emulator->ProcessContentPackageHeader(path, entry);
+      if (status == X_STATUS_SUCCESS) status = emulator->InstallContentPackage(path, entry);
       if (status == X_STATUS_SUCCESS) {
         result = "installed";
         installed++;
+        trace << "  into " << xe::path_to_utf8(entry.data_installation_path_) << "\n";
+        if (entry.content_type_ == XContentType::kInstaller) RemoveOlderTitleUpdates(emulator, entry, trace);
       } else {
         result = fmt::format("failed {:08X}{}{}", status, entry.installation_error_message_.empty() ? "" : " ",
                              entry.installation_error_message_);

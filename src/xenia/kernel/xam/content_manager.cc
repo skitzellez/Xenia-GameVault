@@ -10,6 +10,7 @@
 #include "xenia/kernel/xam/content_manager.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/filesystem.h"
@@ -440,6 +441,52 @@ X_RESULT ContentManager::WriteContentHeaderFile(const uint64_t xuid,
     return X_STATUS_SUCCESS;
   }
   return X_STATUS_NO_SUCH_FILE;
+}
+
+bool ContentManager::ReadPackageExecutionInfo(
+    const uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data,
+    const std::string& relative_file, uint32_t& media_id, uint32_t& version) {
+  std::filesystem::path package_path;
+  if (ResolvePackagePath(xuid, data, package_path)) {
+    return false;
+  }
+  return ReadXexExecutionInfo(package_path / xe::to_path(relative_file),
+                              media_id, version);
+}
+
+bool ContentManager::ReadXexExecutionInfo(const std::filesystem::path& path,
+                                          uint32_t& media_id,
+                                          uint32_t& version) {
+  auto file = xe::filesystem::OpenFile(path, "rb");
+  if (!file) {
+    return false;
+  }
+  // XEX2 header: optional header count at 0x14, then (key, value) pairs; the
+  // execution info (0x00040006) value is the offset of its 0x18 bytes.
+  std::vector<uint8_t> head(0x10000);
+  head.resize(fread(head.data(), 1, head.size(), file));
+  fclose(file);
+  auto be32 = [&](size_t at) {
+    return uint32_t(head[at]) << 24 | uint32_t(head[at + 1]) << 16 |
+           uint32_t(head[at + 2]) << 8 | uint32_t(head[at + 3]);
+  };
+  if (head.size() < 0x18 || std::memcmp(head.data(), "XEX2", 4)) {
+    return false;
+  }
+  const uint32_t count = be32(0x14);
+  for (uint32_t i = 0; i < count && 0x18 + i * 8 + 8 <= head.size(); i++) {
+    if (be32(0x18 + i * 8) != 0x00040006) {
+      continue;
+    }
+    const uint32_t at = be32(0x18 + i * 8 + 4);
+    if (size_t(at) + 8 > head.size()) {
+      return false;
+    }
+    media_id = be32(at);
+    version = be32(at + 4);
+    return true;
+  }
+  return false;
 }
 
 X_RESULT ContentManager::ReadContentHeaderFile(

@@ -789,7 +789,43 @@ X_RESULT KernelState::ApplyTitleUpdate(
     return X_STATUS_SUCCESS;
   }
 
-  auto patch_module = LoadTitleUpdate(&title_updates.front(), title_module);
+  // Game Vault: a player who swaps in another update has several installed
+  // side by side (each under its own name); take the one made for this disc
+  // (media ID) with the highest version, not whichever the folder lists first.
+  const xam::XCONTENT_AGGREGATE_DATA* title_update = &title_updates.front();
+  if (const auto* exec = title_module->xex_module()->opt_execution_info()) {
+    const uint32_t game_media = exec->media_id;
+    // the patch next to the game's XEX in the update, as LoadTitleUpdate finds it
+    std::string xex_name = title_module->path();
+    if (!title_mount_path_.empty() && xex_name.starts_with(title_mount_path_)) {
+      xex_name = xex_name.substr(title_mount_path_.size());
+    }
+    while (!xex_name.empty() && (xex_name[0] == '\\' || xex_name[0] == '/')) {
+      xex_name.erase(0, 1);
+    }
+    xex_name += 'p';
+    uint32_t best_version = 0;
+    bool found = false;
+    for (const auto& update : title_updates) {
+      uint32_t media_id = 0, version = 0;
+      const bool read = content_manager()->ReadPackageExecutionInfo(
+          0, update, xex_name, media_id, version);
+      XELOGI("Title update {}: media {:08X}, version {:08X}{}",
+             update.file_name(), media_id, version,
+             read ? "" : " (no " + xex_name + ")");
+      if (read && media_id == game_media &&
+          (!found || version > best_version)) {
+        title_update = &update;
+        best_version = version;
+        found = true;
+      }
+    }
+    XELOGI("Title update: {} installed for {:08X}, game media {:08X} -> {}{}",
+           title_updates.size(), title_module->title_id(), game_media,
+           title_update->file_name(), found ? "" : " (none made for this disc)");
+  }
+
+  auto patch_module = LoadTitleUpdate(title_update, title_module);
   if (!patch_module) {
     return X_STATUS_SUCCESS;
   }

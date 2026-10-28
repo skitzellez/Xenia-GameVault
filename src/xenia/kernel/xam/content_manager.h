@@ -261,6 +261,14 @@ class ContentManager {
                                  const uint64_t xuid, const uint32_t title_id,
                                  XContentType content_type,
                                  XCONTENT_AGGREGATE_DATA& data) const;
+  // Game Vault: the media ID and version in the execution info of a XEX file
+  // inside an installed package (a title update's .xexp); false without one.
+  bool ReadPackageExecutionInfo(const uint64_t xuid,
+                                const XCONTENT_AGGREGATE_DATA& data,
+                                const std::string& relative_file,
+                                uint32_t& media_id, uint32_t& version);
+  static bool ReadXexExecutionInfo(const std::filesystem::path& file,
+                                   uint32_t& media_id, uint32_t& version);
   // Makes the package without mounting it.
   X_RESULT CreatePackage(const uint64_t xuid,
                          const XCONTENT_AGGREGATE_DATA& data);
