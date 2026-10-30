@@ -86,8 +86,12 @@ class StfsContainerDevice : public XContentContainerDevice {
   uint8_t blocks_per_hash_table_;
   uint32_t block_step_[2];
 
+  // Game Vault: one block read from the package (directory blocks, hash tables); false past its end
+  bool ReadBlock(size_t offset, void* buffer, size_t length);
+
   std::unordered_map<size_t, StfsHashTable> cached_hash_tables_;
-  std::unique_ptr<MappedMemory> data_;
+  std::unique_ptr<filesystem::FileHandle> file_;
+  uint64_t file_size_ = 0;
 };
 
 }  // namespace vfs

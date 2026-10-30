@@ -42,16 +42,25 @@ XContentContainerDevice::Result StfsContainerDevice::LoadHostFiles() {
     XELOGW("STFS container is not a single file. Loading might fail!");
   }
 
-  data_ = MappedMemory::Open(host_path_, MappedMemory::Mode::kRead);
-  if (!data_) {
-    return Result::kOutOfMemory;
+  // Game Vault: read where needed instead of mapping the whole package: an Arcade game or DLC of hundreds of MB
+  // could not be mapped on the Xbox or read whole over the network
+  file_ = filesystem::FileHandle::OpenExisting(host_path_,
+                                               filesystem::FileAccess::kGenericRead);
+  if (!file_) {
+    XELOGE("STFS package could not be opened");
+    return Result::kReadError;
   }
-
+  std::error_code size_error;
+  file_size_ = filesystem::FileSizeShared(host_path_, size_error);
+  if (size_error) {
+    XELOGE("STFS package size could not be read: {}", size_error.message());
+    return Result::kReadError;
+  }
   return Result::kSuccess;
 }
 
 StfsContainerDevice::Result StfsContainerDevice::Read() {
-  auto root_entry = new StfsContainerEntry(this, nullptr, "", data_.get());
+  auto root_entry = new StfsContainerEntry(this, nullptr, "", file_.get());
   root_entry->attributes_ = kFileAttributeDirectory;
   root_entry_ = std::unique_ptr<Entry>(root_entry);
 
@@ -66,7 +75,10 @@ StfsContainerDevice::Result StfsContainerDevice::Read() {
   size_t n = 0;
   for (n = 0; n < descriptor.file_table_block_count; n++) {
     const size_t offset = BlockToOffset(table_block_index);
-    directory = *reinterpret_cast<StfsDirectoryBlock*>(data_->data() + offset);
+    if (!ReadBlock(offset, &directory, sizeof(directory))) {
+      XELOGE("STFS file table block {} could not be read", table_block_index);
+      return Result::kReadError;
+    }
 
     for (size_t m = 0; m < kEntriesPerDirectoryBlock; m++) {
       const StfsDirectoryEntry& dir_entry = directory.entries[m];
@@ -115,7 +127,7 @@ std::unique_ptr<StfsContainerEntry> StfsContainerDevice::ReadEntry(
     name = ansi_name;
   }
 
-  auto entry = StfsContainerEntry::Create(this, parent, name, data_.get());
+  auto entry = StfsContainerEntry::Create(this, parent, name, file_.get());
 
   if (dir_entry->flags.directory) {
     entry->attributes_ = kFileAttributeDirectory;
@@ -146,6 +158,12 @@ std::unique_ptr<StfsContainerEntry> StfsContainerDevice::ReadEntry(
       size_t offset = BlockToOffset(block_index);
       entry->block_list_.push_back({0, offset, block_size});
       remaining_size -= block_size;
+      // Game Vault: a file stored in one run (most Arcade games and DLC) has its blocks one after another, so the
+      // hash tables need not be read for it: over the network that was hundreds of small reads, minutes of black
+      if (dir_entry->flags.contiguous) {
+        block_index++;
+        continue;
+      }
       auto block_hash = GetBlockHash(block_index);
       block_index = block_hash->level0_next_block();
     }
@@ -173,6 +191,14 @@ std::unique_ptr<StfsContainerEntry> StfsContainerDevice::ReadEntry(
   }
 
   return entry;
+}
+
+bool StfsContainerDevice::ReadBlock(size_t offset, void* buffer, size_t length) {
+  if (!file_ || offset > file_size_ || length > file_size_ - offset) {
+    return false;
+  }
+  size_t bytes_read = 0;
+  return file_->Read(offset, buffer, length, &bytes_read) && bytes_read == length;
 }
 
 size_t StfsContainerDevice::BlockToOffset(uint64_t block_index) const {
@@ -245,8 +271,12 @@ void StfsContainerDevice::UpdateCachedHashTable(
   const size_t hash_offset = BlockToHashBlockOffset(block_index, hash_level);
   // Do nothing. It's already there.
   if (!cached_hash_tables_.count(hash_offset)) {
-    cached_hash_tables_[hash_offset] = *reinterpret_cast<StfsHashTable*>(
-        data_->data() + hash_offset + secondary_table_offset);
+    StfsHashTable table = {};
+    if (!ReadBlock(hash_offset + secondary_table_offset, &table, sizeof(table))) {
+      // a cut-off package: an empty table ends the chain, then the size checks warn
+      XELOGW("STFS hash table at {:X} could not be read", hash_offset + secondary_table_offset);
+    }
+    cached_hash_tables_[hash_offset] = table;
   }
 
   uint32_t record = block_index % kBlocksPerHashLevel[0];

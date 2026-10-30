@@ -23,8 +23,12 @@ void StfsContainerFile::Destroy() { delete this; }
 
 size_t StfsContainerFile::Read(std::span<uint8_t> buffer, size_t offset,
                                size_t record_file) {
-  std::memcpy(buffer.data(), entry_->data()->data() + offset, buffer.size());
-  return buffer.size();
+  size_t bytes_read = 0;
+  if (!entry_->file() ||
+      !entry_->file()->Read(offset, buffer.data(), buffer.size(), &bytes_read)) {
+    return 0;
+  }
+  return bytes_read;
 }
 
 }  // namespace vfs

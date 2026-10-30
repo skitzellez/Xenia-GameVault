@@ -1110,6 +1110,13 @@ void GameVaultXeniaApp::StartTitle(const std::filesystem::path& path) {
   const X_STATUS result = emulator_->LaunchPath(path);
   if (XFAILED(result)) {
     XELOGE("Game Vault: starting {} failed: {:08X}", path, result);
+    // said on screen, not a black screen the player can only wonder about
+    app_context().CallInUIThread([this, path]() {
+      ui::ImGuiDialog::ShowMessageBox(
+          imgui_drawer_.get(), "This game could not be started",
+          fmt::format("Xenia could not read {}.\nHold View + Menu to go back to Game Vault.",
+                      xe::path_to_utf8(path.filename())));
+    });
   }
 }
 

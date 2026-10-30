@@ -15,16 +15,16 @@ namespace vfs {
 
 StfsContainerEntry::StfsContainerEntry(Device* device, Entry* parent,
                                        const std::string_view path,
-                                       MappedMemory* data)
-    : XContentContainerEntry(device, parent, path), data_(data) {}
+                                       filesystem::FileHandle* file)
+    : XContentContainerEntry(device, parent, path), file_(file) {}
 
 StfsContainerEntry::~StfsContainerEntry() = default;
 
 std::unique_ptr<StfsContainerEntry> StfsContainerEntry::Create(
     Device* device, Entry* parent, const std::string_view name,
-    MappedMemory* data) {
+    filesystem::FileHandle* file) {
   auto path = xe::utf8::join_guest_paths(parent->path(), name);
-  auto entry = std::make_unique<StfsContainerEntry>(device, parent, path, data);
+  auto entry = std::make_unique<StfsContainerEntry>(device, parent, path, file);
 
   return std::move(entry);
 }
