@@ -16,7 +16,7 @@
 #include "xenia/base/mapped_memory.h"
 #include "xenia/vfs/device.h"
 
-#include "third_party/zarchive/include/zarchive/zarchivereader.h"
+#include "third_party/zarchive-gv/include/zarchive/zarchivereader.h"
 
 namespace xe {
 namespace vfs {
@@ -25,6 +25,11 @@ const fourcc_t kZarMagic = make_fourcc((_ZARCHIVE::Footer::kMagic >> 24 & 0xFF),
                                        (_ZARCHIVE::Footer::kMagic >> 16 & 0xFF),
                                        (_ZARCHIVE::Footer::kMagic >> 8 & 0xFF),
                                        (_ZARCHIVE::Footer::kMagic & 0xFF));
+
+// Xenia for Game Vault: ZArchive files (.zar) are read through Xenia's own file access (FileHandle), so a .zar
+// plays from a USB drive (Game Vault's shared file) and from a network share, as disc images do. Call before
+// ZArchiveReader::OpenFromFile.
+void UseXeniaFileAccessForZarchive();
 
 class DiscZarchiveEntry;
 

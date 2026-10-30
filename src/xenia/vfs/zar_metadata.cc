@@ -15,7 +15,8 @@
 #include <string>
 #include <vector>
 
-#include "third_party/zarchive/include/zarchive/zarchivereader.h"
+#include "third_party/zarchive-gv/include/zarchive/zarchivereader.h"
+#include "xenia/vfs/devices/disc_zarchive_device.h"
 
 namespace xe {
 namespace vfs {
@@ -85,6 +86,7 @@ ZArchiveNodeHandle FindDefaultXex(ZArchiveReader* reader,
 
 std::optional<XexMetadata> ExtractZarMetadata(
     const std::filesystem::path& path) {
+  UseXeniaFileAccessForZarchive();
   std::unique_ptr<ZArchiveReader> reader(ZArchiveReader::OpenFromFile(path));
   if (!reader) {
     return std::nullopt;

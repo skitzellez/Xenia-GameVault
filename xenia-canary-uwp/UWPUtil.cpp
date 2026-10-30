@@ -62,7 +62,8 @@
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Web.Http.Headers.h>
 
-#include "third_party/zarchive/include/zarchive/zarchivereader.h"
+#include "third_party/zarchive-gv/include/zarchive/zarchivereader.h"
+#include "xenia/vfs/devices/disc_zarchive_device.h"
 
 using namespace winrt::Windows::Storage::Pickers;
 namespace UWP {
@@ -682,6 +683,7 @@ static bool TryExtractExecutionInfoFromXexFile(
 
 static bool TryReadXexExecutionInfoFromZar(
     const std::filesystem::path& path, xe::xex2_opt_execution_info* out_info) {
+  xe::vfs::UseXeniaFileAccessForZarchive();
   std::unique_ptr<ZArchiveReader> reader(ZArchiveReader::OpenFromFile(path));
   if (!reader) {
     return false;

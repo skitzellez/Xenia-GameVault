@@ -10,14 +10,38 @@
 #include "xenia/vfs/devices/disc_zarchive_device.h"
 
 #include "xenia/base/literals.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/vfs/devices/disc_zarchive_entry.h"
 
-#include "third_party/zarchive/include/zarchive/zarchivereader.h"
+#include "third_party/zarchive-gv/include/zarchive/zarchivereader.h"
 
 namespace xe {
 namespace vfs {
+
+void UseXeniaFileAccessForZarchive() {
+  ZArchiveReader::openHook = [](const std::filesystem::path& path,
+                                ZArchiveReader::ReadFn& read, uint64_t& size) {
+    std::shared_ptr<filesystem::FileHandle> file =
+        filesystem::FileHandle::OpenExisting(
+            path, filesystem::FileAccess::kGenericRead);
+    if (!file) {
+      return false;
+    }
+    std::error_code size_error;
+    size = filesystem::FileSizeShared(path, size_error);
+    if (size_error) {
+      return false;
+    }
+    read = [file](uint64_t offset, void* buffer, uint32_t length) {
+      size_t done = 0;
+      return file->Read(size_t(offset), buffer, length, &done) &&
+             done == length;
+    };
+    return true;
+  };
+}
 
 DiscZarchiveDevice::DiscZarchiveDevice(const std::string_view mount_path,
                                        const std::filesystem::path& host_path)
@@ -26,6 +50,7 @@ DiscZarchiveDevice::DiscZarchiveDevice(const std::string_view mount_path,
 DiscZarchiveDevice::~DiscZarchiveDevice() {};
 
 bool DiscZarchiveDevice::Initialize() {
+  UseXeniaFileAccessForZarchive();
   reader_ =
       std::unique_ptr<ZArchiveReader>(ZArchiveReader::OpenFromFile(host_path_));
 

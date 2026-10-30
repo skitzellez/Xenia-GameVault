@@ -588,16 +588,17 @@ endif()
 # ==============================================================================
 # zarchive
 # ==============================================================================
+# Xenia for Game Vault: the reader from zarchive-gv (reads through a function, see its header)
 add_library(zarchive STATIC
   zarchive/include/zarchive/zarchivecommon.h
-  zarchive/include/zarchive/zarchivereader.h
+  zarchive-gv/include/zarchive/zarchivereader.h
   zarchive/include/zarchive/zarchivewriter.h
-  zarchive/src/zarchivereader.cpp
+  zarchive-gv/src/zarchivereader.cpp
   zarchive/src/zarchivewriter.cpp
   zarchive/src/sha_256.c
   zarchive/src/sha_256.h
 )
-target_include_directories(zarchive PUBLIC zarchive/include PRIVATE zstd/lib)
+target_include_directories(zarchive PUBLIC zarchive-gv/include zarchive/include PRIVATE zstd/lib)
 target_link_libraries(zarchive PUBLIC zstd)
 
 # ==============================================================================
