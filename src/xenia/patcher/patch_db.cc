@@ -71,6 +71,39 @@ void PatchDB::LoadPatches() {
           loaded_patches_.push_back(std::move(loaded));
         }
       });
+  // Game Vault: patches switched on by default (from the patch set built into
+  // Xenia) for games that play badly without them. A patch file of the
+  // player's own for that game (patches folder) replaces these.
+  // Gears of War: 60 FPS; Black Shading Fix (no predicated tiling - the
+  // characters were see-through).
+  static const struct {
+    uint32_t title_id;
+    std::vector<std::string> names;
+  } kGameVaultDefaultOn[] = {
+      {0x4D5307D5, {"60 FPS", "Black Shading Fix"}},
+  };
+  for (const auto& defaults : kGameVaultDefaultOn) {
+    if (std::any_of(loaded_patches_.cbegin(), loaded_patches_.cend(),
+                    [&](const PatchFileEntry& e) {
+                      return e.title_id == defaults.title_id;
+                    })) {
+      continue;
+    }
+    for (PatchSourceFile& file :
+         EnumerateBundledPatchesForTitle(defaults.title_id)) {
+      bool any = false;
+      for (PatchInfoEntry& info : file.entry.patch_info) {
+        info.is_enabled =
+            std::find(defaults.names.cbegin(), defaults.names.cend(),
+                      info.patch_name) != defaults.names.cend();
+        any |= info.is_enabled;
+      }
+      if (any) {
+        file.entry.filename = file.filename;
+        loaded_patches_.push_back(std::move(file.entry));
+      }
+    }
+  }
   XELOGI("PatchDB: Loaded patches for {} titles", loaded_patches_.size());
 }
 
