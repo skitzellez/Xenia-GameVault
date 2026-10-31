@@ -9,6 +9,8 @@
 
 #include "xenia/ui/d3d12/d3d12_presenter.h"
 
+#include <atomic>
+#include <chrono>
 #include <climits>
 #include <cstdint>
 #include <memory>
@@ -39,6 +41,9 @@ namespace ui {
 namespace d3d12 {
 
 // Generated with `xb buildshaders`.
+// Game Vault testing: host presents and the CPU time they took (logged every 30 s with the GPU lines).
+std::atomic<uint64_t> gv_present_count{0}, gv_present_ns{0};
+
 namespace shaders {
 #include "xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_bilinear_dither_ps.h"
 #include "xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_bilinear_ps.h"
@@ -1163,10 +1168,15 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
   // fullscreen is ever used in, the allow tearing flag must not be passed in
   // fullscreen, but DXGI fullscreen is largely unneeded with the flip
   // presentation model used in Direct3D 12).
+  const auto gv_present_start = std::chrono::steady_clock::now();
   HRESULT present_result = paint_context_.swap_chain->Present(
       0, DXGI_PRESENT_RESTART | (paint_context_.swap_chain_allows_tearing
                                      ? DXGI_PRESENT_ALLOW_TEARING
                                      : 0));
+  gv_present_ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - gv_present_start)
+                                .count());
+  ++gv_present_count;
   // Even if presentation has failed, work might have been enqueued anyway
   // internally before the failure according to Jesse Natalie from the DirectX
   // Discord server.

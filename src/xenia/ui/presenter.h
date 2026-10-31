@@ -1042,6 +1042,11 @@ class Presenter {
   // Accessible only from the UI thread, though the value is taken from the
   // tick-mutex-protected variable.
   uint64_t dxgi_ui_tick_last_draw_ = 0;
+  // Game Vault (Xbox app, UI thread): when the guest output last moved on and its count then, and the last paint the
+  // UI paced itself (WaitForUITickFromUIThread).
+  uint64_t gv_ui_tick_guest_count_ = 0, gv_ui_tick_painted_count_ = 0;
+  std::chrono::steady_clock::time_point gv_ui_tick_guest_time_;
+  std::chrono::steady_clock::time_point gv_ui_tick_last_paint_;
 
   std::mutex dxgi_ui_tick_mutex_;
   uint64_t dxgi_ui_tick_last_vblank_ = 1;

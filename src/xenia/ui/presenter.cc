@@ -1390,7 +1390,53 @@ void Presenter::UpdateUITicksNeededFromUIThread() {
 }
 
 void Presenter::WaitForUITickFromUIThread() {
-#if XE_PLATFORM_WIN32
+#if XE_PLATFORM_WINRT
+  // Game Vault: the Xbox app has no DXGI output to wait for vblanks on, and its
+  // main loop asks for a paint on every pass, so with any UI drawer (the frame
+  // rate counter) the UI thread presented as fast as the loop went round - 120
+  // presents a second, each blocking ~6 ms, and the GPU queue held up behind
+  // them: Gears of War moving 35-43 fps with the counter, 50-60 without. Now,
+  // while the guest is sending frames, the UI is painted with those frames only
+  // (a guest frame forces a tick); once the guest has been quiet for 100 ms
+  // (paused, loading), the UI paces itself to 60 a second.
+  if (!AreUITicksNeededFromUIThread()) {
+    return;
+  }
+  std::unique_lock<std::mutex> dxgi_ui_tick_lock(dxgi_ui_tick_mutex_);
+  while (true) {
+    if (dxgi_ui_tick_force_requested_) {
+      dxgi_ui_tick_force_requested_ = false;
+      gv_ui_tick_painted_count_ =
+          guest_output_refresh_count_.load(std::memory_order_relaxed);
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const uint64_t guest_count =
+        guest_output_refresh_count_.load(std::memory_order_relaxed);
+    if (guest_count != gv_ui_tick_guest_count_) {
+      gv_ui_tick_guest_count_ = guest_count;
+      gv_ui_tick_guest_time_ = now;
+    }
+    if (guest_count != gv_ui_tick_painted_count_) {
+      // A guest frame not painted yet (its forced tick may have been folded
+      // into a paint request that was already pending).
+      gv_ui_tick_painted_count_ = guest_count;
+      return;
+    }
+    if (now - gv_ui_tick_guest_time_ >= std::chrono::milliseconds(100)) {
+      const auto next = gv_ui_tick_last_paint_ + std::chrono::microseconds(16667);
+      if (now >= next) {
+        gv_ui_tick_last_paint_ = now;
+        return;
+      }
+      dxgi_ui_tick_signal_condition_.wait_until(dxgi_ui_tick_lock, next);
+      continue;
+    }
+    // The guest is sending frames: wait for the next one.
+    dxgi_ui_tick_signal_condition_.wait_for(dxgi_ui_tick_lock,
+                                            std::chrono::milliseconds(20));
+  }
+#elif XE_PLATFORM_WIN32
   if (!AreUITicksNeededFromUIThread()) {
     return;
   }
@@ -1437,8 +1483,14 @@ void Presenter::WaitForUITickFromUIThread() {
 
 void Presenter::ForceUIThreadPaintTick() {
 #if XE_PLATFORM_WIN32
-  std::scoped_lock<std::mutex> dxgi_ui_tick_lock(dxgi_ui_tick_mutex_);
-  dxgi_ui_tick_force_requested_ = true;
+  {
+    std::scoped_lock<std::mutex> dxgi_ui_tick_lock(dxgi_ui_tick_mutex_);
+    dxgi_ui_tick_force_requested_ = true;
+  }
+#if XE_PLATFORM_WINRT
+  // Wakes WaitForUITickFromUIThread at once for the guest frame.
+  dxgi_ui_tick_signal_condition_.notify_all();
+#endif  // XE_PLATFORM_WINRT
 #endif  // XE_PLATFORM
 }
 

@@ -304,6 +304,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
           show_fps = argument.Value() == L"1";
         }
       }
+      // Game Vault testing: gv_test_nofps.txt in LocalState keeps the counter off
+      if (show_fps && std::filesystem::exists(
+                          xe::filesystem::GetUserFolder() /
+                          "gv_test_nofps.txt")) {
+        show_fps = false;
+      }
       UWP::SetShowFps(show_fps);
       auto activation = UWP::ParseProtocolActivation(arguments);
       std::string game_path = activation.game_path.value_or(std::string{});

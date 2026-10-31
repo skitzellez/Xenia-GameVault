@@ -102,6 +102,9 @@ namespace gv_timing {
 constexpr uint32_t kSlots = 16;         // submissions in flight
 constexpr uint32_t kMaxPerSlot = 8192;  // draws and copies per submission
 constexpr uint64_t kCopyKey = 0xC0C0C0C0C0C0C0C0ull;
+// A whole submission, first command to last: everything the GPU ran for it,
+// also what is not a draw or a copy (texture loads, render target moves).
+constexpr uint64_t kSubmissionKey = 0x5B5B5B5B5B5B5B5Bull;
 struct Key {
   uint64_t vs, ps;
   bool operator<(const Key& o) const {
@@ -122,7 +125,8 @@ bool failed = false;
 double ns_per_tick = 0.0;
 std::mutex mutex;  // the sums below (the GPU thread adds, the log thread takes)
 std::map<Key, std::pair<uint64_t, uint64_t>> sums;  // ns, count
-uint64_t busy_ns = 0, draw_ns = 0, copy_ns = 0, untimed = 0;
+uint64_t busy_ns = 0, draw_ns = 0, copy_ns = 0, untimed = 0, submission_ns = 0;
+uint32_t submission_handle = UINT32_MAX;
 std::map<uintptr_t, uint64_t> wait_callers;
 // Resolve read-backs, and those that had to wait for the GPU (no earlier copy
 // of that picture to read yet). Counted always (cheap).
@@ -224,6 +228,10 @@ void Harvest(uint64_t completed_submission) {
         lo = std::min(lo, t0);
         hi = std::max(hi, t1);
         const uint64_t ns = uint64_t(double(t1 - t0) * ns_per_tick);
+        if (slot.keys[i].vs == kSubmissionKey) {
+          submission_ns += ns;
+          continue;
+        }
         auto& sum = sums[slot.keys[i]];
         sum.first += ns;
         ++sum.second;
@@ -239,17 +247,36 @@ void Harvest(uint64_t completed_submission) {
 }
 }  // namespace gv_timing
 
+}  // namespace d3d12
+}  // namespace gpu
+namespace ui {
+namespace d3d12 {
+extern std::atomic<uint64_t> gv_present_count, gv_present_ns;
+}  // namespace d3d12
+}  // namespace ui
+namespace gpu {
+namespace d3d12 {
+
 void GameVaultTakeGpuTiming(double secs, std::vector<std::string>* lines) {
+  {
+    const uint64_t presents = ui::d3d12::gv_present_count.exchange(0);
+    const uint64_t present_ns = ui::d3d12::gv_present_ns.exchange(0);
+    if (presents) {
+      lines->push_back(fmt::format(
+          "Game Vault: screen presents {:.0f}/s, {:.2f} ms each on the CPU",
+          presents / secs, present_ns / 1e6 / presents));
+    }
+  }
   std::lock_guard<std::mutex> lock(gv_timing::mutex);
   const auto pct = [secs](uint64_t ns) {
     return 100.0 * double(ns) / (secs * 1e9);
   };
   if (gv_timing::heap) {
     lines->push_back(fmt::format(
-        "Game Vault GPU time: busy {:.0f}%, draws {:.0f}%, copies {:.0f}%, "
-        "{} not timed",
-        pct(gv_timing::busy_ns), pct(gv_timing::draw_ns),
-        pct(gv_timing::copy_ns), gv_timing::untimed));
+        "Game Vault GPU time: busy {:.0f}%, whole submissions {:.0f}%, draws "
+        "{:.0f}%, copies {:.0f}%, {} not timed",
+        pct(gv_timing::busy_ns), pct(gv_timing::submission_ns),
+        pct(gv_timing::draw_ns), pct(gv_timing::copy_ns), gv_timing::untimed));
     std::vector<std::pair<uint64_t, gv_timing::Key>> top;
     for (auto& [key, sum] : gv_timing::sums) top.emplace_back(sum.first, key);
     std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
@@ -287,6 +314,7 @@ void GameVaultTakeGpuTiming(double secs, std::vector<std::string>* lines) {
   gv_timing::sums.clear();
   gv_timing::wait_callers.clear();
   gv_timing::busy_ns = gv_timing::draw_ns = gv_timing::copy_ns = 0;
+  gv_timing::submission_ns = 0;
   gv_timing::untimed = 0;
 }
 
@@ -4052,6 +4080,11 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
     // end of the submission (when async pipeline creation requests are
     // fulfilled).
     deferred_command_list_.Reset();
+    if (cvars::gv_gpu_timing) {
+      gv_timing::submission_handle = gv_timing::Begin(
+          GetD3D12Provider(), deferred_command_list_,
+          {gv_timing::kSubmissionKey, 0});
+    }
 
     // Resume the active query segment.
     if (GetZPDMode() != ZPDMode::kFake && zpd_active_segment_.logical_active) {
@@ -4209,6 +4242,8 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     // Submit barriers now because resources with the queued barriers may be
     // destroyed between frames.
     SubmitBarriers();
+    gv_timing::End(deferred_command_list_, gv_timing::submission_handle);
+    gv_timing::submission_handle = UINT32_MAX;
     gv_timing::Submit(deferred_command_list_, GetCurrentSubmission());
 
     // TODO(Triang3l): Error checking.
