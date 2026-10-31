@@ -12,10 +12,18 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
+#include <chrono>
+#include <fstream>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include "xenia/hid/input_system.h"
 
 #include "xenia/base/cvar.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/profiling.h"
 #include "xenia/hid/input_driver.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -178,6 +186,139 @@ void InputSystem::MergeCapabilities(X_INPUT_CAPABILITIES* caps,
       vibration.right_motor_speed, other.vibration.right_motor_speed);
 }
 
+// Game Vault test presses: gv_press.txt in the app's LocalState (put there over Device Portal) is read, deleted and
+// played on player 1's controller, so a test can get through menus with nobody at the console. Words split by
+// "-", "," or spaces: a b x y start back up down left right lb rb lt rt ls rs (pressed 150 ms, then 350 ms of
+// nothing), "<button>=<ms>" holds it, "<ls|rs><up|down|left|right>=<ms>" pushes a stick fully, a number waits that
+// many milliseconds. A new file replaces what is still queued.
+namespace {
+struct GvPressStep {
+  uint16_t buttons = 0;
+  uint8_t lt = 0, rt = 0;
+  int16_t lx = 0, ly = 0, rx = 0, ry = 0;
+  uint32_t hold_ms = 0, gap_ms = 0;
+};
+std::mutex gv_press_mutex;
+std::vector<GvPressStep> gv_press_steps;
+std::chrono::steady_clock::time_point gv_press_start, gv_press_checked;
+uint32_t gv_press_packets = 0;
+
+bool GvPressParse(const std::string& text, std::vector<GvPressStep>& steps) {
+  static const struct {
+    const char* name;
+    uint16_t mask;
+  } kNames[] = {{"a", X_INPUT_GAMEPAD_A},          {"b", X_INPUT_GAMEPAD_B},
+                {"x", X_INPUT_GAMEPAD_X},          {"y", X_INPUT_GAMEPAD_Y},
+                {"start", X_INPUT_GAMEPAD_START},  {"back", X_INPUT_GAMEPAD_BACK},
+                {"up", X_INPUT_GAMEPAD_DPAD_UP},   {"down", X_INPUT_GAMEPAD_DPAD_DOWN},
+                {"left", X_INPUT_GAMEPAD_DPAD_LEFT}, {"right", X_INPUT_GAMEPAD_DPAD_RIGHT},
+                {"lb", X_INPUT_GAMEPAD_LEFT_SHOULDER}, {"rb", X_INPUT_GAMEPAD_RIGHT_SHOULDER},
+                {"ls", X_INPUT_GAMEPAD_LEFT_THUMB}, {"rs", X_INPUT_GAMEPAD_RIGHT_THUMB}};
+  std::string norm = text;
+  for (char& c : norm) {
+    if (c == '-' || c == ',' || c == '\r' || c == '\n' || c == '\t') c = ' ';
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  std::istringstream words(norm);
+  std::string w;
+  while (words >> w) {
+    if (std::isdigit(static_cast<unsigned char>(w[0]))) {
+      GvPressStep wait;
+      wait.gap_ms = static_cast<uint32_t>(std::strtoul(w.c_str(), nullptr, 10));
+      steps.push_back(wait);
+      continue;
+    }
+    std::string name = w;
+    uint32_t hold = 150;
+    if (auto eq = w.find('='); eq != std::string::npos) {
+      name = w.substr(0, eq);
+      hold = static_cast<uint32_t>(std::strtoul(w.c_str() + eq + 1, nullptr, 10));
+    }
+    GvPressStep step;
+    step.hold_ms = hold;
+    step.gap_ms = 350;
+    bool known = false;
+    if (name.size() > 2 && (name[0] == 'l' || name[0] == 'r') && name[1] == 's') {
+      std::string dir = name.substr(2);
+      int16_t* x = name[0] == 'l' ? &step.lx : &step.rx;
+      int16_t* y = name[0] == 'l' ? &step.ly : &step.ry;
+      known = true;
+      if (dir == "up") *y = 32767;
+      else if (dir == "down") *y = -32768;
+      else if (dir == "left") *x = -32768;
+      else if (dir == "right") *x = 32767;
+      else known = false;
+    } else if (name == "lt" || name == "rt") {
+      (name == "lt" ? step.lt : step.rt) = 255;
+      known = true;
+    } else {
+      for (const auto& n : kNames) {
+        if (name == n.name) {
+          step.buttons = n.mask;
+          known = true;
+        }
+      }
+    }
+    if (!known) {
+      XELOGW("Game Vault: test presses: unknown word \"{}\" (whole file ignored)", w);
+      return false;
+    }
+    steps.push_back(step);
+  }
+  return true;
+}
+
+// Adds what the test presses hold right now to player 1's state; true while a press list is playing.
+bool GvPressApply(X_INPUT_STATE* state) {
+  std::lock_guard<std::mutex> lock(gv_press_mutex);
+  auto now = std::chrono::steady_clock::now();
+  if (now - gv_press_checked > std::chrono::milliseconds(300)) {
+    gv_press_checked = now;
+    std::error_code ec;
+    auto file = xe::filesystem::GetUserFolder() / "gv_press.txt";
+    if (std::filesystem::exists(file, ec)) {
+      std::ifstream in(file, std::ios::binary);
+      std::stringstream text;
+      text << in.rdbuf();
+      in.close();
+      std::filesystem::remove(file, ec);
+      std::vector<GvPressStep> steps;
+      if (GvPressParse(text.str(), steps)) {
+        gv_press_steps = std::move(steps);
+        gv_press_start = now;
+        XELOGI("Game Vault: test presses: {} steps", gv_press_steps.size());
+      }
+    }
+  }
+  if (gv_press_steps.empty()) {
+    return false;
+  }
+  uint64_t t = std::chrono::duration_cast<std::chrono::milliseconds>(now - gv_press_start).count();
+  for (const auto& step : gv_press_steps) {
+    if (t < step.hold_ms) {
+      auto& pad = state->gamepad;
+      pad.buttons = pad.buttons | step.buttons;
+      pad.left_trigger = std::max(pad.left_trigger, step.lt);
+      pad.right_trigger = std::max(pad.right_trigger, step.rt);
+      if (step.lx) pad.thumb_lx = step.lx;
+      if (step.ly) pad.thumb_ly = step.ly;
+      if (step.rx) pad.thumb_rx = step.rx;
+      if (step.ry) pad.thumb_ry = step.ry;
+      state->packet_number = state->packet_number + (++gv_press_packets);
+      return true;
+    }
+    t -= step.hold_ms;
+    if (t < step.gap_ms) {
+      return true;
+    }
+    t -= step.gap_ms;
+  }
+  gv_press_steps.clear();
+  XELOGI("Game Vault: test presses done");
+  return false;
+}
+}  // namespace
+
 X_RESULT InputSystem::GetState(uint32_t user_index, uint32_t flags,
                                X_INPUT_STATE* out_state, bool ui_active) {
   SCOPE_profile_cpu_f("hid");
@@ -243,6 +384,17 @@ X_RESULT InputSystem::GetStateForUI(uint32_t user_index, uint32_t flags,
   // Wrong device type for this slot is not a disconnect.
   if (!connected_driver && other_type) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  if (user_index == 0) {
+    if (connected_driver) {
+      GvPressApply(out_state);
+    } else {
+      X_INPUT_STATE pressed = {};
+      if (GvPressApply(&pressed)) {
+        *out_state = pressed;
+        return X_ERROR_SUCCESS;  // test presses with no controller in the slot
+      }
+    }
   }
   if (connected_driver) {
     UpdateUsedSlot(connected_driver, user_index, true);
