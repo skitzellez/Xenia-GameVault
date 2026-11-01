@@ -33,6 +33,9 @@
 #include "protocol_activation.h"
 #include "uwp_file_redirect.h"
 #include "xenia/base/filesystem.h"
+
+// Game Vault: the resolution scale the start link asked for (scale=1..3), 0 = Xenia's own setting (gv_main.cc)
+int gv_requested_scale = 0;
 #include "xenia/base/logging.h"
 #include "xenia/config.h"
 #include "xenia/ui/imgui_dialog.h"
@@ -290,6 +293,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
       arguments.reserve(query.Size());
       winrt::hstring disctoken, netcred;
       bool show_fps = false;
+      int scale = 0;
       for (const auto& argument : query) {
         arguments.emplace_back(winrt::to_string(argument.Name()),
                                winrt::to_string(argument.Value()));
@@ -302,8 +306,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } else if (argument.Name() == L"fps") {
           // Game Vault: its "Show frame rate" option is on
           show_fps = argument.Value() == L"1";
+        } else if (argument.Name() == L"scale") {
+          // Game Vault 0.16.1.369+: the game's "Resolution scale" (Xbox 360 game settings)
+          scale = _wtoi(argument.Value().c_str());
         }
       }
+      // Game Vault: applied by gv_main.cc (GvApplyGameScale) when the graphics start, after the settings file
+      gv_requested_scale = scale >= 1 && scale <= 3 ? scale : 0;
       // Game Vault testing: gv_test_nofps.txt in LocalState keeps the counter off
       if (show_fps && std::filesystem::exists(
                           xe::filesystem::GetUserFolder() /

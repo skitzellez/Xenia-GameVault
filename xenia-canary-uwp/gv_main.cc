@@ -78,6 +78,7 @@ DEFINE_int32(gv_profile_ms, 0,
 // (the in-game menu's resolution scale; Xenia's own settings)
 DECLARE_int32(draw_resolution_scale_x);
 DECLARE_int32(draw_resolution_scale_y);
+extern int gv_requested_scale;   // App.cpp: scale= in the start link (Game Vault), 0 = none
 
 DEFINE_path(storage_root, "",
             "Root path for persistent internal data storage (config, etc.), or "
@@ -1121,10 +1122,27 @@ void GameVaultXeniaApp::StartTitle(const std::filesystem::path& path) {
   }
 }
 
+// Game Vault: the game's "Resolution scale" from the start link (App.cpp, scale=), set where the graphics are made:
+// at the first start and at each relaunch. Xenia reads the scale only then, before the game's own settings file is
+// read, so a per-game scale in that file did nothing (stevejames 2026-11-01). Without one: Xenia's own setting.
+void GvApplyGameScale() {
+  static int base_x = -1, base_y = -1;
+  if (base_x < 0) {
+    base_x = cvars::draw_resolution_scale_x;
+    base_y = cvars::draw_resolution_scale_y;
+  }
+  const int want = gv_requested_scale;
+  cvars::draw_resolution_scale_x = want ? want : base_x;
+  cvars::draw_resolution_scale_y = want ? want : base_y;
+  XELOGI("Game Vault: resolution scale {}x{}{}", cvars::draw_resolution_scale_x, cvars::draw_resolution_scale_y,
+         want ? " (the game's setting in Game Vault)" : "");
+}
+
 void GameVaultXeniaApp::EmulatorThread() {
   xe::threading::set_name("Emulator");
   Profiler::ThreadEnter("Emulator");
 
+  GvApplyGameScale();
   X_STATUS result =
       emulator_->Setup(window_.get(), imgui_drawer_.get(), true,
                        CreateAudioSystem, CreateGraphicsSystem,
@@ -1306,6 +1324,7 @@ void GameVaultXeniaApp::CompanionTick() {
   XELOGI("Game Vault: another game was sent while a game runs: {}", path);
   current_path_ = path;
   switching_ = true;
+  GvApplyGameScale();   // the relaunch makes new graphics: the new game's scale
   std::thread([this, path]() {
     emulator_->RelaunchTitle(xe::path_to_utf8(path), "", 0, {}, false);
     switching_ = false;
