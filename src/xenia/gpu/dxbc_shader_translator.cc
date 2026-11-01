@@ -3371,6 +3371,10 @@ void DxbcShaderTranslator::WriteOutputSignature() {
   } else if (is_pixel_shader()) {
     if (!edram_rov_used_) {
       uint32_t color_targets_written = current_shader().writes_color_targets();
+      // Game Vault: o1 (SV_Target1) carries the blending alpha.
+      if (IsFixed16DualSourceAlpha()) {
+        color_targets_written |= 0b10;
+      }
 
       // Color render targets (SV_Target#).
       size_t target_position = SIZE_MAX;
@@ -3823,6 +3827,10 @@ void DxbcShaderTranslator::WriteShaderCode() {
         if (color_targets_written & (uint32_t(1) << i)) {
           ao_.OpDclOutput(dxbc::Dest::O(i));
         }
+      }
+      // Game Vault: o1 carries the blending alpha (dual-source blending).
+      if (IsFixed16DualSourceAlpha()) {
+        ao_.OpDclOutput(dxbc::Dest::O(1));
       }
       // Coverage output for alpha to mask.
       if ((color_targets_written & 0b1) &&

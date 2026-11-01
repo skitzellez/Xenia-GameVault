@@ -114,7 +114,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
     // If anything in this is structure is changed in a way not compatible with
     // the previous layout, invalidate the pipeline storages by increasing this
     // version number (0xYYYYMMDD)!
-    static constexpr uint32_t kVersion = 0x20261031;  // Game Vault: alpha kept for 16-bit fixed blending
+    static constexpr uint32_t kVersion = 0x20261101;  // Game Vault: dual-source alpha for 16-bit fixed blending
 
     enum class DepthStencilMode : uint32_t {
       kNoModifiers,
@@ -197,6 +197,11 @@ class DxbcShaderTranslator : public ShaderTranslator {
       // from the draw. This is only set when the draw is native because of a
       // set scale threshold (RTV only).
       uint32_t resolution_scale_native : 1;
+      // Game Vault: RT0 is 16_16 / 16_16_16_16 on host render targets (shader
+      // output divided by 32) and its blending reads the source alpha: the
+      // alpha the blending needs (not divided) goes out as o1.a, and the
+      // pipeline uses SRC1_ALPHA / INV_SRC1_ALPHA (dual-source blending).
+      uint32_t rt0_fixed16_dual_source_alpha : 1;
     } pixel;
 
     explicit Modification(uint64_t modification_value = 0)
@@ -692,6 +697,10 @@ class DxbcShaderTranslator : public ShaderTranslator {
                               dxbc::Src::kXXXX);
   }
 
+  bool IsFixed16DualSourceAlpha() const {
+    return is_pixel_shader() && !edram_rov_used_ &&
+           GetDxbcShaderModification().pixel.rt0_fixed16_dual_source_alpha;
+  }
   Modification GetDxbcShaderModification() const {
     return Modification(current_translation().modification());
   }

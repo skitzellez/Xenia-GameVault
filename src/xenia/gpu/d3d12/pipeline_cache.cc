@@ -60,6 +60,9 @@ DEFINE_bool(d3d12_tessellation_wireframe, false,
             "Display tessellated surfaces as wireframe for debugging.",
             "D3D12");
 
+DECLARE_bool(gv_fixed16_dual_source_alpha);
+DECLARE_bool(snorm16_render_target_full_range);
+
 namespace xe {
 namespace gpu {
 namespace d3d12 {
@@ -69,6 +72,7 @@ namespace d3d12 {
 static std::mutex gv_rt16_mutex;
 static std::unordered_set<uint64_t> gv_rt16_seen;
 static std::vector<std::string> gv_rt16_lines;
+bool GameVaultBlendReadsSourceAlpha(reg::RB_BLENDCONTROL blend);
 void GameVaultTakeRt16Lines(std::vector<std::string>* lines) {
   std::lock_guard<std::mutex> lock(gv_rt16_mutex);
   lines->insert(lines->end(), gv_rt16_lines.begin(), gv_rt16_lines.end());
@@ -750,6 +754,30 @@ PipelineCache::GetCurrentPixelShaderModification(
         xenos::BlendFactor::kOne;
     modification.pixel.rt0_blend_a_factor_for_premult =
         xenos::BlendFactor::kOne;
+
+    // Game Vault: dual-source blending alpha for a 16-bit fixed-point RT0 (see
+    // the modification). Only when RT0 is the only color output (dual-source
+    // blending allows one render target) and the blend isn't MIN/MAX.
+    modification.pixel.rt0_fixed16_dual_source_alpha = 0;
+    if (cvars::snorm16_render_target_full_range &&
+        shader.writes_color_targets() == 0b0001) {
+      auto rt0_color_info = regs.Get<reg::RB_COLOR_INFO>(
+          reg::RB_COLOR_INFO::rt_register_indices[0]);
+      auto rt0_blend = regs.Get<reg::RB_BLENDCONTROL>(
+          reg::RB_BLENDCONTROL::rt_register_indices[0]);
+      if ((rt0_color_info.color_format ==
+               xenos::ColorRenderTargetFormat::k_16_16 ||
+           rt0_color_info.color_format ==
+               xenos::ColorRenderTargetFormat::k_16_16_16_16) &&
+          (regs[XE_GPU_REG_RB_COLOR_MASK] & 0xF) &&
+          rt0_blend.color_comb_fcn != xenos::BlendOp::kMin &&
+          rt0_blend.color_comb_fcn != xenos::BlendOp::kMax &&
+          rt0_blend.alpha_comb_fcn != xenos::BlendOp::kMin &&
+          rt0_blend.alpha_comb_fcn != xenos::BlendOp::kMax &&
+          GameVaultBlendReadsSourceAlpha(rt0_blend)) {
+        modification.pixel.rt0_fixed16_dual_source_alpha = 1;
+      }
+    }
 
     if (shader.writes_color_target(0)) {
       auto blend_control = regs.Get<reg::RB_BLENDCONTROL>(
@@ -3252,9 +3280,46 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
           blend_desc.DestBlendAlpha =
               kBlendFactorMap[uint32_t(rt.dest_blend_alpha)];
         }
+        // Game Vault: dual-source blending alpha (16-bit fixed-point RT0, the
+        // shader's o1.a holds the real alpha).
+        if (i == 0 && DxbcShaderTranslator::Modification(
+                          description.pixel_shader_modification)
+                          .pixel.rt0_fixed16_dual_source_alpha) {
+          auto to_src1 = [](D3D12_BLEND b) {
+            return b == D3D12_BLEND_SRC_ALPHA       ? D3D12_BLEND_SRC1_ALPHA
+                   : b == D3D12_BLEND_INV_SRC_ALPHA ? D3D12_BLEND_INV_SRC1_ALPHA
+                                                    : b;
+          };
+          blend_desc.SrcBlend = to_src1(blend_desc.SrcBlend);
+          blend_desc.DestBlend = to_src1(blend_desc.DestBlend);
+          blend_desc.SrcBlendAlpha = to_src1(blend_desc.SrcBlendAlpha);
+          blend_desc.DestBlendAlpha = to_src1(blend_desc.DestBlendAlpha);
+        }
         blend_desc.BlendOpAlpha = kBlendOpMap[uint32_t(rt.blend_op_alpha)];
       }
       blend_desc.RenderTargetWriteMask = rt.write_mask;
+    }
+    // Game Vault: dual-source blending is only valid with RT0 alone. With more
+    // bound, blend RT0 the old way and keep o1 (the blending alpha) out of RT1.
+    if (DxbcShaderTranslator::Modification(
+            description.pixel_shader_modification)
+            .pixel.rt0_fixed16_dual_source_alpha) {
+      if (state_desc.NumRenderTargets <= 1) {
+        state_desc.BlendState.IndependentBlendEnable = false;
+      } else {
+        D3D12_RENDER_TARGET_BLEND_DESC& rt0_blend =
+            state_desc.BlendState.RenderTarget[0];
+        auto from_src1 = [](D3D12_BLEND b) {
+          return b == D3D12_BLEND_SRC1_ALPHA       ? D3D12_BLEND_SRC_ALPHA
+                 : b == D3D12_BLEND_INV_SRC1_ALPHA ? D3D12_BLEND_INV_SRC_ALPHA
+                                                   : b;
+        };
+        rt0_blend.SrcBlend = from_src1(rt0_blend.SrcBlend);
+        rt0_blend.DestBlend = from_src1(rt0_blend.DestBlend);
+        rt0_blend.SrcBlendAlpha = from_src1(rt0_blend.SrcBlendAlpha);
+        rt0_blend.DestBlendAlpha = from_src1(rt0_blend.DestBlendAlpha);
+        state_desc.BlendState.RenderTarget[1].RenderTargetWriteMask = 0;
+      }
     }
   }
 
