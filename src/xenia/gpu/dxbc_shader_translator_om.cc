@@ -1795,11 +1795,28 @@ void DxbcShaderTranslator::CompletePixelShader_WriteToRTVs() {
     uint32_t system_temp_color = system_temps_color_[i];
     // Apply the exponent bias after alpha to coverage because it needs the
     // unbiased alpha from the shader.
-    a_.OpMul(dxbc::Dest::R(system_temp_color), dxbc::Src::R(system_temp_color),
-             LoadSystemConstant(
-                 SystemConstants::Index::kColorExpBias,
-                 offsetof(SystemConstants, color_exp_bias) + sizeof(float) * i,
-                 dxbc::Src::kXXXX));
+    // Game Vault: a negative bias (16_16 / 16_16_16_16 remapped from -32...32 to
+    // -1...1 on host render targets, with blending that reads the source alpha)
+    // means: color times |bias|, alpha times |bias| * 32 - alpha keeps its real
+    // value, so SRC_ALPHA / INV_SRC_ALPHA blend factors stay correct instead of
+    // 32 times too small (lights fading to black in 41560905 / 415608B5).
+    dxbc::Src exp_bias_src = LoadSystemConstant(
+        SystemConstants::Index::kColorExpBias,
+        offsetof(SystemConstants, color_exp_bias) + sizeof(float) * i,
+        dxbc::Src::kXXXX);
+    // gamma_temp.y = bias < 0, gamma_temp.z = |bias| * 32.
+    a_.OpLT(dxbc::Dest::R(gamma_temp, 0b0010), exp_bias_src, dxbc::Src::LF(0.0f));
+    a_.OpMul(dxbc::Dest::R(gamma_temp, 0b0100), exp_bias_src.Abs(),
+             dxbc::Src::LF(32.0f));
+    // gamma_temp.z = alpha factor: |bias| * 32 if negative, else bias.
+    a_.OpMovC(dxbc::Dest::R(gamma_temp, 0b0100),
+              dxbc::Src::R(gamma_temp, dxbc::Src::kYYYY),
+              dxbc::Src::R(gamma_temp, dxbc::Src::kZZZZ), exp_bias_src);
+    a_.OpMul(dxbc::Dest::R(system_temp_color, 0b0111),
+             dxbc::Src::R(system_temp_color), exp_bias_src.Abs());
+    a_.OpMul(dxbc::Dest::R(system_temp_color, 0b1000),
+             dxbc::Src::R(system_temp_color),
+             dxbc::Src::R(gamma_temp, dxbc::Src::kZZZZ));
     if (gamma_render_target_as_unorm8_) {
       // Convert to gamma space - this is incorrect, since it must be done after
       // blending on the Xbox 360, but this is just one of many blending issues

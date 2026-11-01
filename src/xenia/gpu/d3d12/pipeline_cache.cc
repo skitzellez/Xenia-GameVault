@@ -12,6 +12,8 @@
 #include <cmath>
 #include <cstring>
 #include <thread>
+#include <mutex>
+#include <unordered_set>
 
 #include "third_party/dxbc/DXBCChecksum.h"
 #include "third_party/fmt/include/fmt/format.h"
@@ -61,6 +63,29 @@ DEFINE_bool(d3d12_tessellation_wireframe, false,
 namespace xe {
 namespace gpu {
 namespace d3d12 {
+
+// Game Vault test probe (1.1.8.158 test, The Amazing Spider-Man 2 darkness): every distinct way a draw writes to a
+// 16-bit fixed-point render target (format, write mask, RB_BLENDCONTROL), once each, for gv_live.log.
+static std::mutex gv_rt16_mutex;
+static std::unordered_set<uint64_t> gv_rt16_seen;
+static std::vector<std::string> gv_rt16_lines;
+void GameVaultTakeRt16Lines(std::vector<std::string>* lines) {
+  std::lock_guard<std::mutex> lock(gv_rt16_mutex);
+  lines->insert(lines->end(), gv_rt16_lines.begin(), gv_rt16_lines.end());
+  gv_rt16_lines.clear();
+}
+static void GameVaultNoteRt16(uint32_t index, xenos::ColorRenderTargetFormat format, uint32_t mask,
+                              uint32_t blendcontrol, uint32_t rt_count) {
+  uint64_t key = uint64_t(format) | (uint64_t(mask) << 8) | (uint64_t(index) << 12) | (uint64_t(rt_count) << 16) |
+                 (uint64_t(blendcontrol) << 24);
+  std::lock_guard<std::mutex> lock(gv_rt16_mutex);
+  if (gv_rt16_seen.size() > 200 || !gv_rt16_seen.insert(key).second) return;
+  gv_rt16_lines.push_back(fmt::format(
+      "Game Vault rt16: rt{} of {} {} mask {:X} blendcontrol {:08X} (color src {} dst {} op {}, alpha src {} dst {} op {})",
+      index, rt_count, format == xenos::ColorRenderTargetFormat::k_16_16 ? "16_16" : "16_16_16_16", mask,
+      blendcontrol, blendcontrol & 0x1F, (blendcontrol >> 8) & 0x1F, (blendcontrol >> 5) & 0x7,
+      (blendcontrol >> 16) & 0x1F, (blendcontrol >> 24) & 0x1F, (blendcontrol >> 21) & 0x7));
+}
 
 // Generated with `xb buildshaders`.
 namespace shaders {
@@ -1610,6 +1635,11 @@ bool PipelineCache::GetCurrentStateDescription(
         rt.dest_blend_alpha =
             kBlendFactorAlphaMap[uint32_t(blendcontrol.alpha_destblend)];
         rt.blend_op_alpha = blendcontrol.alpha_comb_fcn;
+        if (rt.format == xenos::ColorRenderTargetFormat::k_16_16 ||
+            rt.format == xenos::ColorRenderTargetFormat::k_16_16_16_16) {
+          GameVaultNoteRt16(i, rt.format, rt.write_mask, blendcontrol.value,
+                            uint32_t(xe::bit_count(bound_depth_and_color_render_target_bits >> 1)));
+        }
       } else {
         rt.src_blend = PipelineBlendFactor::kOne;
         rt.dest_blend = PipelineBlendFactor::kZero;

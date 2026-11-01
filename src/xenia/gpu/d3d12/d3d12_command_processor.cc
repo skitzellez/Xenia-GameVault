@@ -84,6 +84,20 @@ namespace xe {
 namespace gpu {
 namespace d3d12 {
 
+// Game Vault: whether a render target's blending reads the pixel shader's alpha
+// (SRC_ALPHA, ONE_MINUS_SRC_ALPHA, SRC_ALPHA_SATURATE in the color or alpha
+// factors). For 16_16 / 16_16_16_16 on host render targets, that alpha must not
+// be divided by 32 with the color (UpdateSystemConstantValues).
+static bool GameVaultBlendReadsSourceAlpha(reg::RB_BLENDCONTROL blend) {
+  auto reads = [](xenos::BlendFactor f) {
+    return f == xenos::BlendFactor::kSrcAlpha ||
+           f == xenos::BlendFactor::kOneMinusSrcAlpha ||
+           f == xenos::BlendFactor::kSrcAlphaSaturate;
+  };
+  return reads(blend.color_srcblend) || reads(blend.color_destblend) ||
+         reads(blend.alpha_srcblend) || reads(blend.alpha_destblend);
+}
+
 // Generated with `xb buildshaders`.
 namespace shaders {
 #include "xenia/gpu/shaders/bytecode/d3d12_5_1/apply_gamma_pwl_cs.h"
@@ -4876,6 +4890,7 @@ XE_NOINLINE void D3D12CommandProcessor::UpdateSystemConstantValues_Impl(
     reg::RB_COLOR_INFO color_info = color_infos[i];
     // Exponent bias is in bits 20:25 of RB_COLOR_INFO.
     int32_t color_exp_bias = color_info.color_exp_bias;
+    bool fixed16_alpha_unscaled = false;
     if (color_info.color_format == xenos::ColorRenderTargetFormat::k_16_16 ||
         color_info.color_format ==
             xenos::ColorRenderTargetFormat::k_16_16_16_16) {
@@ -4885,10 +4900,17 @@ XE_NOINLINE void D3D12CommandProcessor::UpdateSystemConstantValues_Impl(
         // Remap from -32...32 to -1...1 by dividing the output values by 32,
         // losing blending correctness, but getting the full range.
         color_exp_bias -= 5;
+        fixed16_alpha_unscaled = GameVaultBlendReadsSourceAlpha(
+            regs.Get<reg::RB_BLENDCONTROL>(
+                reg::RB_BLENDCONTROL::rt_register_indices[i]));
       }
     }
     auto color_exp_bias_scale = xe::memory::Reinterpret<float>(
         int32_t(0x3F800000 + (color_exp_bias << 23)));
+    // Game Vault: negative = keep alpha's real value (see the pixel shader).
+    if (fixed16_alpha_unscaled) {
+      color_exp_bias_scale = -color_exp_bias_scale;
+    }
 
     update_dirty_floatmask(system_constants_.color_exp_bias[i],
                            color_exp_bias_scale);

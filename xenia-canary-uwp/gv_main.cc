@@ -100,6 +100,7 @@ namespace gpu {
 namespace d3d12 {
 void GameVaultTakeSubmitStats(uint64_t out[9]);
 void GameVaultTakeGpuTiming(double secs, std::vector<std::string>* lines);
+void GameVaultTakeRt16Lines(std::vector<std::string>* lines);
 }  // namespace d3d12
 }  // namespace gpu
 namespace app {
@@ -1275,6 +1276,9 @@ void GameVaultXeniaApp::EmulatorThread() {
         std::vector<std::string> gpu_lines;
         gpu::d3d12::GameVaultTakeGpuTiming(secs, &gpu_lines);
         for (const std::string& gpu_line : gpu_lines) GV_LIVE("{}", gpu_line);
+        std::vector<std::string> rt16_lines;
+        gpu::d3d12::GameVaultTakeRt16Lines(&rt16_lines);
+        for (const std::string& rt16_line : rt16_lines) GV_LIVE("{}", rt16_line);
       }
       last = frames, last_time = now;
     }
