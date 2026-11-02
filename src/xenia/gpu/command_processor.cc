@@ -218,6 +218,14 @@ bool CommandProcessor::Initialize() {
 }
 
 void CommandProcessor::Shutdown() {
+  // A game starting another program on its disc (The Orange Box's menu,
+  // XamLoaderLaunchTitle) relaunches in-process: RelaunchTitle stops the
+  // command processor first, then Emulator::Shutdown stops it again, and the
+  // second Wait on the already freed worker thread closed Xenia (Game Vault
+  // 11-02: back to the Xbox home screen).
+  if (!worker_thread_) {
+    return;
+  }
   EndTracing();
 
   worker_running_ = false;

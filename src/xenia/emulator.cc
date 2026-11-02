@@ -247,6 +247,7 @@ void Emulator::Shutdown() {
   // destructor — the UI loop may not be running.
   if (relaunching_) {
     on_before_shutdown();
+    XELOGI("Emulator::Shutdown: listeners told");
   }
 
   // Note that we delete things in the reverse order they were initialized.
@@ -254,9 +255,11 @@ void Emulator::Shutdown() {
   // Give the systems time to shutdown before we delete them.
   if (graphics_system_) {
     graphics_system_->Shutdown();
+    XELOGI("Emulator::Shutdown: graphics stopped");
   }
   if (audio_system_) {
     audio_system_->Shutdown();
+    XELOGI("Emulator::Shutdown: audio stopped");
   }
 
   main_thread_ = nullptr;
@@ -267,17 +270,23 @@ void Emulator::Shutdown() {
     input_system_.reset();
   }
   graphics_system_.reset();
+  XELOGI("Emulator::Shutdown: graphics freed");
   audio_system_.reset();
   audio_media_player_.reset();
+  XELOGI("Emulator::Shutdown: audio freed");
 
   kernel_state_.reset();
+  XELOGI("Emulator::Shutdown: kernel freed");
   file_system_.reset();
+  XELOGI("Emulator::Shutdown: file system freed");
   patcher_.reset();
   plugin_loader_.reset();
 
   processor_.reset();
+  XELOGI("Emulator::Shutdown: processor freed");
   export_resolver_.reset();
   memory_.reset();
+  XELOGI("Emulator::Shutdown: memory freed");
 
   ExceptionHandler::Uninstall(Emulator::ExceptionCallbackThunk, this);
 
