@@ -1173,6 +1173,9 @@ bool D3D12CommandProcessor::SetupContext() {
         "the emulator, reducing to {}x{}",
         draw_resolution_scale_x, draw_resolution_scale_y);
   }
+  // Game Vault: the scale the game really draws at, also after a restart (in-game menu, 11-02)
+  XELOGI("Game Vault: graphics drawing at {}x{} resolution scale", draw_resolution_scale_x,
+         draw_resolution_scale_y);
 
   shared_memory_ =
       std::make_unique<D3D12SharedMemory>(*this, *memory_, trace_writer_);

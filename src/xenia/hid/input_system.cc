@@ -252,11 +252,22 @@ bool GvPressParse(const std::string& text, std::vector<GvPressStep>& steps) {
       (name == "lt" ? step.lt : step.rt) = 255;
       known = true;
     } else {
-      for (const auto& n : kNames) {
-        if (name == n.name) {
-          step.buttons = n.mask;
-          known = true;
+      // "back+start=2500": buttons held together (the in-game menu's View + Menu)
+      known = !name.empty();
+      size_t from = 0;
+      while (known && from <= name.size()) {
+        size_t plus = name.find('+', from);
+        std::string part = name.substr(from, plus == std::string::npos ? std::string::npos : plus - from);
+        bool found = false;
+        for (const auto& n : kNames) {
+          if (part == n.name) {
+            step.buttons |= n.mask;
+            found = true;
+          }
         }
+        known = found;
+        if (plus == std::string::npos) break;
+        from = plus + 1;
       }
     }
     if (!known) {

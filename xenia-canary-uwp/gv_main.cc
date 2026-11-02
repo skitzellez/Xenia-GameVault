@@ -1125,8 +1125,15 @@ void GameVaultXeniaApp::StartTitle(const std::filesystem::path& path) {
 // Game Vault: the game's "Resolution scale" from the start link (App.cpp, scale=), set where the graphics are made:
 // at the first start and at each relaunch. Xenia reads the scale only then, before the game's own settings file is
 // read, so a per-game scale in that file did nothing (stevejames 2026-11-01). Without one: Xenia's own setting.
+// Xenia's own scale (its config), for a game Game Vault sends no scale with. The in-game menu changes it too
+// (krauser985 11-02: a scale picked there went back to the old one at the next game).
+static int gv_base_scale_x = -1, gv_base_scale_y = -1;
+void GvSetBaseScale(int scale) {
+  gv_base_scale_x = gv_base_scale_y = scale;
+}
 void GvApplyGameScale() {
-  static int base_x = -1, base_y = -1;
+  int& base_x = gv_base_scale_x;
+  int& base_y = gv_base_scale_y;
   if (base_x < 0) {
     base_x = cvars::draw_resolution_scale_x;
     base_y = cvars::draw_resolution_scale_y;
@@ -1228,9 +1235,21 @@ void GameVaultXeniaApp::EmulatorThread() {
         RestartTitle("shader cache cleared");
       };
       actions.set_scale = [this](int scale) {
+        // Saved as Xenia's own setting: a plain assignment changed only the live value, and SaveConfig wrote the
+        // old one back, so the choice was gone at Xenia's next start (krauser985 11-02: "it fails again").
+        for (const char* name : {"draw_resolution_scale_x", "draw_resolution_scale_y"}) {
+          if (!cvar::ConfigVars) break;
+          auto it = cvar::ConfigVars->find(name);
+          if (it == cvar::ConfigVars->end()) continue;
+          if (auto* var = dynamic_cast<cvar::ConfigVar<int32_t>*>(it->second)) {
+            var->OverrideConfigValue(scale);
+          }
+        }
         cvars::draw_resolution_scale_x = scale;
         cvars::draw_resolution_scale_y = scale;
+        GvSetBaseScale(scale);
         config::SaveConfig();
+        XELOGI("Game Vault: in-game menu: resolution scale {}x (Xenia's own, for every game)", scale);
         RestartTitle("resolution scale");
       };
       new GameMenu(imgui_drawer_.get(), emulator_.get(), std::move(actions),
