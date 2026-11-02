@@ -743,6 +743,18 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
      "[Memory]\nignore_offset_for_ranged_allocations = true\n"
      "[GPU]\nreadback_resolve = \"fast\"\n"
      "[GPU.Debug]\ndxbc_forward_jumps_without_loop = false\n"},
+    // The other WWE games crash when a match starts without it, like WWE 2K17 (xenia-canary game-compatibility
+    // 72 WWE '12, 32 WWE 2K14, 85 SvR 2011: "ignore_offset_for_ranged_allocations = true to prevent crashes at the
+    // start of matches"; a player asked 11-02 "whenever I start a match the game crashes").
+    {"545107E0", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // SmackDown vs. Raw 2007
+    {"5451080B", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // SmackDown vs. Raw 2008
+    {"54510826", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // SmackDown vs. Raw 2009
+    {"54510844", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // SmackDown vs. Raw 2010
+    {"5451085D", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // SmackDown vs. Raw 2011
+    {"54510890", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE '12
+    {"545108B4", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE 13
+    {"545408B2", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE 2K14
+    {"545408B6", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE 2K15
     // Naruto: The Broken Bond (+ demo): black, stretched textures
     // (xenia-canary game-compatibility issue 87, xenia-canary issue 906).
     {"55530825",
