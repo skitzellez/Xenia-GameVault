@@ -39,6 +39,53 @@ namespace xe {
 namespace gpu {
 namespace d3d12 {
 
+void GvProbeAddPending(ID3D12Resource* buffer, uint32_t size, uint64_t submission, std::string name);
+void GvSeqAddPublic(std::string line);
+uint32_t GvProbeNextIndex();
+
+void D3D12TextureCache::GvProbeBinding(uint32_t fetch_constant, const std::string& tag) {
+  const TextureBinding* binding = GetValidTextureBinding(fetch_constant);
+  GvSeqAddPublic(fmt::format("   BINDING tf{} valid {} texture {} signed {} key fmt {} base {:08X} {}x{} signs {:02X}",
+                             fetch_constant, binding ? 1 : 0, binding && binding->texture ? 1 : 0,
+                             binding && binding->texture_signed ? 1 : 0,
+                             binding ? uint32_t(binding->key.format) : 0,
+                             binding ? binding->key.base_page << 12 : 0, binding ? binding->key.GetWidth() : 0,
+                             binding ? binding->key.GetHeight() : 0, binding ? binding->swizzled_signs : 0));
+  if (!binding || !binding->texture) return;
+  auto& texture = *static_cast<D3D12Texture*>(binding->texture);
+  ID3D12Resource* resource = texture.resource();
+  D3D12_RESOURCE_DESC rdesc = resource->GetDesc();
+  ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp;
+  UINT64 total = 0;
+  device->GetCopyableFootprints(&rdesc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+  D3D12_RESOURCE_DESC bdesc;
+  ui::d3d12::util::FillBufferResourceDesc(bdesc, total, D3D12_RESOURCE_FLAG_NONE);
+  ID3D12Resource* buffer = nullptr;
+  if (FAILED(device->CreateCommittedResource(&ui::d3d12::util::kHeapPropertiesReadback, D3D12_HEAP_FLAG_NONE, &bdesc,
+                                             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&buffer)))) {
+    return;
+  }
+  D3D12_RESOURCE_STATES old_state = texture.SetResourceState(D3D12_RESOURCE_STATE_COPY_SOURCE);
+  command_processor_.PushTransitionBarrier(resource, old_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  command_processor_.SubmitBarriers();
+  D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+  dst.pResource = buffer;
+  dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  dst.PlacedFootprint = fp;
+  src.pResource = resource;
+  src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  command_processor_.GetDeferredCommandList().D3DCopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+  texture.SetResourceState(old_state);
+  command_processor_.PushTransitionBarrier(resource, D3D12_RESOURCE_STATE_COPY_SOURCE, old_state);
+  command_processor_.SubmitBarriers();
+  GvProbeAddPending(buffer, uint32_t(total), command_processor_.GetCurrentSubmission(),
+                    fmt::format("p{:02}_tex_{}_fmt{}_w{}_h{}_rowpitch{}", GvProbeNextIndex(), tag,
+                                uint32_t(rdesc.Format), uint32_t(rdesc.Width), rdesc.Height,
+                                fp.Footprint.RowPitch));
+}
+
+
 // Generated with `xb buildshaders`.
 namespace shaders {
 #include "xenia/gpu/shaders/bytecode/d3d12_5_1/texture_load_128bpb_cs.h"

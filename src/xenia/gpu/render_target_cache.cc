@@ -21,6 +21,7 @@
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
 
+DEFINE_int32(gv_drop_msaa_transfers, 0, "Game Vault debugging: drop ownership transfers between different MSAA sample counts (1 = depth, 2 = color, 3 = both).", "GPU");
 DEFINE_bool(
     debug_msaa_2x_as_4x, false,
     "Use 4x MSAA with 2 samples instead of native 2x MSAA when available. "
@@ -935,6 +936,24 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
                         : &last_update_transfers_[rt_bit_index]);
   }
 
+  if (cvars::gv_drop_msaa_transfers && !interlock_barrier_only) {
+    // Game Vault debugging: drop transfers between different sample counts.
+    for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+      RenderTarget* dest = rts[i];
+      if (!dest) continue;
+      auto& list = last_update_transfers_[i];
+      for (auto it = list.begin(); it != list.end();) {
+        bool depth = dest->key().is_depth;
+        if (it->source && it->source->key().msaa_samples != dest->key().msaa_samples &&
+            ((depth && (cvars::gv_drop_msaa_transfers & 1)) || (!depth && (cvars::gv_drop_msaa_transfers & 2)))) {
+          it = list.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+  }
+
   if (interlock_barrier_only) {
     // No copying transfers or render target bindings - only needed the barrier.
     return true;
@@ -1101,9 +1120,9 @@ std::string RenderTargetCache::GvDebugBoundText() const {
   auto key_text = [](const RenderTarget* rt) -> std::string {
     if (!rt) return "none";
     RenderTargetKey k = rt->key();
-    return fmt::format("[base {} pitch {} {} fmt {} msaa {}]", uint32_t(k.base_tiles),
+    return fmt::format("[base {} pitch {} {} fmt {} msaa {} @{:X}]", uint32_t(k.base_tiles),
                        uint32_t(k.pitch_tiles_at_32bpp), k.is_depth ? "depth" : "color",
-                       uint32_t(k.resource_format), uint32_t(k.msaa_samples));
+                       uint32_t(k.resource_format), uint32_t(k.msaa_samples), uintptr_t(rt) & 0xFFFFFF);
   };
   std::string t = "bound depth " + key_text(last_update_accumulated_render_targets_[0]) + " c0 " +
                   key_text(last_update_accumulated_render_targets_[1]);

@@ -772,6 +772,7 @@ class D3D12CommandProcessor final : public CommandProcessor {
   };
   bool GvReadbackRingAllocate(uint32_t length, uint64_t* start_out);
   void GvPumpReadbacks();
+  void GvProbeQueue(const std::string& name, uint32_t base, uint32_t size);
   Microsoft::WRL::ComPtr<ID3D12Resource> gv_readback_ring_;
   uint8_t* gv_readback_ring_mapping_ = nullptr;
   bool gv_readback_ring_failed_ = false;

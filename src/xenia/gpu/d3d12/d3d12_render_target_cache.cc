@@ -71,6 +71,9 @@ namespace d3d12 {
 
 bool GvSeqActive();
 void GvSeqAddPublic(std::string line);
+bool GvProbeArmed();
+void GvProbeAddPending(ID3D12Resource* buffer, uint32_t size, uint64_t submission, std::string name);
+uint32_t GvProbeNextIndex();
 std::string GvRtKeyText(uint32_t k);
 
 // Generated with `xb buildshaders`.
@@ -1208,6 +1211,48 @@ void D3D12RenderTargetCache::CompletedSubmissionUpdated() {
   }
 }
 
+void D3D12RenderTargetCache::GvProbeBoundColor(const std::string& tag) {
+  RenderTarget* const* rts = last_update_accumulated_render_targets();
+  uint32_t slot = tag.rfind("depth", 0) == 0 ? 0 : 1;
+  if (!rts[slot]) return;
+  auto& rt = *static_cast<D3D12RenderTarget*>(rts[slot]);
+  D3D12_RESOURCE_DESC rdesc = rt.resource()->GetDesc();
+  if (rdesc.SampleDesc.Count != 1) return;
+  ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp;
+  UINT64 total = 0;
+  device->GetCopyableFootprints(&rdesc, 0, 1, 0, &fp, nullptr, nullptr, &total);
+  D3D12_RESOURCE_DESC bdesc;
+  ui::d3d12::util::FillBufferResourceDesc(bdesc, total, D3D12_RESOURCE_FLAG_NONE);
+  ID3D12Resource* buffer = nullptr;
+  if (FAILED(device->CreateCommittedResource(&ui::d3d12::util::kHeapPropertiesReadback, D3D12_HEAP_FLAG_NONE, &bdesc,
+                                             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&buffer)))) {
+    return;
+  }
+  command_processor_.PushTransitionBarrier(rt.resource(), rt.SetResourceState(D3D12_RESOURCE_STATE_COPY_SOURCE),
+                                           D3D12_RESOURCE_STATE_COPY_SOURCE);
+  command_processor_.SubmitBarriers();
+  D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+  dst.pResource = buffer;
+  dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  dst.PlacedFootprint = fp;
+  src.pResource = rt.resource();
+  src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  command_processor_.GetDeferredCommandList().D3DCopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+  GvProbeAddPending(buffer, uint32_t(total), command_processor_.GetCurrentSubmission(),
+                    fmt::format("p{:02}_bound_{}_w{}_rowpitch{}", GvProbeNextIndex(), tag, uint32_t(rdesc.Width),
+                                fp.Footprint.RowPitch));
+  if (tag.find("before") != std::string::npos) {
+    // Back to the drawing state: the draw's bindings are already recorded.
+    D3D12_RESOURCE_STATES back = slot ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    command_processor_.PushTransitionBarrier(rt.resource(), rt.SetResourceState(back), back);
+    command_processor_.SubmitBarriers();
+    return;
+  }
+  // The render target must be bound again for the next draw.
+  InvalidateCommandListRenderTargets();
+}
+
 void D3D12RenderTargetCache::GvClearBound(float depth) {
   RenderTarget* const* rts = last_update_accumulated_render_targets();
   DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
@@ -1427,8 +1472,66 @@ bool D3D12RenderTargetCache::Resolve(const Memory& memory,
       // range to edram_buffer_.
       // TODO(Triang3l): Direct host render target -> shared memory resolve
       // shaders for non-converting cases.
+      if (GvProbeArmed()) {
+        // The host render targets themselves, before the dump reads them.
+        std::vector<ResolveCopyDumpRectangle> rects;
+        GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows, dump_pitch, rects);
+        for (const ResolveCopyDumpRectangle& rect : rects) {
+          auto& rt = *static_cast<D3D12RenderTarget*>(rect.render_target);
+          D3D12_RESOURCE_DESC rdesc = rt.resource()->GetDesc();
+          if (rdesc.SampleDesc.Count != 1) continue;
+          D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp;
+          UINT64 total = 0;
+          command_processor_.GetD3D12Provider().GetDevice()->GetCopyableFootprints(&rdesc, 0, 1, 0, &fp, nullptr,
+                                                                                  nullptr, &total);
+          D3D12_RESOURCE_DESC bdesc;
+          ui::d3d12::util::FillBufferResourceDesc(bdesc, total, D3D12_RESOURCE_FLAG_NONE);
+          ID3D12Resource* buffer = nullptr;
+          if (FAILED(command_processor_.GetD3D12Provider().GetDevice()->CreateCommittedResource(
+                  &ui::d3d12::util::kHeapPropertiesReadback, D3D12_HEAP_FLAG_NONE, &bdesc,
+                  D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&buffer)))) {
+            continue;
+          }
+          command_processor_.PushTransitionBarrier(rt.resource(),
+                                                   rt.SetResourceState(D3D12_RESOURCE_STATE_COPY_SOURCE),
+                                                   D3D12_RESOURCE_STATE_COPY_SOURCE);
+          command_processor_.SubmitBarriers();
+          D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+          dst.pResource = buffer;
+          dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+          dst.PlacedFootprint = fp;
+          src.pResource = rt.resource();
+          src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+          src.SubresourceIndex = 0;
+          command_list.D3DCopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+          GvProbeAddPending(buffer, uint32_t(total), command_processor_.GetCurrentSubmission(),
+                            fmt::format("p{:02}_rt_{}_fmt{}_w{}_h{}_rowpitch{}", GvProbeNextIndex(),
+                                        rt.key().is_depth ? "depth" : "color", uint32_t(rdesc.Format),
+                                        uint32_t(rdesc.Width), rdesc.Height, fp.Footprint.RowPitch));
+        }
+      }
       DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch,
                         copy_native);
+      if (GvProbeArmed()) {
+        // The EDRAM buffer tiles this resolve will read, right after the dump.
+        uint32_t tile_bytes = 80 * 16 * 4;
+        uint32_t first = dump_base, count = dump_rows * dump_pitch;
+        if (first + count > xenos::kEdramTileCount) count = xenos::kEdramTileCount - first;
+        D3D12_RESOURCE_DESC desc;
+        ui::d3d12::util::FillBufferResourceDesc(desc, count * tile_bytes, D3D12_RESOURCE_FLAG_NONE);
+        ID3D12Resource* buffer = nullptr;
+        if (SUCCEEDED(command_processor_.GetD3D12Provider().GetDevice()->CreateCommittedResource(
+                &ui::d3d12::util::kHeapPropertiesReadback, D3D12_HEAP_FLAG_NONE, &desc,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&buffer)))) {
+          TransitionEdramBuffer(D3D12_RESOURCE_STATE_COPY_SOURCE);
+          command_processor_.SubmitBarriers();
+          command_list.D3DCopyBufferRegion(buffer, 0, edram_buffer_, uint64_t(first) * tile_bytes,
+                                           uint64_t(count) * tile_bytes);
+          GvProbeAddPending(buffer, count * tile_bytes, command_processor_.GetCurrentSubmission(),
+                            fmt::format("p{:02}_edram_after_dump_base{}_pitch{}_rows{}", GvProbeNextIndex(),
+                                        dump_base, dump_pitch, dump_rows));
+        }
+      }
     }
     bool copy_dest_scaled = draw_resolution_scaled && !copy_native;
 
@@ -5134,6 +5237,10 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
 
         ID3D12PipelineState* const* transfer_pipelines =
             GetOrCreateTransferPipelines(transfer_shader_key);
+        if (GvSeqActive()) {
+          GvSeqAddPublic(fmt::format("   TRANSFER pipeline {} key {:016X}", transfer_pipelines ? "ok" : "MISSING",
+                                     uint64_t(transfer_shader_key.key)));
+        }
         if (!transfer_pipelines) {
           continue;
         }
@@ -6585,8 +6692,8 @@ void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
     DumpPipelineKey pipeline_key = invocation.pipeline_key;
     ID3D12PipelineState* pipeline = GetOrCreateDumpPipeline(pipeline_key);
     if (GvSeqActive()) {
-      GvSeqAddPublic(fmt::format("   dump invocation {} pipeline {} key {:08X}", GvRtKeyText(rt_key.key),
-                                 pipeline ? "ok" : "MISSING", pipeline_key.key));
+      GvSeqAddPublic(fmt::format("   dump invocation {} @{:X} pipeline {} key {:08X}", GvRtKeyText(rt_key.key),
+                                 uintptr_t(&d3d12_rt) & 0xFFFFFF, pipeline ? "ok" : "MISSING", pipeline_key.key));
     }
     if (!pipeline) {
       continue;

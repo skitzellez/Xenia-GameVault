@@ -79,6 +79,10 @@ DEFINE_string(gv_skip_resolve_after_ps, "",
 DEFINE_uint32(gv_probe_fetch, 0, "Game Vault debugging: texture fetch slot the gv_seq_ps probe saves.", "D3D12");
 DEFINE_string(gv_clear_on_ps, "", "Game Vault debugging: hex pixel shader hash; after its render targets are bound, really clear them (depth 0). Empty = off.", "D3D12");
 DEFINE_bool(gv_readback_ignore_protect, false, "Game Vault debugging: read resolves back into committed guest memory even if it is not marked writable.", "D3D12");
+DEFINE_bool(gv_skip_depth_only_draws, false, "Game Vault debugging: skip depth-only (EDRAM mode depth) draws.", "D3D12");
+DEFINE_bool(gv_probe_memory, true, "Game Vault debugging: with the gv_seq_ps trigger, also save GPU memory probes.", "D3D12");
+DEFINE_int32(gv_probe_draw_every, 0, "Game Vault debugging: during a sequence trace, snapshot the bound color target after every N-th colour draw (0 = off).", "D3D12");
+DEFINE_bool(gv_drop_superseded_readbacks, false, "Game Vault: drop pending deferred read-backs fully covered by a newer one (did not matter for Naughty Bear; off).", "D3D12");
 DEFINE_bool(d3d12_log_draw_pairs, false,
             "Game Vault debugging: log each new vertex/pixel shader pair once, with its primitive, vertex count, "
             "depth state and render target.",
@@ -2955,6 +2959,16 @@ ID3D12Resource* gv_probe_buffer = nullptr;
 uint64_t gv_probe_submission = 0;
 uint32_t gv_probe_size = 0;
 bool gv_probe_pending = false;
+struct GvProbe {
+  ID3D12Resource* buffer;
+  uint32_t size;
+  uint64_t submission;
+  std::string name;
+};
+std::vector<GvProbe> gv_probes;
+uint32_t gv_probe_resolves_left = 0;
+uint32_t gv_probe_watch[2] = {};
+uint32_t gv_probe_counter = 0;
 
 std::string GvFetchText(const RegisterFile& regs) {
   std::string t;
@@ -2999,6 +3013,31 @@ std::string GvRtKeyText(uint32_t k) {
                      ((k >> 21) & 1) ? "depth" : "color", (k >> 22) & 0xF, (k >> 19) & 3);
 }
 
+bool GvProbeArmed() { return gv_probe_resolves_left != 0; }
+void GvProbeAddPending(ID3D12Resource* buffer, uint32_t size, uint64_t submission, std::string name) {
+  gv_probes.push_back({buffer, size, submission, std::move(name)});
+}
+uint32_t GvProbeNextIndex() { return gv_probe_counter++; }
+
+void D3D12CommandProcessor::GvProbeQueue(const std::string& name, uint32_t base, uint32_t size) {
+  D3D12_RESOURCE_DESC desc;
+  ui::d3d12::util::FillBufferResourceDesc(desc, size, D3D12_RESOURCE_FLAG_NONE);
+  ID3D12Resource* buffer = nullptr;
+  if (FAILED(GetD3D12Provider().GetDevice()->CreateCommittedResource(
+          &ui::d3d12::util::kHeapPropertiesReadback, D3D12_HEAP_FLAG_NONE, &desc,
+          D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&buffer)))) {
+    return;
+  }
+  if (!BeginSubmission(true)) {
+    buffer->Release();
+    return;
+  }
+  shared_memory_->UseAsCopySource();
+  SubmitBarriers();
+  deferred_command_list_.D3DCopyBufferRegion(buffer, 0, shared_memory_->GetBuffer(), base, size);
+  gv_probes.push_back({buffer, size, GetCurrentSubmission(), name});
+}
+
 bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
@@ -3018,6 +3057,9 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     return copied;
   }
 
+  if (cvars::gv_skip_depth_only_draws && edram_mode == xenos::EdramMode::kDepthOnly) {
+    return true;
+  }
   if (regs.Get<reg::RB_SURFACE_INFO>().surface_pitch == 0) {
     // Doesn't actually draw.
     // TODO(Triang3l): Do something so memexport still works in this case maybe?
@@ -3149,32 +3191,18 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       }
     }
     if (gv_fire) {
-      gv_seq_left = 15000;
+      gv_seq_left = 9000;
       {
-        // Textures 0 and 1 of this draw, as the GPU sees them, one after the other.
         xenos::xe_gpu_texture_fetch_t f0 = regs.GetTextureFetch(0);
         xenos::xe_gpu_texture_fetch_t f1 = regs.GetTextureFetch(1);
         uint32_t w = (uint32_t(f0.size_2d.width) + 32) & ~31u, h = (uint32_t(f0.size_2d.height) + 32) & ~31u;
         uint32_t one = w * h * 4;
-        gv_probe_size = one * 2;
-        D3D12_RESOURCE_DESC desc;
-        ui::d3d12::util::FillBufferResourceDesc(desc, gv_probe_size, D3D12_RESOURCE_FLAG_NONE);
-        if (gv_probe_buffer) {
-          gv_probe_buffer->Release();
-          gv_probe_buffer = nullptr;
-        }
-        if (SUCCEEDED(GetD3D12Provider().GetDevice()->CreateCommittedResource(
-                &ui::d3d12::util::kHeapPropertiesReadback, D3D12_HEAP_FLAG_NONE, &desc,
-                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&gv_probe_buffer))) &&
-            BeginSubmission(true)) {
-          shared_memory_->UseAsCopySource();
-          SubmitBarriers();
-          deferred_command_list_.D3DCopyBufferRegion(gv_probe_buffer, 0, shared_memory_->GetBuffer(),
-                                                     uint32_t(f0.base_address) << 12, one);
-          deferred_command_list_.D3DCopyBufferRegion(gv_probe_buffer, one, shared_memory_->GetBuffer(),
-                                                     uint32_t(f1.base_address) << 12, one);
-          gv_probe_submission = GetCurrentSubmission();
-          gv_probe_pending = true;
+        gv_probe_watch[0] = uint32_t(f0.base_address) << 12;
+        gv_probe_watch[1] = uint32_t(f1.base_address) << 12;
+        if (cvars::gv_probe_memory) {
+          GvProbeQueue(fmt::format("p{:02}_composite_tf0", gv_probe_counter++), gv_probe_watch[0], one);
+          GvProbeQueue(fmt::format("p{:02}_composite_tf1", gv_probe_counter++), gv_probe_watch[1], one);
+          gv_probe_resolves_left = 6;
         }
       }
       // Also save what this draw's textures 0..2 hold in guest memory right now (tiled, as the game stored them).
@@ -3203,6 +3231,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                          uint32_t(regs.Get<reg::RB_COLOR_INFO>().color_base),
                          uint32_t(regs.Get<reg::RB_COLOR_INFO>().color_format), regs[XE_GPU_REG_RB_SURFACE_INFO],
                          regs[XE_GPU_REG_RB_MODECONTROL]) +
+             fmt::format(" colorctl {:08X} aref {}", regs[XE_GPU_REG_RB_COLORCONTROL],
+                         regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF)) +
              fmt::format(" tf0 {:08X} tf1 {:08X} tf2 {:08X}", uint32_t(regs.GetTextureFetch(0).base_address) << 12,
                          uint32_t(regs.GetTextureFetch(1).base_address) << 12,
                          uint32_t(regs.GetTextureFetch(2).base_address) << 12));
@@ -3382,6 +3412,13 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     draw_util::GetHostViewportInfo(&gviargs, viewport_info);
     previous_viewport_info_args_ = gviargs;
     previous_viewport_info_ = viewport_info;
+  }
+  if (gv_seq_left) {
+    GvSeqAdd(fmt::format("   VIEWPORT z {:.6f}..{:.6f} writes_depth {} ndc_z {:.4f}*z+{:.4f} vport zscale {} zoffset {} vte {:08X} clip {:08X}",
+                         viewport_info.z_min, viewport_info.z_max, uint32_t(gviargs.pixel_shader_writes_depth),
+                         viewport_info.ndc_scale[2], viewport_info.ndc_offset[2],
+                         regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZSCALE), regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET),
+                         regs[XE_GPU_REG_PA_CL_VTE_CNTL], regs[XE_GPU_REG_PA_CL_CLIP_CNTL]));
   }
   // todo: use SIMD for getscissor + scaling here, should reduce code size more
   draw_util::Scissor scissor;
@@ -3570,6 +3607,22 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   SetPrimitiveTopology(primitive_topology);
   // Must not call anything that may change the primitive topology from now on!
 
+  if (gv_seq_left && pixel_shader && pixel_shader->ucode_data_hash() == 0x65649D1575EBDC5Cull &&
+      render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
+    GvSeqAdd(fmt::format("   FF viewport {} {} {}x{} depth {}..{} update_needed {}", ff_viewport_.TopLeftX,
+                         ff_viewport_.TopLeftY, ff_viewport_.Width, ff_viewport_.Height, ff_viewport_.MinDepth,
+                         ff_viewport_.MaxDepth, uint32_t(ff_viewport_update_needed_)));
+    static int gv_before_probes = 0;
+    if (gv_before_probes++ < 1) {
+      texture_cache_->GvProbeBinding(1, "tf1_composite");
+      texture_cache_->GvProbeBinding(0, "tf0_composite");
+      render_target_cache_->GvProbeBoundColor(fmt::format("depth_before_composite_vp{:.3f}_{:.3f}_{:.0f}x{:.0f}_upd{}",
+                                                          ff_viewport_.MinDepth, ff_viewport_.MaxDepth,
+                                                          ff_viewport_.Width, ff_viewport_.Height,
+                                                          uint32_t(ff_viewport_update_needed_)));
+      render_target_cache_->GvProbeBoundColor("color_before_composite");
+    }
+  }
   // Draw.
   if (primitive_processing_result.index_buffer_type ==
       PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
@@ -3730,6 +3783,42 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
 
   HangLocatorStep("draw", vertex_shader->ucode_data_hash(), pixel_shader ? pixel_shader->ucode_data_hash() : 0,
                   index_count, uint32_t(primitive_type));
+  if (gv_seq_left && pixel_shader && pixel_shader->ucode_data_hash() == 0x65649D1575EBDC5Cull) {
+    xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(0);
+    const uint8_t* vb = memory_->TranslatePhysical<const uint8_t*>(uint32_t(vf.address) << 2);
+    std::string t = fmt::format("   QUAD vf0 {:08X} endian {} size {} c0 {} {} {} {} | ", uint32_t(vf.address) << 2,
+                                uint32_t(vf.endian), uint32_t(vf.size), regs.Get<float>(XE_GPU_REG_SHADER_CONSTANT_000_X),
+                                regs.Get<float>(XE_GPU_REG_SHADER_CONSTANT_000_Y),
+                                regs.Get<float>(XE_GPU_REG_SHADER_CONSTANT_000_Z),
+                                regs.Get<float>(XE_GPU_REG_SHADER_CONSTANT_000_W));
+    for (uint32_t v = 0; vb && v < 4; ++v) {
+      t += "(";
+      for (uint32_t c = 0; c < 5; ++c) {
+        uint32_t raw = xe::byte_swap(*reinterpret_cast<const uint32_t*>(vb + (v * 6 + c) * 4));
+        float f;
+        std::memcpy(&f, &raw, 4);
+        t += fmt::format("{} ", f);
+      }
+      t += ") ";
+    }
+    GvSeqAdd(t);
+  }
+  if (gv_seq_left && pixel_shader && pixel_shader->ucode_data_hash() == 0x65649D1575EBDC5Cull &&
+      render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
+    static int gv_composite_probes = 0;
+    if (gv_composite_probes++ < 2) {
+      render_target_cache_->GvProbeBoundColor("depth_after_composite");
+      render_target_cache_->GvProbeBoundColor("color_after_composite");
+    }
+  }
+  if (gv_seq_left && cvars::gv_probe_draw_every > 0 && pixel_shader &&
+      render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
+    static uint32_t gv_draw_n = 0;
+    if (++gv_draw_n % uint32_t(cvars::gv_probe_draw_every) == 0) {
+      render_target_cache_->GvProbeBoundColor(fmt::format("draw{}_ps{:016X}", gv_draw_n, pixel_shader->ucode_data_hash()));
+      GvSeqAdd(fmt::format("   PROBED after draw {}", gv_draw_n));
+    }
+  }
   return true;
 }
 
@@ -3829,7 +3918,7 @@ bool D3D12CommandProcessor::IssueCopy() {
       }
       if (f) std::fclose(f);
       XELOGI("Game Vault: dumped {} bytes at {:08X} after resolve {}", dump_bytes, dump_address, dump_seen);
-      gv_seq_left = 15000;
+      gv_seq_left = 9000;
     }
   }
   if (gv_seq_left) {
@@ -3861,6 +3950,13 @@ bool D3D12CommandProcessor::IssueCopy() {
                                            written_length);
   } else {
     result = IssueCopy_ReadbackResolvePath();
+  }
+  if (gv_probe_resolves_left) {
+    uint32_t dest = (*register_file_)[XE_GPU_REG_RB_COPY_DEST_BASE];
+    if (dest == gv_probe_watch[0] || dest == gv_probe_watch[1]) {
+      --gv_probe_resolves_left;
+      GvProbeQueue(fmt::format("p{:02}_after_resolve_{:08X}", gv_probe_counter++, dest), dest, 1280 * 736 * 4);
+    }
   }
   gv_timing::End(deferred_command_list_, gv_timed);
   return result;
@@ -4152,7 +4248,7 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     // island (only sea was left, 2026-11-01). Drop such entries; partially
     // overlapping ones stay, so no other guest bytes are lost.
     for (auto it = gv_readback_pending_.begin();
-         it != gv_readback_pending_.end();) {
+         cvars::gv_drop_superseded_readbacks && it != gv_readback_pending_.end();) {
       if (it->address >= written_address &&
           uint64_t(it->address) + it->length <=
               uint64_t(written_address) + readback_length) {
@@ -4251,6 +4347,25 @@ bool D3D12CommandProcessor::GvReadbackRingAllocate(uint32_t length,
 }
 
 void D3D12CommandProcessor::GvPumpReadbacks() {
+  for (auto it = gv_probes.begin(); it != gv_probes.end();) {
+    if (GetCompletedSubmission() < it->submission) {
+      ++it;
+      continue;
+    }
+    void* mapping = nullptr;
+    D3D12_RANGE range = {0, it->size};
+    if (SUCCEEDED(it->buffer->Map(0, &range, &mapping))) {
+      FILE* f = xe::filesystem::OpenFile(xe::filesystem::GetUserFolder() / (it->name + ".bin"), "wb");
+      if (f) {
+        std::fwrite(mapping, 1, it->size, f);
+        std::fclose(f);
+      }
+      D3D12_RANGE none = {0, 0};
+      it->buffer->Unmap(0, &none);
+    }
+    it->buffer->Release();
+    it = gv_probes.erase(it);
+  }
   if (gv_probe_pending && GetCompletedSubmission() >= gv_probe_submission) {
     gv_probe_pending = false;
     void* mapping = nullptr;

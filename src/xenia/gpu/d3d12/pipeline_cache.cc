@@ -41,6 +41,9 @@
 
 #include "third_party/fmt/include/fmt/xchar.h"
 
+DEFINE_bool(gv_depth_no_alpha_kill, true, "Game Vault: depth-writing pixel shaders drawn without alpha test / alpha to coverage get no discard and no SV_Coverage (the Xbox driver ignores their depth otherwise).", "D3D12");
+DEFINE_bool(gv_color_pass_depth_always, false, "Game Vault debugging: colour draws with greater-or-equal depth test pass always.", "D3D12");
+DEFINE_int32(gv_color_pass_depth_bias, 0, "Game Vault: integer host depth bias added to colour draws testing depth with greater/less-or-equal (0 = off).", "D3D12");
 DEFINE_bool(d3d12_dxbc_disasm, false,
             "Disassemble DXBC shaders after generation.", "D3D12");
 DEFINE_bool(
@@ -758,6 +761,11 @@ PipelineCache::GetCurrentPixelShaderModification(
     // Game Vault: dual-source blending alpha for a 16-bit fixed-point RT0 (see
     // the modification). Only when RT0 is the only color output (dual-source
     // blending allows one render target) and the blend isn't MIN/MAX.
+    // Game Vault: see gv_depth_no_alpha_kill.
+    modification.pixel.gv_depth_no_alpha_kill =
+        uint32_t(cvars::gv_depth_no_alpha_kill && shader.writes_depth() &&
+                 !draw_util::DoesCoverageDependOnAlpha(regs.Get<reg::RB_COLORCONTROL>()));
+
     modification.pixel.rt0_fixed16_dual_source_alpha = 0;
     if (cvars::snorm16_render_target_full_range &&
         shader.writes_color_targets() == 0b0001) {
@@ -1495,6 +1503,18 @@ bool PipelineCache::GetCurrentStateDescription(
         regs.Get<reg::RB_DEPTH_INFO>().depth_format, polygon_offset);
     description_out.depth_bias_slope_scaled =
         polygon_offset_scale * xenos::kPolygonOffsetScaleSubpixelUnit;
+    // Game Vault: a colour pass redrawing geometry over its own depth prepass
+    // with "greater or equal" must produce exactly the prepass depth. Pull it a
+    // few ULPs toward the camera (reverse Z) when the host compiles the two
+    // pipelines' position math differently (Naughty Bear's island, Xbox).
+    if (cvars::gv_color_pass_depth_bias && pixel_shader &&
+        normalized_depth_control.z_enable &&
+        (normalized_depth_control.zfunc == xenos::CompareFunction::kGreaterEqual ||
+         normalized_depth_control.zfunc == xenos::CompareFunction::kLessEqual)) {
+      int32_t bias = cvars::gv_color_pass_depth_bias;
+      description_out.depth_bias +=
+          normalized_depth_control.zfunc == xenos::CompareFunction::kGreaterEqual ? bias : -bias;
+    }
     // The slope-scaled depth bias multiplier depends on this at pipeline
     // creation.
     description_out.resolution_scale_native =
@@ -1519,6 +1539,10 @@ bool PipelineCache::GetCurrentStateDescription(
     if (bound_depth_and_color_render_target_bits & 1) {
       if (normalized_depth_control.z_enable) {
         description_out.depth_func = normalized_depth_control.zfunc;
+        if (cvars::gv_color_pass_depth_always && pixel_shader &&
+            normalized_depth_control.zfunc == xenos::CompareFunction::kGreaterEqual) {
+          description_out.depth_func = xenos::CompareFunction::kAlways;
+        }
         description_out.depth_write = normalized_depth_control.z_write_enable;
       } else {
         description_out.depth_func = xenos::CompareFunction::kAlways;

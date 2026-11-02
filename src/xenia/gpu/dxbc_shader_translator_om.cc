@@ -23,6 +23,13 @@ DEFINE_bool(use_fuzzy_alpha_epsilon, false,
             "NVIDIA graphics cards",
             "GPU");
 
+#include <cstdlib>
+DEFINE_string(gv_odepth_ps, "", "Game Vault debugging: hex pixel shader hash whose depth output is replaced by gv_odepth_value.", "D3D12");
+DEFINE_bool(gv_depth_kill_by_mask, false, "Game Vault: pixel shaders writing depth reject pixels through SV_Coverage instead of discard (the Xbox driver ignores SV_Depth in shaders with a discard).", "D3D12");
+DEFINE_bool(gv_depth_before_discard, false, "Game Vault: pixel shaders writing depth write it before their alpha test / alpha to coverage discards (the Xbox driver ignores depth written after a discard).", "D3D12");
+DEFINE_bool(gv_no_discard_with_depth, false, "Game Vault debugging: no alpha test / alpha to coverage discards in pixel shaders that write depth.", "D3D12");
+DEFINE_double(gv_odepth_value, 0.2, "Game Vault debugging: host depth written for gv_odepth_ps.", "D3D12");
+
 namespace xe {
 namespace gpu {
 using namespace ucode;
@@ -2024,8 +2031,19 @@ void DxbcShaderTranslator::CompletePixelShader_DSV_DepthTo24Bit() {
                dxbc::Src::LF(0.5f));
       a_.OpEndIf();
       // Write the depth from the temporary to the system depth output.
-      a_.OpMov(dxbc::Dest::ODepth(),
-               dxbc::Src::R(system_temp_depth_stencil_, dxbc::Src::kXXXX));
+      static const uint64_t gv_odepth_ps = std::strtoull(cvars::gv_odepth_ps.c_str(), nullptr, 16);
+      if (gv_odepth_ps && current_shader().ucode_data_hash() == gv_odepth_ps && cvars::gv_odepth_value < 0.0) {
+        // Game Vault debugging: show the shader's depth as the colour (x40), keep the depth.
+        a_.OpMov(dxbc::Dest::ODepth(), dxbc::Src::R(system_temp_depth_stencil_, dxbc::Src::kXXXX));
+        a_.OpMul(dxbc::Dest::O(0), dxbc::Src::R(system_temp_depth_stencil_, dxbc::Src::kXXXX),
+                 dxbc::Src::LF(40.0f));
+      } else if (gv_odepth_ps && current_shader().ucode_data_hash() == gv_odepth_ps) {
+        // Game Vault debugging: a fixed depth instead of the shader's.
+        a_.OpMov(dxbc::Dest::ODepth(), dxbc::Src::LF(float(cvars::gv_odepth_value)));
+      } else {
+        a_.OpMov(dxbc::Dest::ODepth(),
+                 dxbc::Src::R(system_temp_depth_stencil_, dxbc::Src::kXXXX));
+      }
     } else if (apply_polygon_offset) {
       // Some decal draws use bias values too small for host RT depth bias to
       // stay stable. Writing the biased depth here keeps those redraws stable
@@ -2188,14 +2206,18 @@ void DxbcShaderTranslator::CompletePixelShader_AlphaToMaskSample(
 void DxbcShaderTranslator::CompletePixelShader_AlphaToMask() {
   // Check if alpha to coverage can be done at all in this shader.
   if (!current_shader().writes_color_target(0) ||
-      IsForceEarlyDepthStencilGlobalFlagEnabled()) {
+      IsForceEarlyDepthStencilGlobalFlagEnabled() || GvSkipCoverageOutput()) {
     return;
   }
 
   if (!edram_rov_used_) {
     // Initialize the output coverage for the case if alpha to mask is not
     // enabled - it needs to be written on every execution path.
-    a_.OpMov(dxbc::Dest::OMask(), dxbc::Src::LU(UINT32_MAX));
+    if (gv_kill_temp_ != UINT32_MAX) {
+      a_.OpMov(dxbc::Dest::OMask(), dxbc::Src::R(gv_kill_temp_, dxbc::Src::kXXXX));
+    } else {
+      a_.OpMov(dxbc::Dest::OMask(), dxbc::Src::LU(UINT32_MAX));
+    }
   }
 
   // Check if alpha to coverage is enabled.
@@ -2296,8 +2318,12 @@ void DxbcShaderTranslator::CompletePixelShader_AlphaToMask() {
   } else {
     dxbc::Src coverage_src(
         dxbc::Src::R(coverage_temp, coverage_temp_component));
-    a_.OpDiscard(false, coverage_src);
-    a_.OpMov(dxbc::Dest::OMask(), coverage_src);
+    if (gv_kill_temp_ != UINT32_MAX) {
+      a_.OpAnd(dxbc::Dest::OMask(), coverage_src, dxbc::Src::R(gv_kill_temp_, dxbc::Src::kXXXX));
+    } else {
+      a_.OpDiscard(false, coverage_src);
+      a_.OpMov(dxbc::Dest::OMask(), coverage_src);
+    }
   }
 
   // Release temp.
@@ -3439,8 +3465,27 @@ void DxbcShaderTranslator::CompletePixelShader() {
     return;
   }
 
+  // Game Vault (2026-11-02, Naughty Bear's island): the Xbox's driver ignores a pixel shader's depth output (SV_Depth)
+  // written after a discard, and stores the interpolated depth instead - Naughty Bear pasting its saved scene depth
+  // back got 0 everywhere and the sea covered the island. Writing the depth before the alpha test and alpha to coverage
+  // discards keeps both working there (a discarded pixel writes nothing either way).
+  bool gv_depth_written_early = cvars::gv_depth_before_discard && !edram_rov_used_ && current_shader().writes_depth();
+  if (gv_depth_written_early) {
+    CompletePixelShader_DSV_DepthTo24Bit();
+  }
+  // A discard anywhere in the shader is enough for the driver to drop the depth, so such shaders reject pixels
+  // through SV_Coverage instead (coverage 0 writes nothing, like a discard).
+  gv_kill_temp_ = UINT32_MAX;
+  if (cvars::gv_depth_kill_by_mask && !edram_rov_used_ && current_shader().writes_depth() &&
+      current_shader().writes_color_target(0) && !IsForceEarlyDepthStencilGlobalFlagEnabled()) {
+    gv_kill_temp_ = PushSystemTemp();
+    a_.OpMov(dxbc::Dest::R(gv_kill_temp_, 0b0001), dxbc::Src::LU(UINT32_MAX));
+  }
   if (current_shader().writes_color_target(0) &&
-      !IsForceEarlyDepthStencilGlobalFlagEnabled()) {
+      !IsForceEarlyDepthStencilGlobalFlagEnabled() &&
+      !(cvars::gv_no_discard_with_depth && !edram_rov_used_ && current_shader().writes_depth()) &&
+      !(!edram_rov_used_ && current_shader().writes_depth() &&
+        GetDxbcShaderModification().pixel.gv_depth_no_alpha_kill)) {
     if (edram_rov_used_) {
       // Check if the render target 0 was written to on the execution path.
       uint32_t rt_0_written_temp = PushSystemTemp();
@@ -3562,6 +3607,9 @@ void DxbcShaderTranslator::CompletePixelShader() {
       // Discard the pixel if it has failed the test.
       if (edram_rov_used_) {
         a_.OpRetC(false, alpha_test_mask_src);
+      } else if (gv_kill_temp_ != UINT32_MAX) {
+        a_.OpMovC(dxbc::Dest::R(gv_kill_temp_, 0b0001), alpha_test_mask_src,
+                  dxbc::Src::R(gv_kill_temp_, dxbc::Src::kXXXX), dxbc::Src::LU(0));
       } else {
         a_.OpDiscard(false, alpha_test_mask_src);
       }
@@ -3587,7 +3635,13 @@ void DxbcShaderTranslator::CompletePixelShader() {
     CompletePixelShader_WriteToROV();
   } else {
     CompletePixelShader_WriteToRTVs();
-    CompletePixelShader_DSV_DepthTo24Bit();
+    if (!gv_depth_written_early) {
+      CompletePixelShader_DSV_DepthTo24Bit();
+    }
+  }
+  if (gv_kill_temp_ != UINT32_MAX) {
+    PopSystemTemp();
+    gv_kill_temp_ = UINT32_MAX;
   }
 }
 

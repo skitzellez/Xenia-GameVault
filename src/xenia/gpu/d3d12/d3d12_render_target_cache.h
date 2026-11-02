@@ -150,6 +150,7 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
  public:
   // Game Vault debugging: clear the render targets bound by the last Update (depth to the value, color to 0).
   void GvClearBound(float depth);
+  void GvProbeBoundColor(const std::string& tag);
 
  protected:
 

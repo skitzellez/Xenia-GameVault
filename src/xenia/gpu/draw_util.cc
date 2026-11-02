@@ -37,6 +37,8 @@ DEFINE_bool(
     "be minimal if only a small portion of the scene is affected.",
     "GPU");
 
+DEFINE_double(gv_wd_zmin, -1.0, "Game Vault debugging: viewport MinDepth for draws whose pixel shader writes depth (-1 = off).", "GPU");
+
 namespace xe {
 namespace gpu {
 namespace draw_util {
@@ -594,6 +596,9 @@ void GetHostViewportInfo(GetViewportInfoArgs* XE_RESTRICT args,
       z_min *= 0.5f;
       z_max *= 0.5f;
     }
+  }
+  if (args->pixel_shader_writes_depth && cvars::gv_wd_zmin >= 0.0) {
+    z_min = float(cvars::gv_wd_zmin);
   }
   viewport_info_out.z_min = z_min;
   viewport_info_out.z_max = z_max;

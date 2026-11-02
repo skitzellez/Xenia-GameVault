@@ -52,6 +52,9 @@ DEFINE_bool(dxbc_source_map, false,
             "for debugging.",
             "GPU.Debug");
 
+// Game Vault debugging (2026-11-02): no SV_Coverage output in pixel shaders that write depth.
+DEFINE_bool(gv_no_coverage_with_depth, false, "Game Vault: pixel shaders writing depth get no SV_Coverage output (the Xbox driver zeroes their depth otherwise).", "D3D12");
+
 namespace xe {
 namespace gpu {
 using namespace ucode;
@@ -3404,7 +3407,7 @@ void DxbcShaderTranslator::WriteOutputSignature() {
       // Coverage output for alpha to mask (SV_Coverage).
       size_t coverage_position = SIZE_MAX;
       if ((color_targets_written & 0b1) &&
-          !IsForceEarlyDepthStencilGlobalFlagEnabled()) {
+          !IsForceEarlyDepthStencilGlobalFlagEnabled() && !GvSkipCoverageOutput()) {
         coverage_position = shader_object_.size();
         shader_object_.resize(shader_object_.size() + kParameterDwords);
         ++parameter_count;
@@ -3834,7 +3837,7 @@ void DxbcShaderTranslator::WriteShaderCode() {
       }
       // Coverage output for alpha to mask.
       if ((color_targets_written & 0b1) &&
-          !global_flag_force_early_depth_stencil) {
+          !global_flag_force_early_depth_stencil && !GvSkipCoverageOutput()) {
         ao_.OpDclOutput(dxbc::Dest::OMask());
       }
       // Depth output.

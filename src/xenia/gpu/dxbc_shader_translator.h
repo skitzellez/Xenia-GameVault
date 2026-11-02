@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_DXBC_SHADER_TRANSLATOR_H_
 #define XENIA_GPU_DXBC_SHADER_TRANSLATOR_H_
 
+#include "xenia/base/cvar.h"
 #include <cstddef>
 #include <cstring>
 #include <string>
@@ -22,6 +23,8 @@
 #include "xenia/gpu/shader_translator.h"
 #include "xenia/gpu/ucode.h"
 #include "xenia/ui/graphics_provider.h"
+
+DECLARE_bool(gv_no_coverage_with_depth);
 
 namespace xe {
 namespace gpu {
@@ -114,7 +117,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
     // If anything in this is structure is changed in a way not compatible with
     // the previous layout, invalidate the pipeline storages by increasing this
     // version number (0xYYYYMMDD)!
-    static constexpr uint32_t kVersion = 0x20261101;  // Game Vault: dual-source alpha for 16-bit fixed blending
+    static constexpr uint32_t kVersion = 0x20261105;  // Game Vault: gv_depth_no_alpha_kill variant (Xbox driver)
 
     enum class DepthStencilMode : uint32_t {
       kNoModifiers,
@@ -202,6 +205,11 @@ class DxbcShaderTranslator : public ShaderTranslator {
       // alpha the blending needs (not divided) goes out as o1.a, and the
       // pipeline uses SRC1_ALPHA / INV_SRC1_ALPHA (dual-source blending).
       uint32_t rt0_fixed16_dual_source_alpha : 1;
+      // Game Vault: the shader writes depth and neither the alpha test nor
+      // alpha to coverage is enabled for the draw - no discard and no
+      // SV_Coverage in it. The Xbox's driver ignores SV_Depth in a pixel shader
+      // that has either (Naughty Bear pastes its scene depth back with one).
+      uint32_t gv_depth_no_alpha_kill : 1;
     } pixel;
 
     explicit Modification(uint64_t modification_value = 0)
@@ -714,6 +722,12 @@ class DxbcShaderTranslator : public ShaderTranslator {
     return is_vertex_shader() &&
            Shader::IsHostVertexShaderTypeDomain(
                GetDxbcShaderModification().vertex.host_vertex_shader_type);
+  }
+
+  // Game Vault: see gv_no_coverage_with_depth.
+  bool GvSkipCoverageOutput() const {
+    return is_pixel_shader() && !edram_rov_used_ && current_shader().writes_depth() &&
+           (cvars::gv_no_coverage_with_depth || GetDxbcShaderModification().pixel.gv_depth_no_alpha_kill);
   }
 
   bool IsForceEarlyDepthStencilGlobalFlagEnabled() const {
@@ -1229,6 +1243,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
   //   - Not ROV_IsDepthStencilEarly: Z gradients in .xy taken in the beginning
   //     of the shader before any return statement is possibly reached.
   uint32_t system_temp_depth_stencil_;
+  // Game Vault: with gv_depth_kill_by_mask, the coverage the alpha test leaves (instead of a discard).
+  uint32_t gv_kill_temp_ = UINT32_MAX;
   // Up to 4 color outputs in pixel shaders (needs to be readable, because of
   // alpha test, alpha to coverage, exponent bias, gamma, and also for ROV
   // writing).

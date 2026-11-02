@@ -35,6 +35,8 @@ class D3D12CommandProcessor;
 
 class D3D12TextureCache final : public TextureCache {
  public:
+  // Game Vault debugging: save the host texture bound to a fetch constant (mip 0) to LocalState.
+  void GvProbeBinding(uint32_t fetch_constant, const std::string& tag);
   // Keys that can be stored for checking validity whether descriptors for host
   // shader bindings are up to date.
   struct TextureSRVKey {
