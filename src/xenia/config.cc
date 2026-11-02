@@ -758,6 +758,10 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     // on xenia-canary game-compatibility issue 14); reading ~1,700 of them back per second held the streets at ~20 fps
     // on the console. No visible change without it (user check, 2026-10-27).
     {"545407F2", "[GPU]\nreadback_resolve = \"none\"\n"},
+    // The Orange Box (Half-Life 2, Episodes One and Two, Portal, Team Fortress 2): every text garbled or dots. The
+    // Source engine draws its letters, resolves them and reads them back at once; "fast" hands it the previous
+    // frame's copy (xenia-canary game-compatibility issue 235). Console check 2026-11-02: all text readable, 30 fps.
+    {"4541080F", "[GPU]\nreadback_resolve = \"full\"\n"},
 };
 
 void ApplyBuiltInGameConfig(const std::string_view title_id) {
