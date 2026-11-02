@@ -755,6 +755,7 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     {"545108B4", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE 13
     {"545408B2", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE 2K14
     {"545408B6", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE 2K15
+    {"315A07D2", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE 2K16 (a 2K title ID)
     // Naruto: The Broken Bond (+ demo): black, stretched textures
     // (xenia-canary game-compatibility issue 87, xenia-canary issue 906).
     {"55530825",
