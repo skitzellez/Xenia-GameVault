@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_TEXTURE_CACHE_H_
 #define XENIA_GPU_TEXTURE_CACHE_H_
 
+#include <string>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -29,6 +30,9 @@
 
 namespace xe {
 namespace gpu {
+
+// Game Vault debugging (d3d12_log_draw_pairs): how often each texture was (re)loaded from guest memory.
+std::string GvTextureLoadsText();
 
 // Manages host copies of guest textures, performing untiling, format and endian
 // conversion of textures stored in the shared memory, and also handling

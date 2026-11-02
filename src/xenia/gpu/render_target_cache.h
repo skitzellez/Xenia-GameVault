@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -42,6 +43,9 @@ namespace gpu {
 
 class RenderTargetCache {
  public:
+  // Game Vault debugging: the host render targets the last Update bound and the transfers it made.
+  std::string GvDebugBoundText() const;
+
   // High-level emulation logic implementation path.
   enum class Path {
     // Approximate method using conventional host render targets and copying

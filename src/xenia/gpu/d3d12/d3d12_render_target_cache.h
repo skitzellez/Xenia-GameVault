@@ -147,6 +147,12 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
 
   RenderTarget* CreateRenderTarget(RenderTargetKey key) override;
 
+ public:
+  // Game Vault debugging: clear the render targets bound by the last Update (depth to the value, color to 0).
+  void GvClearBound(float depth);
+
+ protected:
+
   bool IsHostDepthEncodingDifferent(
       xenos::DepthRenderTargetFormat format) const override;
 

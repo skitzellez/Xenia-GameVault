@@ -1097,6 +1097,24 @@ void RenderTargetCache::GetHostDepthStoreRectangleInfo(
   group_count_y_out = (transfer_rectangle.height_pixels * pixel_size_y) >> 3;
 }
 
+std::string RenderTargetCache::GvDebugBoundText() const {
+  auto key_text = [](const RenderTarget* rt) -> std::string {
+    if (!rt) return "none";
+    RenderTargetKey k = rt->key();
+    return fmt::format("[base {} pitch {} {} fmt {} msaa {}]", uint32_t(k.base_tiles),
+                       uint32_t(k.pitch_tiles_at_32bpp), k.is_depth ? "depth" : "color",
+                       uint32_t(k.resource_format), uint32_t(k.msaa_samples));
+  };
+  std::string t = "bound depth " + key_text(last_update_accumulated_render_targets_[0]) + " c0 " +
+                  key_text(last_update_accumulated_render_targets_[1]);
+  for (uint32_t i = 0; i < 2; ++i) {
+    for (const Transfer& x : last_update_transfers_[i]) {
+      t += fmt::format(" | transfer{} {}-{} from {}", i, x.start_tiles, x.end_tiles, key_text(x.source));
+    }
+  }
+  return t;
+}
+
 void RenderTargetCache::GetResolveCopyRectanglesToDump(
     uint32_t base, uint32_t row_length, uint32_t rows, uint32_t pitch,
     std::vector<ResolveCopyDumpRectangle>& rectangles_out) const {

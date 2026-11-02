@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/shared_memory.h"
 
+#include <string>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/bit_range.h"
 #include "xenia/base/logging.h"
@@ -16,6 +18,10 @@
 
 namespace xe {
 namespace gpu {
+namespace d3d12 {
+bool GvSeqActive();
+void GvSeqAddPublic(std::string line);
+}  // namespace d3d12
 
 SharedMemory::SharedMemory(Memory& memory) : memory_(memory) {
   page_size_log2_ = xe::log2_ceil(uint32_t(xe::memory::page_size()));
@@ -414,6 +420,13 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
   if (!current_upload_range) {
     return true;
   }
+  if (d3d12::GvSeqActive()) {
+    std::string t = fmt::format("   SHMEM UPLOAD for {:08X}+{:X}:", start, length);
+    for (unsigned int i = 0; i < current_upload_range; ++i) {
+      t += fmt::format(" {:08X}+{:X}", uploads[i].first << page_size_log2_, uploads[i].second << page_size_log2_);
+    }
+    d3d12::GvSeqAddPublic(t);
+  }
 
   return UploadRanges(uploads, current_upload_range);
 }
@@ -543,6 +556,10 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallbackThunk(
 
 std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     uint32_t physical_address_start, uint32_t length, bool exact_range) {
+  if (d3d12::GvSeqActive()) {
+    d3d12::GvSeqAddPublic(fmt::format("   SHMEM CPU-INVALIDATE {:08X}+{:X} exact {}", physical_address_start, length,
+                                      uint32_t(exact_range)));
+  }
   if (length == 0 || physical_address_start >= kBufferSize) {
     return std::make_pair(uint32_t(0), UINT32_MAX);
   }

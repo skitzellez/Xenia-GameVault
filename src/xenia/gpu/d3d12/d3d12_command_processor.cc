@@ -9,6 +9,9 @@
 
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include <cstdlib>
+#include <cstdio>
+#include <algorithm>
+#include <vector>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -20,6 +23,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
@@ -51,9 +55,34 @@ DEFINE_int32(d3d12_hang_locator, 0,
 // Game Vault: skips every draw that uses this vertex shader (hex ucode hash from the hang locator), to see whether the
 // game goes on without it (GTA IV: VS D4DD2464AB7D672C hung the console's GPU, 2026-10-24). Empty = off.
 DEFINE_string(d3d12_skip_vertex_shader, "",
-              "Game Vault debugging: hex hash of a vertex shader whose draws are skipped (from the hang locator). "
+              "Game Vault debugging: hex hashes (comma-separated) of vertex shaders whose draws are skipped (from the hang locator). "
               "Empty = off.",
               "D3D12");
+// Game Vault: the same for pixel shaders, and a once-per-pair draw log, to find which draws break a picture
+// (Naughty Bear's island ground, 2026-11-01). Both read from the per-game config, so one build serves a bisect.
+DEFINE_string(d3d12_skip_pixel_shader, "",
+              "Game Vault debugging: hex hashes (comma-separated) of pixel shaders whose draws are skipped. "
+              "Empty = off.",
+              "D3D12");
+DEFINE_string(gv_dump_resolve, "",
+              "Game Vault debugging: \"<hex guest address>,<bytes>,<n>\": after the n-th resolve to that address, "
+              "write that much guest memory there to gv_resolve_dump.bin in LocalState. Empty = off.",
+              "D3D12");
+DEFINE_string(gv_seq_ps, "",
+              "Game Vault debugging: \"<hex pixel shader hash>,<n>\": at the n-th draw with that pixel shader, start a "
+              "3000-event draw/resolve trace (gv_sequence.txt in LocalState). Empty = off.",
+              "D3D12");
+DEFINE_string(gv_skip_resolve_after_ps, "",
+              "Game Vault debugging: hex pixel shader hash; full-screen color resolves after a draw with it in the same "
+              "frame are skipped. Empty = off.",
+              "D3D12");
+DEFINE_uint32(gv_probe_fetch, 0, "Game Vault debugging: texture fetch slot the gv_seq_ps probe saves.", "D3D12");
+DEFINE_string(gv_clear_on_ps, "", "Game Vault debugging: hex pixel shader hash; after its render targets are bound, really clear them (depth 0). Empty = off.", "D3D12");
+DEFINE_bool(gv_readback_ignore_protect, false, "Game Vault debugging: read resolves back into committed guest memory even if it is not marked writable.", "D3D12");
+DEFINE_bool(d3d12_log_draw_pairs, false,
+            "Game Vault debugging: log each new vertex/pixel shader pair once, with its primitive, vertex count, "
+            "depth state and render target.",
+            "D3D12");
 
 // Off on the Xbox: there each ExecuteCommandLists blocks for ~5 ms, so the
 // extra submissions cost more than the latency they save (GTA IV: 24 -> 30
@@ -2897,6 +2926,79 @@ Shader* D3D12CommandProcessor::LoadShader(xenos::ShaderType shader_type,
   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
 }
 
+namespace {
+// "A1B2...,C3D4..." -> hashes (spaces and 0x allowed); bad words are skipped.
+std::mutex gv_resolves_mutex;
+std::map<std::string, uint64_t> gv_resolves;  // description -> count
+
+// Sequence trace: once the gv_dump_resolve trigger fires, the next draws and resolves in order.
+std::vector<std::string> gv_seq;
+uint32_t gv_seq_left = 0;
+void GvSeqAdd(std::string line) {
+  if (!gv_seq_left) return;
+  gv_seq.push_back(std::move(line));
+  if (--gv_seq_left == 0) {
+    std::string text;
+    for (const auto& l : gv_seq) text += l + "\n";
+    FILE* f = xe::filesystem::OpenFile(xe::filesystem::GetUserFolder() / "gv_sequence.txt", "wb");
+    if (f) {
+      std::fwrite(text.data(), 1, text.size(), f);
+      std::fclose(f);
+    }
+    gv_seq.clear();
+  }
+}
+
+bool gv_after_marker_ps = false;
+// GPU-side probe: shared memory of the trigger draw's texture 0, copied on the GPU and saved once it is done.
+ID3D12Resource* gv_probe_buffer = nullptr;
+uint64_t gv_probe_submission = 0;
+uint32_t gv_probe_size = 0;
+bool gv_probe_pending = false;
+
+std::string GvFetchText(const RegisterFile& regs) {
+  std::string t;
+  for (uint32_t i = 0; i < 4; ++i) {
+    xenos::xe_gpu_texture_fetch_t f = regs.GetTextureFetch(i);
+    t += fmt::format(" | tf{} type {} fmt {} base {:08X} {}x{} pitch {} tiled {} endian {} swz {:03X} sign {}{}{}{} "
+                     "exp {}",
+                     i, uint32_t(f.type), uint32_t(f.format), uint32_t(f.base_address) << 12,
+                     uint32_t(f.size_2d.width) + 1, uint32_t(f.size_2d.height) + 1, uint32_t(f.pitch) << 5,
+                     uint32_t(f.tiled), uint32_t(f.endianness), uint32_t(f.swizzle), uint32_t(f.sign_x),
+                     uint32_t(f.sign_y), uint32_t(f.sign_z), uint32_t(f.sign_w), int32_t(f.exp_adjust));
+  }
+  return t;
+}
+
+std::vector<uint64_t> GvParseHashList(const std::string& text) {
+  std::vector<uint64_t> out;
+  size_t i = 0;
+  while (i < text.size()) {
+    size_t j = text.find(',', i);
+    if (j == std::string::npos) j = text.size();
+    std::string w = text.substr(i, j - i);
+    w.erase(std::remove_if(w.begin(), w.end(), [](char c) { return c == ' ' || c == '	'; }), w.end());
+    if (!w.empty()) {
+      char* end = nullptr;
+      uint64_t v = std::strtoull(w.c_str(), &end, 16);
+      if (end && *end == 0) out.push_back(v);
+    }
+    i = j + 1;
+  }
+  if (!out.empty()) XELOGI("Game Vault: skipping draws of {} shader(s) (d3d12_skip_*_shader)", out.size());
+  return out;
+}
+}  // namespace
+
+// Called by the render target cache for the Game Vault sequence trace.
+bool GvSeqActive() { return gv_seq_left != 0; }
+void GvSeqAddPublic(std::string line) { GvSeqAdd(std::move(line)); }
+std::string GvRtKeyText(uint32_t k) {
+  if (!k) return "none";
+  return fmt::format("[base {} pitch {} {} fmt {} msaa {}]", k & 0x7FF, (k >> 11) & 0xFF,
+                     ((k >> 21) & 1) ? "depth" : "color", (k >> 22) & 0xF, (k >> 19) & 3);
+}
+
 bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
@@ -2929,16 +3031,11 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     // Always need a vertex shader.
     return false;
   }
-  if (!cvars::d3d12_skip_vertex_shader.empty()) {
-    static const uint64_t skip_hash = std::strtoull(cvars::d3d12_skip_vertex_shader.c_str(), nullptr, 16);
-    if (vertex_shader->ucode_data_hash() == skip_hash) {
-      static bool skip_logged = false;
-      if (!skip_logged) {
-        skip_logged = true;
-        XELOGI("Game Vault: skipping draws with vertex shader {:016X} (d3d12_skip_vertex_shader)", skip_hash);
-      }
-      return true;
-    }
+  static const std::vector<uint64_t> gv_skip_vs = GvParseHashList(cvars::d3d12_skip_vertex_shader);
+  static const std::vector<uint64_t> gv_skip_ps = GvParseHashList(cvars::d3d12_skip_pixel_shader);
+  if (!gv_skip_vs.empty() &&
+      std::find(gv_skip_vs.begin(), gv_skip_vs.end(), vertex_shader->ucode_data_hash()) != gv_skip_vs.end()) {
+    return true;
   }
   pipeline_cache_->AnalyzeShaderUcode(*vertex_shader);
 
@@ -2971,6 +3068,145 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     }
   }
 
+  if (pixel_shader && !gv_skip_ps.empty() &&
+      std::find(gv_skip_ps.begin(), gv_skip_ps.end(), pixel_shader->ucode_data_hash()) != gv_skip_ps.end()) {
+    return true;
+  }
+  if (cvars::d3d12_log_draw_pairs) {
+    // Every pair once with its first draw's state, plus how many draws used it; LocalState\gv_draw_pairs.txt is
+    // rewritten every 5 s (the main log loses its tail when the app is stopped).
+    struct GvPair {
+      std::string first;
+      uint64_t draws = 0, vertices = 0;
+      uint32_t order = 0;
+    };
+    static std::mutex gv_pairs_mutex;
+    static std::map<std::pair<uint64_t, uint64_t>, GvPair> gv_pairs;
+    static auto gv_pairs_written = std::chrono::steady_clock::now();
+    uint64_t ps_hash = pixel_shader ? pixel_shader->ucode_data_hash() : 0;
+    std::lock_guard<std::mutex> lock(gv_pairs_mutex);
+    GvPair& pair = gv_pairs[{vertex_shader->ucode_data_hash(), ps_hash}];
+    if (pair.draws++ == 0) {
+      auto depth = regs.Get<reg::RB_DEPTHCONTROL>();
+      auto color_info = regs.Get<reg::RB_COLOR_INFO>();
+      auto depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+      pair.order = uint32_t(gv_pairs.size());
+      pair.first = fmt::format(
+          "prim {} count {} z_enable {} z_write {} zfunc {} stencil {} blend {:08X} cmask {:08X} rt0 base {} fmt {} "
+          "depth base {} fmt {} pitch {} msaa {} cull {:08X}",
+          uint32_t(primitive_type), index_count, uint32_t(depth.z_enable), uint32_t(depth.z_write_enable),
+          uint32_t(depth.zfunc), uint32_t(depth.stencil_enable), regs[XE_GPU_REG_RB_BLENDCONTROL0],
+          regs[XE_GPU_REG_RB_COLOR_MASK], uint32_t(color_info.color_base), uint32_t(color_info.color_format),
+          uint32_t(depth_info.depth_base), uint32_t(depth_info.depth_format),
+          uint32_t(regs.Get<reg::RB_SURFACE_INFO>().surface_pitch),
+          uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples), regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL]) + GvFetchText(regs);
+    }
+    pair.vertices += index_count;
+    auto now = std::chrono::steady_clock::now();
+    if (now - gv_pairs_written > std::chrono::seconds(5)) {
+      gv_pairs_written = now;
+      std::string text;
+      for (const auto& [key, value] : gv_pairs) {
+        text += fmt::format("#{:03} VS {:016X} PS {:016X} draws {} vertices {} | {}\n", value.order, key.first,
+                            key.second, value.draws, value.vertices, value.first);
+      }
+      text += GvTextureLoadsText();
+      {
+        std::lock_guard<std::mutex> rlock(gv_resolves_mutex);
+        for (const auto& [desc, count] : gv_resolves) {
+          text += fmt::format("resolve x{} | {}\n", count, desc);
+        }
+      }
+      FILE* f = xe::filesystem::OpenFile(xe::filesystem::GetUserFolder() / "gv_draw_pairs.txt", "wb");
+      if (f) {
+        std::fwrite(text.data(), 1, text.size(), f);
+        std::fclose(f);
+      }
+    }
+  }
+
+  if (!cvars::gv_seq_ps.empty() && pixel_shader) {
+    static uint64_t seq_ps = 0;
+    static uint32_t seq_at = 0, seq_seen = 0;
+    static bool seq_parsed = false;
+    if (!seq_parsed) {
+      seq_parsed = true;
+      unsigned long long h = 0;
+      std::sscanf(cvars::gv_seq_ps.c_str(), "%llx,%u", &h, &seq_at);
+      seq_ps = h;
+    }
+    bool gv_fire = false;
+    if (pixel_shader->ucode_data_hash() == seq_ps) {
+      ++seq_seen;
+      if (seq_seen == seq_at) gv_fire = true;
+      if ((seq_seen & 15) == 0) {
+        std::error_code ec;
+        auto trigger = xe::filesystem::GetUserFolder() / "gv_probe_now.txt";
+        if (std::filesystem::exists(trigger, ec)) {
+          std::filesystem::remove(trigger, ec);
+          gv_fire = true;
+        }
+      }
+    }
+    if (gv_fire) {
+      gv_seq_left = 15000;
+      {
+        // Textures 0 and 1 of this draw, as the GPU sees them, one after the other.
+        xenos::xe_gpu_texture_fetch_t f0 = regs.GetTextureFetch(0);
+        xenos::xe_gpu_texture_fetch_t f1 = regs.GetTextureFetch(1);
+        uint32_t w = (uint32_t(f0.size_2d.width) + 32) & ~31u, h = (uint32_t(f0.size_2d.height) + 32) & ~31u;
+        uint32_t one = w * h * 4;
+        gv_probe_size = one * 2;
+        D3D12_RESOURCE_DESC desc;
+        ui::d3d12::util::FillBufferResourceDesc(desc, gv_probe_size, D3D12_RESOURCE_FLAG_NONE);
+        if (gv_probe_buffer) {
+          gv_probe_buffer->Release();
+          gv_probe_buffer = nullptr;
+        }
+        if (SUCCEEDED(GetD3D12Provider().GetDevice()->CreateCommittedResource(
+                &ui::d3d12::util::kHeapPropertiesReadback, D3D12_HEAP_FLAG_NONE, &desc,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&gv_probe_buffer))) &&
+            BeginSubmission(true)) {
+          shared_memory_->UseAsCopySource();
+          SubmitBarriers();
+          deferred_command_list_.D3DCopyBufferRegion(gv_probe_buffer, 0, shared_memory_->GetBuffer(),
+                                                     uint32_t(f0.base_address) << 12, one);
+          deferred_command_list_.D3DCopyBufferRegion(gv_probe_buffer, one, shared_memory_->GetBuffer(),
+                                                     uint32_t(f1.base_address) << 12, one);
+          gv_probe_submission = GetCurrentSubmission();
+          gv_probe_pending = true;
+        }
+      }
+      // Also save what this draw's textures 0..2 hold in guest memory right now (tiled, as the game stored them).
+      for (uint32_t i = 0; i < 3; ++i) {
+        xenos::xe_gpu_texture_fetch_t f = regs.GetTextureFetch(i);
+        uint32_t base = uint32_t(f.base_address) << 12;
+        uint32_t w = (uint32_t(f.size_2d.width) + 32) & ~31u, h = (uint32_t(f.size_2d.height) + 32) & ~31u;
+        const uint8_t* src = memory_->TranslatePhysical<const uint8_t*>(base);
+        FILE* df = xe::filesystem::OpenFile(xe::filesystem::GetUserFolder() / fmt::format("gv_tex{}.bin", i), "wb");
+        if (df && src) std::fwrite(src, 1, size_t(w) * h * 4, df);
+        if (df) std::fclose(df);
+      }
+    }
+  }
+  if (!cvars::gv_skip_resolve_after_ps.empty() && pixel_shader) {
+    static const uint64_t marker = std::strtoull(cvars::gv_skip_resolve_after_ps.c_str(), nullptr, 16);
+    if (pixel_shader->ucode_data_hash() == marker) gv_after_marker_ps = true;
+  }
+  if (gv_seq_left) {
+    auto depth = regs.Get<reg::RB_DEPTHCONTROL>();
+    GvSeqAdd(fmt::format("DRAW VS {:016X} PS {:016X} prim {} count {} z {}{} f{} cmask {:08X} rt0 {} fmt {} surf {:08X} "
+                         "modectl {:08X}",
+                         vertex_shader->ucode_data_hash(), pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+                         uint32_t(primitive_type), index_count, uint32_t(depth.z_enable),
+                         uint32_t(depth.z_write_enable), uint32_t(depth.zfunc), regs[XE_GPU_REG_RB_COLOR_MASK],
+                         uint32_t(regs.Get<reg::RB_COLOR_INFO>().color_base),
+                         uint32_t(regs.Get<reg::RB_COLOR_INFO>().color_format), regs[XE_GPU_REG_RB_SURFACE_INFO],
+                         regs[XE_GPU_REG_RB_MODECONTROL]) +
+             fmt::format(" tf0 {:08X} tf1 {:08X} tf2 {:08X}", uint32_t(regs.GetTextureFetch(0).base_address) << 12,
+                         uint32_t(regs.GetTextureFetch(1).base_address) << 12,
+                         uint32_t(regs.GetTextureFetch(2).base_address) << 12));
+  }
   const bool memexport_used_pixel =
       pixel_shader && (pixel_shader->memexport_eM_written() != 0);
   const bool memexport_used = memexport_used_vertex || memexport_used_pixel;
@@ -2986,6 +3222,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   }
   if (!primitive_processing_result.host_draw_vertex_count) {
     // Nothing to draw.
+    if (gv_seq_left) GvSeqAdd("   EXIT: no host vertices");
     return true;
   }
 
@@ -3029,6 +3266,20 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                     normalized_color_mask, *vertex_shader)) {
     return false;
   }
+  if (gv_seq_left && render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
+    GvSeqAdd("   " + render_target_cache_->GvDebugBoundText());
+  }
+  if (!cvars::gv_clear_on_ps.empty() && pixel_shader &&
+      render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
+    static const uint64_t clear_ps = std::strtoull(cvars::gv_clear_on_ps.c_str(), nullptr, 16);
+    if (pixel_shader->ucode_data_hash() == clear_ps) {
+      render_target_cache_->GvClearBound(0.0f);
+      if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control, normalized_color_mask,
+                                        *vertex_shader)) {
+        return false;
+      }
+    }
+  }
 
   // Create the pipeline (for this, need the actually used render target formats
   // from the render target cache), translating the shaders - doing this now to
@@ -3063,6 +3314,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
           bound_depth_and_color_render_target_bits,
           bound_depth_and_color_render_target_formats, &pipeline_handle,
           &root_signature)) {
+    if (gv_seq_left) GvSeqAdd("   EXIT: ConfigurePipeline failed");
     return false;
   }
 
@@ -3074,6 +3326,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
           vertex_shader->ucode_data_hash(), vertex_shader_modification.value,
           pixel_shader ? pixel_shader->ucode_data_hash() : 0,
           pixel_shader_modification.value);
+      if (gv_seq_left) GvSeqAdd("   EXIT: pipeline not ready (async)");
       return true;
     }
     // Re-fetch root signature now that pipeline is ready.
@@ -3542,6 +3795,63 @@ bool D3D12CommandProcessor::IssueCopy() {
           ? gv_timing::Begin(GetD3D12Provider(), deferred_command_list_,
                              {gv_timing::kCopyKey, 0})
           : UINT32_MAX;
+  if (cvars::d3d12_log_draw_pairs) {
+    const RegisterFile& cregs = *register_file_;
+    auto cc = cregs.Get<reg::RB_COPY_CONTROL>();
+    auto di = cregs.Get<reg::RB_COPY_DEST_INFO>();
+    auto ci = cregs.Get<reg::RB_COLOR_INFO>();
+    auto dpi = cregs.Get<reg::RB_DEPTH_INFO>();
+    std::string desc = fmt::format(
+        "src {} cmd {} depth_clear {} dest base {:08X} pitch {:08X} fmt {} num {} exp {} endian {} swap {} | "
+        "rt0 base {} fmt {} depth base {} fmt {} surf {:08X} window {:08X} scissor {:08X}/{:08X}",
+        uint32_t(cc.copy_src_select), uint32_t(cc.copy_command), uint32_t(cc.depth_clear_enable),
+        cregs[XE_GPU_REG_RB_COPY_DEST_BASE], cregs[XE_GPU_REG_RB_COPY_DEST_PITCH], uint32_t(di.copy_dest_format),
+        uint32_t(di.copy_dest_number), int32_t(di.copy_dest_exp_bias), uint32_t(di.copy_dest_endian),
+        uint32_t(di.copy_dest_swap), uint32_t(ci.color_base), uint32_t(ci.color_format), uint32_t(dpi.depth_base),
+        uint32_t(dpi.depth_format), cregs[XE_GPU_REG_RB_SURFACE_INFO], cregs[XE_GPU_REG_PA_SC_WINDOW_OFFSET],
+        cregs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL], cregs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR]);
+    std::lock_guard<std::mutex> rlock(gv_resolves_mutex);
+    ++gv_resolves[desc];
+  }
+  if (!cvars::gv_dump_resolve.empty()) {
+    static uint32_t dump_address = 0, dump_bytes = 0, dump_at = 0, dump_seen = 0;
+    static bool dump_parsed = false;
+    if (!dump_parsed) {
+      dump_parsed = true;
+      std::sscanf(cvars::gv_dump_resolve.c_str(), "%x,%u,%u", &dump_address, &dump_bytes, &dump_at);
+    }
+    if (dump_bytes && (*register_file_)[XE_GPU_REG_RB_COPY_DEST_BASE] == dump_address && ++dump_seen == dump_at) {
+      // The earlier resolves to this address have landed in guest memory by now.
+      const uint8_t* src = memory_->TranslatePhysical<const uint8_t*>(dump_address);
+      FILE* f = xe::filesystem::OpenFile(xe::filesystem::GetUserFolder() / "gv_resolve_dump.bin", "wb");
+      if (f && src) {
+        std::fwrite(src, 1, dump_bytes, f);
+      }
+      if (f) std::fclose(f);
+      XELOGI("Game Vault: dumped {} bytes at {:08X} after resolve {}", dump_bytes, dump_address, dump_seen);
+      gv_seq_left = 15000;
+    }
+  }
+  if (gv_seq_left) {
+    const RegisterFile& sregs = *register_file_;
+    auto sc = sregs.Get<reg::RB_COPY_CONTROL>();
+    GvSeqAdd(fmt::format("RESOLVE src {} cmd {} dest {:08X} fmt {} | rt0 base {} fmt {} depth base {} surf {:08X}",
+                         uint32_t(sc.copy_src_select), uint32_t(sc.copy_command),
+                         sregs[XE_GPU_REG_RB_COPY_DEST_BASE],
+                         uint32_t(sregs.Get<reg::RB_COPY_DEST_INFO>().copy_dest_format),
+                         uint32_t(sregs.Get<reg::RB_COLOR_INFO>().color_base),
+                         uint32_t(sregs.Get<reg::RB_COLOR_INFO>().color_format),
+                         uint32_t(sregs.Get<reg::RB_DEPTH_INFO>().depth_base), sregs[XE_GPU_REG_RB_SURFACE_INFO]));
+  }
+  if (gv_after_marker_ps) {
+    const RegisterFile& kregs = *register_file_;
+    if (kregs.Get<reg::RB_COPY_CONTROL>().copy_src_select < 4 &&
+        kregs.Get<reg::RB_SURFACE_INFO>().surface_pitch >= 1280) {
+      gv_after_marker_ps = false;
+      gv_timing::End(deferred_command_list_, gv_timed);
+      return true;
+    }
+  }
   bool result;
   ReadbackResolveMode readback_mode = GetReadbackResolveMode();
   if (readback_mode == ReadbackResolveMode::kDisabled) {
@@ -3576,7 +3886,7 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     HeapAllocationInfo alloc_info;
     if (physical_heap->QueryRegionInfo(written_address, &alloc_info) &&
         (alloc_info.state & kMemoryAllocationCommit) &&
-        (alloc_info.protect & kMemoryProtectWrite)) {
+        ((alloc_info.protect & kMemoryProtectWrite) || cvars::gv_readback_ignore_protect)) {
       uint32_t end_address = written_address + written_length;
       uint32_t region_end = alloc_info.base_address + alloc_info.region_size;
       if (end_address <= region_end) {
@@ -3833,6 +4143,24 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   }
 
   if (deferred) {
+    // Game Vault: an older read-back of the same memory that hasn't landed yet
+    // is obsolete now - and harmful: copying it into guest memory later marks
+    // those pages as changed by the CPU, so the next texture load re-uploads
+    // that older picture over the newer resolve the GPU already wrote there.
+    // Naughty Bear resolves its scene to one address twice a frame and pastes
+    // it back in between, so last frame's final image kept replacing the
+    // island (only sea was left, 2026-11-01). Drop such entries; partially
+    // overlapping ones stay, so no other guest bytes are lost.
+    for (auto it = gv_readback_pending_.begin();
+         it != gv_readback_pending_.end();) {
+      if (it->address >= written_address &&
+          uint64_t(it->address) + it->length <=
+              uint64_t(written_address) + readback_length) {
+        it = gv_readback_pending_.erase(it);
+      } else {
+        ++it;
+      }
+    }
     gv_readback_pending_.push_back(
         {ring_start, readback_length, written_address, GetCurrentSubmission()});
     return true;
@@ -3923,6 +4251,20 @@ bool D3D12CommandProcessor::GvReadbackRingAllocate(uint32_t length,
 }
 
 void D3D12CommandProcessor::GvPumpReadbacks() {
+  if (gv_probe_pending && GetCompletedSubmission() >= gv_probe_submission) {
+    gv_probe_pending = false;
+    void* mapping = nullptr;
+    D3D12_RANGE range = {0, gv_probe_size};
+    if (SUCCEEDED(gv_probe_buffer->Map(0, &range, &mapping))) {
+      FILE* f = xe::filesystem::OpenFile(xe::filesystem::GetUserFolder() / "gv_probe.bin", "wb");
+      if (f) {
+        std::fwrite(mapping, 1, gv_probe_size, f);
+        std::fclose(f);
+      }
+      D3D12_RANGE none = {0, 0};
+      gv_probe_buffer->Unmap(0, &none);
+    }
+  }
   if (gv_readback_pending_.empty() || !gv_readback_ring_mapping_) {
     return;
   }

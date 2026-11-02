@@ -69,6 +69,10 @@ namespace xe {
 namespace gpu {
 namespace d3d12 {
 
+bool GvSeqActive();
+void GvSeqAddPublic(std::string line);
+std::string GvRtKeyText(uint32_t k);
+
 // Generated with `xb buildshaders`.
 namespace shaders {
 #include "xenia/gpu/shaders/bytecode/d3d12_5_1/clear_uint2_ps.h"
@@ -1204,6 +1208,28 @@ void D3D12RenderTargetCache::CompletedSubmissionUpdated() {
   }
 }
 
+void D3D12RenderTargetCache::GvClearBound(float depth) {
+  RenderTarget* const* rts = last_update_accumulated_render_targets();
+  DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
+  for (uint32_t i = 0; i < 2; ++i) {
+    if (!rts[i]) continue;
+    auto& rt = *static_cast<D3D12RenderTarget*>(rts[i]);
+    D3D12_CPU_DESCRIPTOR_HANDLE handle = rt.descriptor_draw().GetHandle();
+    if (rt.key().is_depth) {
+      command_processor_.PushTransitionBarrier(rt.resource(), rt.SetResourceState(D3D12_RESOURCE_STATE_DEPTH_WRITE), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+      command_processor_.SubmitBarriers();
+      command_list.D3DClearDepthStencilView(handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, depth, 0, 0,
+                                            nullptr);
+    } else {
+      command_processor_.PushTransitionBarrier(rt.resource(), rt.SetResourceState(D3D12_RESOURCE_STATE_RENDER_TARGET), D3D12_RESOURCE_STATE_RENDER_TARGET);
+      command_processor_.SubmitBarriers();
+      static constexpr FLOAT kClear[4] = {};
+      command_list.D3DClearRenderTargetView(handle, kClear, 0, nullptr);
+    }
+  }
+  InvalidateCommandListRenderTargets();
+}
+
 void D3D12RenderTargetCache::BeginSubmission() {
   // New command list - render targets not bound.
   InvalidateCommandListRenderTargets();
@@ -1413,6 +1439,12 @@ bool D3D12RenderTargetCache::Resolve(const Memory& memory,
         copy_native ? 1 : draw_resolution_scale_y(), copy_shader_constants,
         copy_group_count_x, copy_group_count_y);
     assert_true(copy_group_count_x && copy_group_count_y);
+    if (GvSeqActive()) {
+      GvSeqAddPublic(fmt::format("   copy shader {} native {} scaled {} extent {:08X}+{:X} groups {}x{}",
+                                 int(copy_shader), uint32_t(copy_native), uint32_t(copy_dest_scaled),
+                                 resolve_info.copy_dest_extent_start, resolve_info.copy_dest_extent_length,
+                                 copy_group_count_x, copy_group_count_y));
+    }
     if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
       const draw_util::ResolveCopyShaderInfo& copy_shader_info =
           draw_util::resolve_copy_shader_info[size_t(copy_shader)];
@@ -1435,6 +1467,9 @@ bool D3D12RenderTargetCache::Resolve(const Memory& memory,
         copy_dest_committed =
             shared_memory.RequestRange(resolve_info.copy_dest_extent_start,
                                        resolve_info.copy_dest_extent_length);
+      }
+      if (GvSeqActive()) {
+        GvSeqAddPublic(fmt::format("   copy dest committed {}", uint32_t(copy_dest_committed)));
       }
       if (copy_dest_committed) {
         command_list.D3DSetComputeRootSignature(
@@ -6448,6 +6483,15 @@ void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
 
   GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows,
                                  dump_pitch, dump_rectangles_);
+  if (GvSeqActive()) {
+    std::string t = fmt::format("   dump base {} rowlen {} rows {} pitch {}:", dump_base, dump_row_length_used,
+                                dump_rows, dump_pitch);
+    for (const ResolveCopyDumpRectangle& r : dump_rectangles_) {
+      t += fmt::format(" {} rows {}+{} first {} last_len {};", GvRtKeyText(r.render_target->key().key), r.row_first,
+                       r.rows, r.row_first_start, r.row_last_end);
+    }
+    GvSeqAddPublic(t);
+  }
   if (dump_rectangles_.empty()) {
     return;
   }
@@ -6540,6 +6584,10 @@ void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
     RenderTargetKey rt_key = d3d12_rt.key();
     DumpPipelineKey pipeline_key = invocation.pipeline_key;
     ID3D12PipelineState* pipeline = GetOrCreateDumpPipeline(pipeline_key);
+    if (GvSeqActive()) {
+      GvSeqAddPublic(fmt::format("   dump invocation {} pipeline {} key {:08X}", GvRtKeyText(rt_key.key),
+                                 pipeline ? "ok" : "MISSING", pipeline_key.key));
+    }
     if (!pipeline) {
       continue;
     }

@@ -8,6 +8,8 @@
  */
 
 #include "xenia/gpu/texture_cache.h"
+#include <mutex>
+#include <map>
 
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
@@ -69,6 +71,24 @@ DEFINE_bool(tiled_shared_memory, true,
 
 namespace xe {
 namespace gpu {
+namespace d3d12 {
+bool GvSeqActive();
+void GvSeqAddPublic(std::string line);
+}  // namespace d3d12
+
+namespace {
+std::mutex gv_texloads_mutex;
+std::map<std::string, uint64_t> gv_texloads;
+}  // namespace
+
+std::string GvTextureLoadsText() {
+  std::lock_guard<std::mutex> lock(gv_texloads_mutex);
+  std::string text;
+  for (const auto& [desc, count] : gv_texloads) {
+    text += fmt::format("texload x{} | {}\n", count, desc);
+  }
+  return text;
+}
 
 const TextureCache::LoadShaderInfo
     TextureCache::load_shader_info_[kLoadShaderCount] = {
@@ -598,6 +618,10 @@ void TextureCache::Texture::MarkAsUsed() {
 
 void TextureCache::Texture::WatchCallback(
     [[maybe_unused]] const global_unique_lock_type& global_lock, bool is_mip) {
+  if (d3d12::GvSeqActive()) {
+    d3d12::GvSeqAddPublic(fmt::format("   TEX OUTDATED base {:08X} fmt {} {}x{} mip {}", key().base_page << 12,
+                                      uint32_t(key().format), key().GetWidth(), key().GetHeight(), uint32_t(is_mip)));
+  }
   if (is_mip) {
     assert_not_zero(GetGuestMipsSize());
     mips_outdated_ = true;
@@ -852,6 +876,11 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
     }
 
     // Actually load the texture data.
+  if (d3d12::GvSeqActive()) {
+    d3d12::GvSeqAddPublic(fmt::format("   TEX LOAD base {:08X} fmt {} {}x{}", texture.key().base_page << 12,
+                                      uint32_t(texture.key().format), texture.key().GetWidth(),
+                                      texture.key().GetHeight()));
+  }
     if (!LoadTextureDataFromResidentMemoryImpl(
             texture, (index_base_outdated & (1ULL << i)) != 0,
             (index_mips_outdated & (1ULL << i)) != 0)) {
@@ -946,9 +975,21 @@ bool TextureCache::LoadTextureData(Texture& texture) {
   }
 
   // Actually load the texture data.
+  if (d3d12::GvSeqActive()) {
+    d3d12::GvSeqAddPublic(fmt::format("   TEX LOAD base {:08X} fmt {} {}x{}", texture.key().base_page << 12,
+                                      uint32_t(texture.key().format), texture.key().GetWidth(),
+                                      texture.key().GetHeight()));
+  }
   if (!LoadTextureDataFromResidentMemoryImpl(texture, base_outdated,
                                              mips_outdated)) {
     return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(gv_texloads_mutex);
+    ++gv_texloads[fmt::format("base {:08X} fmt {} {}x{} tiled {} scaled {} base_outdated {}",
+                              texture_key.base_page << 12, uint32_t(texture_key.format), texture_key.GetWidth(),
+                              texture_key.GetHeight(), uint32_t(texture_key.tiled),
+                              uint32_t(texture_key.scaled_resolve), uint32_t(base_outdated))];
   }
 
   // Mark the ranges as uploaded and watch them. This is needed for scaled
