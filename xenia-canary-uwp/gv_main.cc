@@ -1083,8 +1083,8 @@ std::unique_ptr<apu::AudioSystem> GameVaultXeniaApp::CreateAudioSystem(
   return factory.Create(cvars::apu, processor);
 }
 
-// A game on several discs can keep data on one of them for the console to install (GTA V's "Install" disc, the DLC
-// disc of others): packages in \content\0000000000000000\<title>\00000002. They are copied once to where Xenia keeps
+// A game on several discs can have an install disc that cannot be played, only installed from (GTA V's):
+// packages in \content\0000000000000000\<title>\00000002. They are copied once to where Xenia keeps
 // DLC, and the game then starts from a disc with no packages, the one that is played. False when it cannot start.
 static bool InstallDiscPackages(Emulator* emulator, std::filesystem::path& start) {
   const auto discs = xe::filesystem::GameVaultDiscs();
@@ -1127,6 +1127,9 @@ static bool InstallDiscPackages(Emulator* emulator, std::filesystem::path& start
     }
     devices.push_back(std::move(device));
   }
+  // Started from a disc that is played: left alone. Its own menu installs the other disc when the player asks
+  // (Forza's "Install Disc 2"), through the disc swap.
+  if (!start_has_packages || no_packages.empty()) return true;
   uint64_t needed = 0;
   std::vector<Package> to_copy;
   for (const auto& p : packages) {
@@ -1199,10 +1202,8 @@ static bool InstallDiscPackages(Emulator* emulator, std::filesystem::path& start
     gv_addons_title.clear();
     gv_addons_name.clear();
   }
-  if (start_has_packages && !no_packages.empty()) {
-    start = no_packages.front().path;
-    XELOGI("Game Vault: starting from disc {}, the disc that is played", no_packages.front().number);
-  }
+  start = no_packages.front().path;
+  XELOGI("Game Vault: starting from disc {}, the disc that is played", no_packages.front().number);
   return true;
 }
 
