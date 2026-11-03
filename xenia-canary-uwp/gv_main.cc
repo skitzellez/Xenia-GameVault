@@ -547,21 +547,6 @@ static void RemoveOlderTitleUpdates(Emulator* emulator, const Emulator::ContentI
   }
 }
 
-// A package is unpacked into a folder of files; a folder only half filled (Xenia stopped while unpacking, or the
-// unpacking failed) still counts as installed, and the game then finds files missing in it: WWE 2K17 quit with
-// "disc read error" over chEtc_dlc30.pac of its Future Stars Pack (B1GFOOT524, 2026-11-02). So the folder a package
-// is going into is written down first ("gv_addon_pending.txt" in LocalState) and crossed off when it is in; one still
-// written down at the next start was cut short, and goes.
-static std::filesystem::path AddOnHeaderFile(Emulator* emulator, const Emulator::ContentInstallEntry& entry) {
-  auto base = emulator->content_root() / entry.header_installation_path_;   // as ExtractContentHeader names it
-  return base.parent_path() / std::filesystem::path(base.filename()).concat(".header");
-}
-static void RemoveAddOnFiles(const std::filesystem::path& folder, const std::filesystem::path& header) {
-  std::error_code ec;
-  std::filesystem::remove_all(folder, ec);
-  std::filesystem::remove(header, ec);
-}
-
 static void InstallGameVaultAddOns(Emulator* emulator) {
   // what happened, also in Xenia's own LocalState (Device Portal can read that one; the shared folder's log it cannot)
   std::ofstream trace(std::filesystem::path(xe::to_path(UWP::GetLocalState())) / "gv_addons.txt", std::ios::trunc);
@@ -599,35 +584,6 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
       for (auto it = before.begin(); it != before.end();)
         it = it->second.second == "installed" ? before.erase(it) : std::next(it);
       XELOGI("Game Vault: add-ons: loose files from the old install removed; installed add-ons go in again");
-    }
-  }
-  const auto local = std::filesystem::path(xe::to_path(UWP::GetLocalState()));
-  const auto pending = local / "gv_addon_pending.txt";
-  {   // a package cut short at the last start: its half-filled folder goes
-    std::ifstream pf(pending);
-    std::string folder, header;
-    if (pf && std::getline(pf, folder) && std::getline(pf, header)) {
-      pf.close();
-      RemoveAddOnFiles(xe::to_path(folder), xe::to_path(header));
-      trace << "half-installed " << folder << " removed\n";
-      XELOGI("Game Vault: add-ons: a package cut short at the last start was removed: {}", folder);
-    }
-    pf.close();
-    std::error_code ec;
-    std::filesystem::remove(pending, ec);
-  }
-  {   // once (1.1.8.228+): every add-on goes in again from a clean folder, so one left half filled by an older Xenia
-      // is whole again; Game Vault copies the packages again for it
-    const auto mark = local / "gv_addons_recheck_1.txt";
-    std::error_code ec;
-    if (!std::filesystem::exists(mark, ec)) {
-      int again = 0;
-      for (auto it = before.begin(); it != before.end();)
-        if (it->second.second == "installed") it = before.erase(it), again++;
-        else ++it;
-      std::ofstream(mark) << "add-ons installed again from a clean folder\n";
-      trace << "recheck: " << again << " installed add-ons go in again\n";
-      if (again) XELOGI("Game Vault: add-ons: {} installed add-ons go in again from a clean folder (one time)", again);
     }
   }
   std::map<std::string, std::pair<uint64_t, std::string>> after;
@@ -674,19 +630,7 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
       // where it goes (<profile>\<title ID>\<type>\<name>) comes from its header; without it the package was
       // unpacked loose into the content folder, where no game looks
       X_STATUS status = emulator->ProcessContentPackageHeader(path, entry);
-      std::filesystem::path folder, header;
-      if (status == X_STATUS_SUCCESS) {
-        folder = emulator->content_root() / entry.data_installation_path_;
-        header = AddOnHeaderFile(emulator, entry);
-        RemoveAddOnFiles(folder, header);   // a clean folder: nothing left from an older or half install
-        std::ofstream(pending) << xe::path_to_utf8(folder) << '\n' << xe::path_to_utf8(header) << '\n';
-        status = emulator->InstallContentPackage(path, entry);
-        if (status != X_STATUS_SUCCESS) {
-          RemoveAddOnFiles(folder, header);   // a half-filled folder would look installed to the game
-          trace << "  half-installed files removed\n";
-        }
-        std::filesystem::remove(pending, ec);
-      }
+      if (status == X_STATUS_SUCCESS) status = emulator->InstallContentPackage(path, entry);
       if (status == X_STATUS_SUCCESS) {
         result = "installed";
         installed++;
