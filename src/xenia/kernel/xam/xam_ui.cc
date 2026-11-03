@@ -28,6 +28,16 @@
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
+
+#if XE_PLATFORM_WINRT
+// Game Vault (Xbox app, xenia-canary-uwp): the console's own on-screen keyboard, whose letters reach ImGui only
+// while a menu is marked open (UWP::UpdateImGuiIO). GitHub Xenia-GameVault #1: XamShowKeyboardUI showed a text box
+// that could not be typed in, and the game (Bakugan Battle Brawlers, the player's name) waited forever.
+namespace UWP {
+void ShowKeyboard();
+void SetUIOpen(bool is_open);
+}  // namespace UWP
+#endif
 #include "xenia/ui/imgui_guest_notification.h"
 
 #include "xenia/kernel/xam/ui/create_profile_ui.h"
@@ -241,10 +251,21 @@ void MessageBoxDialog::OnDraw(ImGuiIO& io) {
   }
 }
 
+KeyboardInputDialog::~KeyboardInputDialog() {
+#if XE_PLATFORM_WINRT
+  if (has_opened_) UWP::SetUIOpen(false);
+#endif
+}
+
 void KeyboardInputDialog::OnDraw(ImGuiIO& io) {
   if (!has_opened_) {
     ImGui::OpenPopup(title_.c_str());
     has_opened_ = true;
+#if XE_PLATFORM_WINRT
+    // controller and typed letters to this box (not the game), and the Xbox keyboard on screen
+    UWP::SetUIOpen(true);
+    UWP::ShowKeyboard();
+#endif
   }
 
   // Center the window on screen

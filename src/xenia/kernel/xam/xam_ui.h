@@ -127,7 +127,7 @@ class KeyboardInputDialog : public XamGamepadDialog {
     xe::string_util::copy_truncating(text_buffer_.data(), default_text_,
                                      text_buffer_.size());
   }
-  virtual ~KeyboardInputDialog() {}
+  virtual ~KeyboardInputDialog();
 
   const std::string& text() const { return text_; }
   bool cancelled() const { return cancelled_; }
