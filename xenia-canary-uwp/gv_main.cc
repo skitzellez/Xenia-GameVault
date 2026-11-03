@@ -547,6 +547,57 @@ static void RemoveOlderTitleUpdates(Emulator* emulator, const Emulator::ContentI
   }
 }
 
+// Game Vault: how far the add-on installs are, for the lines on screen while they run (NWOSTAR 11-03: 58 add-ons went
+// in again after 1.1.8.228 and every game "started" to a black screen for minutes; the player quit each time).
+static std::atomic<int> gv_addons_total{0}, gv_addons_done{0};
+static std::atomic<bool> gv_addons_busy{false};
+static std::mutex gv_addons_name_lock;
+static std::string gv_addons_name;
+
+class AddOnProgress final : public ui::ImGuiDialog {
+ public:
+  explicit AddOnProgress(ui::ImGuiDrawer* drawer) : ui::ImGuiDialog(drawer) {}
+
+ protected:
+  void OnDraw(ImGuiIO& io) override {
+    if (!gv_addons_busy) {
+      Close();  // (deletes this dialog)
+      return;
+    }
+    const int total = gv_addons_total, done = gv_addons_done;
+    if (total <= 0) return;   // nothing to install (yet): no lines
+    std::string name;
+    {
+      std::lock_guard<std::mutex> lock(gv_addons_name_lock);
+      name = gv_addons_name;
+    }
+    const std::string lines[] = {
+        fmt::format("Installing Xbox 360 updates and DLC: {} of {}", std::min(done + 1, total), total), name,
+        "Only this once. The game starts when they are in: please don't close it."};
+    ImDrawList* list = ImGui::GetForegroundDrawList();
+    ImFont* font = ImGui::GetFont();
+    float y = io.DisplaySize.y * 0.42f;
+    for (int i = 0; i < 3; ++i) {
+      if (lines[i].empty()) continue;
+      const float size = ImGui::GetFontSize() * (i ? 1.3f : 2.0f);
+      const ImVec2 text = font->CalcTextSizeA(size, FLT_MAX, 0.0f, lines[i].c_str());
+      list->AddText(font, size, ImVec2((io.DisplaySize.x - text.x) * 0.5f, y),
+                    IM_COL32(255, 255, 255, i ? 180 : 235), lines[i].c_str());
+      y += text.y * 1.5f;
+    }
+    // the bar: done of total
+    const float w = io.DisplaySize.x * 0.4f, x = (io.DisplaySize.x - w) * 0.5f, h = ImGui::GetFontSize() * 0.5f;
+    const float part = float(done) / float(total);
+    y += h;
+    list->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(255, 255, 255, 50), h * 0.5f);
+    list->AddRectFilled(ImVec2(x, y), ImVec2(x + w * part, y + h), IM_COL32(60, 140, 255, 230), h * 0.5f);
+  }
+};
+
+// the result on file while a package installs; a second stop on the same package keeps it failed for good
+static const char kAddOnStopped[] = "failed (Xenia stopped while installing it)";
+static const char kAddOnStoppedTwice[] = "failed (Xenia stopped while installing it, twice)";
+
 static void InstallGameVaultAddOns(Emulator* emulator) {
   // what happened, also in Xenia's own LocalState (Device Portal can read that one; the shared folder's log it cannot)
   std::ofstream trace(std::filesystem::path(xe::to_path(UWP::GetLocalState())) / "gv_addons.txt", std::ios::trunc);
@@ -565,6 +616,33 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
       const size_t a = line.find('\t'), b = a == std::string::npos ? a : line.find('\t', a + 1);
       if (b == std::string::npos) continue;
       before[line.substr(b + 1)] = {std::strtoull(line.substr(0, a).c_str(), nullptr, 10), line.substr(a + 1, b - a - 1)};
+    }
+  }
+  // A package Xenia was installing when it stopped (the player closed the black screen, or the console closed
+  // Xenia) is tried once more: its result is forgotten now, so Game Vault copies it again for the next start. One
+  // that stops Xenia a second time stays failed (a package that brings Xenia down must not do it at every start).
+  const auto retry_file = std::filesystem::path(xe::to_path(UWP::GetLocalState())) / "gv_addons_retry.txt";
+  std::set<std::string> retried;
+  if (std::ifstream r(retry_file); r) {
+    for (std::string l; std::getline(r, l);)
+      if (!l.empty()) retried.insert(l);
+  }
+  {
+    bool changed = false;
+    for (auto it = before.begin(); it != before.end();) {
+      if (it->second.second == kAddOnStopped && !retried.count(it->first)) {
+        trace << "stopped before, tried again: " << it->first << "\n";
+        XELOGI("Game Vault: add-on {} was cut short last time: it is tried once more", it->first);
+        retried.insert(it->first);
+        it = before.erase(it);
+        changed = true;
+      } else {
+        ++it;
+      }
+    }
+    if (changed) {
+      std::ofstream w(retry_file, std::ios::trunc);
+      for (const auto& l : retried) w << l << '\n';
     }
   }
   // Up to 1.1.8.122 the header was not read first, so every add-on was unpacked loose into the content folder (a
@@ -592,13 +670,30 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
   auto write_done = [&](const std::string* extra, uint64_t extra_size) {
     std::map<std::string, std::pair<uint64_t, std::string>> all = after;
     for (auto& [path, v] : before) all.emplace(path, v);   // packages on a drive not plugged in now keep theirs
-    if (extra) all[*extra] = {extra_size, "failed (Xenia stopped while installing it)"};
+    if (extra) all[*extra] = {extra_size, retried.count(*extra) ? kAddOnStoppedTwice : kAddOnStopped};
     std::ofstream out(done, std::ios::trunc);
     for (auto& [path, v] : all) out << v.first << '\t' << v.second << '\t' << path << '\n';
   };
-  std::string line;
+  std::vector<std::string> lines;
+  for (std::string l; std::getline(in, l);) lines.push_back(l);
+  {
+    int pending = 0;
+    for (std::string l : lines) {
+      while (!l.empty() && (l.back() == '\r' || l.back() == ' ')) l.pop_back();
+      const size_t t1 = l.find('\t'), t2 = t1 == std::string::npos ? t1 : l.find('\t', t1 + 1);
+      if (t2 == std::string::npos) continue;
+      auto was = before.find(l.substr(t1 + 1, t2 - t1 - 1));
+      std::error_code ec;
+      if ((was == before.end() || was->second.first != std::strtoull(l.substr(t2 + 1).c_str(), nullptr, 10)) &&
+          std::filesystem::exists(std::filesystem::path(xe::to_path(l.substr(0, t1))), ec))
+        pending++;
+    }
+    gv_addons_done = 0;
+    gv_addons_total = pending;
+    if (pending) XELOGI("Game Vault: add-ons: {} to install before the game starts", pending);
+  }
   int installed = 0, failed = 0;
-  while (std::getline(in, line)) {
+  for (std::string line : lines) {
     while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
     if (line.empty()) continue;
     // "<copy in the shared folder>\t<the file on the USB drive>\t<size>": Xenia cannot open the drive's file by its
@@ -625,6 +720,16 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
     std::string result;
     write_done(&original, size);
     XELOGI("Game Vault: installing add-on {}", original);
+    {
+      // the folder in "xbox 360 add-ons" it came from: the game's name, as the player put it there
+      std::string name = original;
+      const size_t at = name.find("xbox 360 add-ons");
+      if (at != std::string::npos) name = name.substr(at + 17);
+      const size_t cut = name.find_first_of("\\/");
+      if (cut != std::string::npos && cut > 0) name = name.substr(0, cut);
+      std::lock_guard<std::mutex> lock(gv_addons_name_lock);
+      gv_addons_name = name;
+    }
     try {
       Emulator::ContentInstallEntry entry(path);
       // where it goes (<profile>\<title ID>\<type>\<name>) comes from its header; without it the package was
@@ -649,6 +754,7 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
       failed++;
     }
     XELOGI("Game Vault: add-on {}: {}", original, result);
+    gv_addons_done++;
     trace << "  " << result << "\n";
     after[original] = {size, result};
     std::filesystem::remove(path, ec);   // the copy has done its job (the installed content is in Xenia now)
@@ -1199,9 +1305,6 @@ void GameVaultXeniaApp::EmulatorThread() {
     return false;
   });
 
-  // Title updates and DLC Game Vault found on the USB drive
-  InstallGameVaultAddOns(emulator_.get());
-
   app_context().CallInUIThreadSynchronous([this]() {
     SetupPresenter();
     UWP::RegisterInputSystem(emulator_->input_system());
@@ -1256,6 +1359,12 @@ void GameVaultXeniaApp::EmulatorThread() {
                    &game_menu_);
     });
   });
+  // Title updates and DLC Game Vault found on the USB drive: after the presenter is up, so the progress shows
+  // instead of a black screen
+  gv_addons_busy = true;
+  app_context().CallInUIThread([this]() { new AddOnProgress(imgui_drawer_.get()); });
+  InstallGameVaultAddOns(emulator_.get());
+  gv_addons_busy = false;
   emulator_ready_ = true;
 
   if (!cvars::target.empty()) {
