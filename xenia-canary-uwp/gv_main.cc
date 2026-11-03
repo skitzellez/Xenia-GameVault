@@ -1143,9 +1143,7 @@ static bool InstallDiscPackages(Emulator* emulator, std::filesystem::path& start
     if (!ec && space.available < needed + (uint64_t(256) << 20)) {
       XELOGE("Game Vault: disc data needs {} bytes, {} free", needed, space.available);
       const std::string text =
-          fmt::format("This game installs {:.1f} GB from its disc.
-The console has {:.1f} GB free.
-"
+          fmt::format("This game installs {:.1f} GB from its disc.\nThe console has {:.1f} GB free.\n"
                       "Free some space, then start it again.",
                       needed / 1073741824.0, space.available / 1073741824.0);
       if (auto* drawer = emulator->imgui_drawer()) {

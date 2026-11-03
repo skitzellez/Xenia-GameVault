@@ -684,10 +684,8 @@ void ShowDiscMissingAndExit() {
   xeXamDispatchDialog<MessageBoxDialog>(
       new MessageBoxDialog(emulator->imgui_drawer(), emulator->input_system(),
                            "Another disc is needed",
-                           "This game needs its other disc.
-Put both discs "
-                           "where Game Vault finds them,
-named (Disc 1) and "
+                           "This game needs its other disc.\nPut both discs "
+                           "where Game Vault finds them,\nnamed (Disc 1) and "
                            "(Disc 2), then start it again.",
                            {"OK"}, 0),
       [](MessageBoxDialog*) -> X_RESULT { return X_ERROR_SUCCESS; }, 0);
