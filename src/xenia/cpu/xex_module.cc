@@ -38,6 +38,12 @@
 #include "third_party/mbedtls/include/mbedtls/sha1.h"
 #include "xenia/cpu/ppc/ppc_decode_data.h"
 #include "xenia/cpu/ppc/ppc_instr.h"
+
+DECLARE_bool(protect_zero);
+DEFINE_bool(gv_open_zero_for_devkit, true,
+            "Game Vault: open the zero page for dev-kit / prototype programs "
+            "(signed with a dev-kit key or unencrypted), as a dev kit does.",
+            "Memory");
 DEFINE_bool(disable_instruction_infocache, false,
             "Disables caching records of called instructions/mmio accesses.",
             "CPU");
@@ -969,6 +975,7 @@ bool XexModule::Load(const std::string_view name, const std::string_view path,
 
   // Load in the XEX basefile
   // We'll try using both XEX2 keys to see if any give a valid PE
+  bool xex1_devkit_key_used = false;
   int result_code = ReadImage(xex_addr, xex_length, xe_xex2_retail_key);
   if (result_code) {
     XELOGW("XEX load failed with code {}, trying with devkit encryption key...",
@@ -989,11 +996,35 @@ bool XexModule::Load(const std::string_view name, const std::string_view path,
             result_code);
 
         result_code = ReadImage(xex_addr, xex_length, xe_xex1_devkit_key);
+        xex1_devkit_key_used = !result_code;
         if (result_code) {
           XELOGE("XEX load failed with code {}", result_code);
           return false;
         }
       }
+    }
+  }
+
+  // Game Vault: prototype / dev-kit builds (e.g. Call of Duty NX1) read and
+  // write the first 64 KB of memory, which dev kits allow and retail
+  // consoles do not. Open that page for programs signed with a dev-kit key
+  // or stored unencrypted; retail games keep it closed.
+  const bool devkit_key = is_dev_kit_ || xex1_devkit_key_used;
+  const bool not_retail =
+      devkit_key || (opt_file_format_info() &&
+                     opt_file_format_info()->encryption_type ==
+                         XEX_ENCRYPTION_NONE);
+  if (not_retail && cvars::protect_zero && cvars::gv_open_zero_for_devkit) {
+    auto zero_heap = memory()->LookupHeap(0);
+    if (zero_heap &&
+        zero_heap->Protect(0, 0x10000,
+                           kMemoryProtectRead | kMemoryProtectWrite)) {
+      XELOGI(
+          "Game Vault: {} is a dev-kit/prototype program ({}), opened the "
+          "zero page like a dev kit",
+          name, devkit_key ? "dev-kit key" : "unencrypted");
+    } else {
+      XELOGW("Game Vault: could not open the zero page for {}", name);
     }
   }
 
