@@ -297,6 +297,12 @@ class ContentManager {
   uint64_t GetContentTotalSpace() const;
   uint64_t GetContentFreeSpace() const;
 
+  // Game Vault: where a package of this title and type goes for every profile.
+  std::filesystem::path SharedPackageRoot(const uint32_t title_id,
+                                          const XContentType content_type) const {
+    return ResolvePackageRoot(0, title_id, content_type);
+  }
+
  private:
   std::filesystem::path ResolvePackageRoot(
       const uint64_t xuid, const uint32_t title_id,

@@ -64,7 +64,7 @@ UWP::AppLaunchState launch_state;
 // token with the link. Opened here, Xenia reads the game through that handle (xe::filesystem shared file):
 // opening a USB drive's file by path can wait for good on a permission question the console never shows.
 // Runs on a thread of its own: blocking on WinRT calls is not allowed on this one.
-void ShareFromGameVault(const std::string& path, const winrt::hstring& token) {
+void ShareFromGameVault(const std::string& path, const winrt::hstring& token, bool other_disc = false) {
   HANDLE handle = nullptr;
   std::thread([&] {
     winrt::init_apartment();
@@ -84,7 +84,9 @@ void ShareFromGameVault(const std::string& path, const winrt::hstring& token) {
     }
     winrt::uninit_apartment();
   }).join();
-  if (handle) {
+  if (handle && other_disc) {
+    xe::filesystem::AddSharedDisc(std::filesystem::path(winrt::to_hstring(path).c_str()), handle);
+  } else if (handle) {
     xe::filesystem::SetSharedFile(std::filesystem::path(winrt::to_hstring(path).c_str()), handle);
   }
 }
@@ -292,6 +294,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
       std::vector<std::pair<std::string, std::string>> arguments;
       arguments.reserve(query.Size());
       winrt::hstring disctoken, netcred;
+      // Game Vault 0.16.1.399+: the game's other discs, and this disc's number
+      struct OtherDisc {
+        std::string path;
+        winrt::hstring token, cred;
+        int number = 0;
+      };
+      std::vector<OtherDisc> other_discs;
+      int disc_number = 0;
       bool show_fps = false;
       int scale = 0;
       for (const auto& argument : query) {
@@ -300,6 +310,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (argument.Name() == L"disctoken") {
           // Game Vault: the game file, shared through the console
           disctoken = argument.Value();
+        } else if (argument.Name() == L"discno") {
+          disc_number = _wtoi(argument.Value().c_str());
+        } else if (argument.Name() == L"otherdisc") {
+          other_discs.push_back({winrt::to_string(argument.Value())});
+        } else if (argument.Name() == L"otherdiscno" && !other_discs.empty()) {
+          other_discs.back().number = _wtoi(argument.Value().c_str());
+        } else if (argument.Name() == L"otherdisctoken" && !other_discs.empty()) {
+          other_discs.back().token = argument.Value();
+        } else if (argument.Name() == L"otherdisccred" && !other_discs.empty()) {
+          other_discs.back().cred = argument.Value();
         } else if (argument.Name() == L"netcred") {
           // Game Vault: the sign-in for a game played from the network
           netcred = argument.Value();
@@ -336,12 +356,29 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             .Completed([](auto const&, auto) { CoreApplication::Exit(); });
         return;
       }
+      if (!game_path.empty()) {
+        xe::filesystem::ClearGameVaultDiscs();
+      }
       if (!game_path.empty() && !disctoken.empty()) {
         ShareFromGameVault(game_path, disctoken);
       }
       if (game_path.rfind("smb://", 0) == 0) {
         // Game Vault: a game on a PC's shared folder or a NAS, read over the network (NetGame.cpp)
         game_path = NetGame::Open(game_path, winrt::to_string(netcred));
+      }
+      if (!game_path.empty() && !other_discs.empty()) {
+        xe::filesystem::AddGameVaultDisc(disc_number, std::filesystem::u8path(game_path));
+        for (auto& disc : other_discs) {
+          std::string path = disc.path;
+          if (path.rfind("smb://", 0) == 0) {
+            path = NetGame::Open(path, winrt::to_string(disc.cred));
+          } else if (!disc.token.empty()) {
+            ShareFromGameVault(path, disc.token, true);
+          }
+          if (!path.empty()) {
+            xe::filesystem::AddGameVaultDisc(disc.number, std::filesystem::u8path(path));
+          }
+        }
       }
       launch_state.ActivateProtocol(std::move(activation.launch_on_exit));
       UWP::SetAutomaticLaunch(game_path);

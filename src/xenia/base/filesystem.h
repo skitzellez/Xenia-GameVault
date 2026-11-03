@@ -78,6 +78,17 @@ FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode);
 void SetSharedFile(const std::filesystem::path& path, void* handle);
 // A new read-only handle to that file when path names it, else nullptr. The caller closes it.
 void* DuplicateSharedFile(const std::filesystem::path& path);
+// Game Vault: the other discs of the game being started, each a shared file too.
+void AddSharedDisc(const std::filesystem::path& path, void* handle);
+// Game Vault: every disc of the game being started, by disc number, for a disc swap and the disc's install data.
+struct GameVaultDisc {
+  int number;
+  std::filesystem::path path;
+};
+void AddGameVaultDisc(int number, const std::filesystem::path& path);
+std::vector<GameVaultDisc> GameVaultDiscs();
+// A new game is starting: forgets the last one's discs and network readers.
+void ClearGameVaultDiscs();
 // True when path names the shared game file or a network game (it then needs no check on the drive).
 bool IsGameVaultFile(const std::filesystem::path& path);
 // The size of the shared file when path names it; otherwise std::filesystem::file_size(path).

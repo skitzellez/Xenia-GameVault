@@ -11,6 +11,7 @@
 #include <atomic>
 #include <thread>
 
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/string_util.h"
@@ -734,6 +735,8 @@ typedef struct {
 } X_SWAPDISC_ERROR_MESSAGE;
 static_assert_size(X_SWAPDISC_ERROR_MESSAGE, 12);
 
+void ShowDiscMissingAndExit();  // xam_ui.cc
+
 dword_result_t XamSwapDisc_entry(
     dword_t disc_number, pointer_t<X_KEVENT> completion_handle,
     pointer_t<X_SWAPDISC_ERROR_MESSAGE> error_message) {
@@ -778,11 +781,28 @@ dword_result_t XamSwapDisc_entry(
 
   std::string error_dialog_message;
 
+  // Game Vault told us where the game's discs are: no question for the player
+  std::filesystem::path known_disc;
+#if XE_PLATFORM_WIN32
+  for (const auto& disc : xe::filesystem::GameVaultDiscs()) {
+    if (disc.number == int(uint32_t(disc_number))) {
+      known_disc = disc.path;
+    }
+  }
+#endif
+  int cancels = 0;
+
   // Loop until user provides the correct disc
   while (true) {
-    const std::filesystem::path new_disc_path =
-        kernel_state()->emulator()->GetNewDiscPath(
-            xe::to_utf8(text_message) + "\n\n" + error_dialog_message);
+    std::filesystem::path new_disc_path;
+    if (!known_disc.empty()) {
+      new_disc_path = known_disc;
+      known_disc.clear();  // (a disc that does not mount: the player is asked)
+      XELOGI("XamSwapDisc: disc {} from Game Vault", uint32_t(disc_number));
+    } else {
+      new_disc_path = kernel_state()->emulator()->GetNewDiscPath(
+          xe::to_utf8(text_message) + "\n\n" + error_dialog_message);
+    }
     XELOGI("XamSwapDisc: GetNewDiscPath returned path {}.",
            xe::strip_pii(xe::path_to_utf8(new_disc_path)));
 
@@ -793,6 +813,12 @@ dword_result_t XamSwapDisc_entry(
     // disc
     if (new_disc_path.empty()) {
       XELOGI("XamSwapDisc: User cancelled disc selection, prompting again...");
+      // The current disc is out already, so the game cannot go on without one:
+      // after a few answers of "no" the player is let out instead of asked for good.
+      if (++cancels >= 3) {
+        ShowDiscMissingAndExit();
+        return X_ERROR_CANCELLED;
+      }
       error_dialog_message =
           "ERROR: Disc swap cancelled.\n\n"
           "The game requires the correct disc to continue.\n"

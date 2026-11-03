@@ -17,6 +17,7 @@
 #include <fstream>
 #include <map>
 #include <set>
+#include <span>
 #include <vector>
 #include <memory>
 #include <mutex>
@@ -51,6 +52,9 @@
 #include "xenia/hid/xinput/xinput_hid.h"
 #include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/vfs/device.h"
+#include "xenia/vfs/entry.h"
+#include "xenia/vfs/file.h"
 #include "xenia/kernel/xam/content_manager.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "third_party/imgui/imgui.h"
@@ -553,6 +557,7 @@ static std::atomic<int> gv_addons_total{0}, gv_addons_done{0};
 static std::atomic<bool> gv_addons_busy{false};
 static std::mutex gv_addons_name_lock;
 static std::string gv_addons_name;
+static std::string gv_addons_title;   // a line of its own instead of "Installing updates and DLC: n of m"
 
 class AddOnProgress final : public ui::ImGuiDialog {
  public:
@@ -566,13 +571,16 @@ class AddOnProgress final : public ui::ImGuiDialog {
     }
     const int total = gv_addons_total, done = gv_addons_done;
     if (total <= 0) return;   // nothing to install (yet): no lines
-    std::string name;
+    std::string name, title;
     {
       std::lock_guard<std::mutex> lock(gv_addons_name_lock);
       name = gv_addons_name;
+      title = gv_addons_title;
     }
     const std::string lines[] = {
-        fmt::format("Installing Xbox 360 updates and DLC: {} of {}", std::min(done + 1, total), total), name,
+        !title.empty() ? title
+                       : fmt::format("Installing Xbox 360 updates and DLC: {} of {}", std::min(done + 1, total), total),
+        name,
         "Only this once. The game starts when they are in: please don't close it."};
     ImDrawList* list = ImGui::GetForegroundDrawList();
     ImFont* font = ImGui::GetFont();
@@ -1075,6 +1083,129 @@ std::unique_ptr<apu::AudioSystem> GameVaultXeniaApp::CreateAudioSystem(
   return factory.Create(cvars::apu, processor);
 }
 
+// A game on several discs can keep data on one of them for the console to install (GTA V's "Install" disc, the DLC
+// disc of others): packages in \content\0000000000000000\<title>\00000002. They are copied once to where Xenia keeps
+// DLC, and the game then starts from a disc with no packages, the one that is played. False when it cannot start.
+static bool InstallDiscPackages(Emulator* emulator, std::filesystem::path& start) {
+  const auto discs = xe::filesystem::GameVaultDiscs();
+  if (discs.size() < 2) return true;
+  auto* manager = emulator->kernel_state()->content_manager();
+  struct Package {
+    vfs::Entry* entry;
+    std::filesystem::path dest;
+  };
+  std::vector<std::unique_ptr<vfs::Device>> devices;   // (the entries live in these)
+  std::vector<Package> packages;
+  std::vector<xe::filesystem::GameVaultDisc> no_packages;
+  bool start_has_packages = false;
+  for (const auto& disc : discs) {
+    auto device = emulator->CreateVfsDevice(disc.path, fmt::format("\\Device\\GvDisc{}", disc.number));
+    if (!device || !device->Initialize()) {
+      XELOGE("Game Vault: disc {} could not be read", disc.number);
+      continue;
+    }
+    size_t found = 0;
+    if (auto* root = device->ResolvePath("\\content\\0000000000000000")) {
+      for (const auto& title : root->children()) {
+        const uint32_t title_id = uint32_t(std::strtoul(title->name().c_str(), nullptr, 16));
+        for (const auto& type : title->children()) {
+          if (std::strtoul(type->name().c_str(), nullptr, 16) != uint32_t(XContentType::kMarketplaceContent)) continue;
+          const auto dir = manager->SharedPackageRoot(title_id, XContentType::kMarketplaceContent);
+          for (const auto& package : type->children()) {
+            if (package->attributes() & vfs::kFileAttributeDirectory) continue;
+            packages.push_back({package.get(), dir / xe::to_path(package->name())});
+            ++found;
+          }
+        }
+      }
+    }
+    XELOGI("Game Vault: disc {} has {} packages to install", disc.number, found);
+    if (found == 0) {
+      no_packages.push_back(disc);
+    } else if (disc.path == start) {
+      start_has_packages = true;
+    }
+    devices.push_back(std::move(device));
+  }
+  uint64_t needed = 0;
+  std::vector<Package> to_copy;
+  for (const auto& p : packages) {
+    std::error_code ec;
+    const uint64_t have = std::filesystem::file_size(p.dest, ec);
+    if (!ec && have == p.entry->size()) continue;   // in already
+    to_copy.push_back(p);
+    needed += p.entry->size();
+  }
+  if (!to_copy.empty()) {
+    std::error_code ec;
+    std::filesystem::create_directories(to_copy.front().dest.parent_path(), ec);
+    const auto space = std::filesystem::space(to_copy.front().dest.parent_path(), ec);
+    if (!ec && space.available < needed + (uint64_t(256) << 20)) {
+      XELOGE("Game Vault: disc data needs {} bytes, {} free", needed, space.available);
+      const std::string text =
+          fmt::format("This game installs {:.1f} GB from its disc and the console has {:.1f} GB free. Free some "
+                      "space, then start it again.",
+                      needed / 1073741824.0, space.available / 1073741824.0);
+      if (auto* drawer = emulator->imgui_drawer()) {
+        emulator->display_window()->app_context().CallInUIThread(
+            [drawer, text]() { ui::ImGuiDialog::ShowMessageBox(drawer, "Not enough space", text); });
+      }
+      return false;
+    }
+    {
+      std::lock_guard<std::mutex> lock(gv_addons_name_lock);
+      gv_addons_title = "Installing this game's data from its disc";
+    }
+    const uint64_t mb = 1 << 20;
+    gv_addons_total = int(needed / mb) + 1;
+    gv_addons_done = 0;
+    uint64_t copied = 0;
+    std::vector<uint8_t> buffer(4 << 20);
+    for (const auto& p : to_copy) {
+      XELOGI("Game Vault: installing {} from the disc, {} bytes", p.entry->name(), p.entry->size());
+      // under another folder until it is whole: a package cut short must not count as installed
+      const auto part = p.dest.parent_path().parent_path() / (p.dest.filename().string() + ".part");
+      std::filesystem::create_directories(p.dest.parent_path(), ec);
+      vfs::File* in = nullptr;
+      bool ok = p.entry->Open(vfs::FileAccess::kFileReadData, &in) == X_STATUS_SUCCESS;
+      FILE* out = ok ? xe::filesystem::OpenFile(part, "wb") : nullptr;
+      ok = out != nullptr;
+      for (size_t offset = 0; ok && offset < p.entry->size();) {
+        const size_t want = std::min(buffer.size(), p.entry->size() - offset);
+        size_t got = 0;
+        ok = in->ReadSync(std::span<uint8_t>(buffer.data(), want), offset, &got) == X_STATUS_SUCCESS && got > 0 &&
+             fwrite(buffer.data(), 1, got, out) == got;
+        offset += got;
+        copied += got;
+        gv_addons_done = int(copied / mb);
+        std::lock_guard<std::mutex> lock(gv_addons_name_lock);
+        gv_addons_name = fmt::format("{:.1f} of {:.1f} GB", copied / 1073741824.0, needed / 1073741824.0);
+      }
+      if (out) ok = fclose(out) == 0 && ok;
+      if (in) in->Destroy();
+      if (ok) {
+        std::filesystem::rename(part, p.dest, ec);
+        ok = !ec;
+      }
+      if (!ok) {
+        // the game's own message then says a disc read failed; this says why in the report
+        XELOGE("Game Vault: {} could not be installed", p.entry->name());
+        std::filesystem::remove(part, ec);
+        break;
+      }
+    }
+    gv_addons_total = 0;
+    std::lock_guard<std::mutex> lock(gv_addons_name_lock);
+    gv_addons_title.clear();
+    gv_addons_name.clear();
+  }
+  if (start_has_packages && !no_packages.empty()) {
+    start = no_packages.front().path;
+    XELOGI("Game Vault: starting from disc {}, the disc that is played", no_packages.front().number);
+  }
+  return true;
+}
+
 std::unique_ptr<gpu::GraphicsSystem> GameVaultXeniaApp::CreateGraphicsSystem() {
   // Direct3D 12 is the only graphics API of the Xbox's app runtime.
   Factory<gpu::GraphicsSystem> factory;
@@ -1364,14 +1495,20 @@ void GameVaultXeniaApp::EmulatorThread() {
   gv_addons_busy = true;
   app_context().CallInUIThread([this]() { new AddOnProgress(imgui_drawer_.get()); });
   InstallGameVaultAddOns(emulator_.get());
+  std::filesystem::path game_vault_start;
+  bool disc_data_ok = true;
+  if (cvars::target.empty() && UWP::HasGamePath()) {
+    game_vault_start = std::filesystem::u8path(UWP::ConsumeGamePath());
+    disc_data_ok = InstallDiscPackages(emulator_.get(), game_vault_start);
+  }
   gv_addons_busy = false;
   emulator_ready_ = true;
 
   if (!cvars::target.empty()) {
     UWP::ConsumeGamePath();
     StartTitle(cvars::target);
-  } else if (UWP::HasGamePath()) {
-    StartTitle(std::filesystem::u8path(UWP::ConsumeGamePath()));
+  } else if (!game_vault_start.empty()) {
+    if (disc_data_ok) StartTitle(game_vault_start);
   } else {
     app_context().CallInUIThread([this]() {
       new NoGameMessage(imgui_drawer_.get(), emulator_.get());

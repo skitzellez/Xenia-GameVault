@@ -95,15 +95,38 @@ static std::mutex shared_file_lock_;
 static std::filesystem::path shared_file_path_;
 static HANDLE shared_file_handle_ = INVALID_HANDLE_VALUE;
 
-static bool IsSharedFile(const std::filesystem::path& path) {
-  if (shared_file_handle_ == INVALID_HANDLE_VALUE) {
-    return false;
-  }
-  std::wstring a = path.lexically_normal().wstring();
-  std::wstring b = shared_file_path_.wstring();
+static std::vector<std::pair<std::filesystem::path, HANDLE>> shared_discs_;
+
+static bool SamePath(const std::wstring& a, const std::wstring& b) {
   return a.size() == b.size() &&
          CompareStringOrdinal(a.c_str(), int(a.size()), b.c_str(),
                               int(b.size()), TRUE) == CSTR_EQUAL;
+}
+
+// the shared game file or another disc of it that path names
+static HANDLE SharedHandle(const std::filesystem::path& path) {
+  std::wstring a = path.lexically_normal().wstring();
+  if (shared_file_handle_ != INVALID_HANDLE_VALUE &&
+      SamePath(a, shared_file_path_.wstring())) {
+    return shared_file_handle_;
+  }
+  for (const auto& disc : shared_discs_) {
+    if (SamePath(a, disc.first.wstring())) {
+      return disc.second;
+    }
+  }
+  return INVALID_HANDLE_VALUE;
+}
+
+static bool IsSharedFile(const std::filesystem::path& path) {
+  return SharedHandle(path) != INVALID_HANDLE_VALUE;
+}
+
+void AddSharedDisc(const std::filesystem::path& path, void* handle) {
+  std::lock_guard<std::mutex> lock(shared_file_lock_);
+  if (handle) {
+    shared_discs_.emplace_back(path.lexically_normal(), HANDLE(handle));
+  }
 }
 
 void SetSharedFile(const std::filesystem::path& path, void* handle) {
@@ -125,11 +148,12 @@ bool IsGameVaultFile(const std::filesystem::path& path) {
 
 void* DuplicateSharedFile(const std::filesystem::path& path) {
   std::lock_guard<std::mutex> lock(shared_file_lock_);
-  if (!IsSharedFile(path)) {
+  HANDLE shared = SharedHandle(path);
+  if (shared == INVALID_HANDLE_VALUE) {
     return nullptr;
   }
   HANDLE dup = nullptr;
-  if (!DuplicateHandle(GetCurrentProcess(), shared_file_handle_,
+  if (!DuplicateHandle(GetCurrentProcess(), shared,
                        GetCurrentProcess(), &dup, 0, FALSE,
                        DUPLICATE_SAME_ACCESS)) {
     return nullptr;
@@ -139,13 +163,47 @@ void* DuplicateSharedFile(const std::filesystem::path& path) {
 
 // Game Vault: the one network game (see filesystem.h)
 static std::mutex net_file_lock_;
-static std::filesystem::path net_file_path_;
-static std::shared_ptr<NetFile> net_file_;
+// (one per disc of the game: a two-disc game has both open, ClearGameVaultDiscs forgets them)
+static std::vector<std::pair<std::filesystem::path, std::shared_ptr<NetFile>>> net_files_;
+static std::mutex gv_discs_lock_;
+static std::vector<GameVaultDisc> gv_discs_;
 
 void SetNetFile(const std::filesystem::path& path, std::shared_ptr<NetFile> file) {
   std::lock_guard<std::mutex> lock(net_file_lock_);
-  net_file_path_ = path.lexically_normal();
-  net_file_ = std::move(file);
+  const auto normal = path.lexically_normal();
+  for (auto& known : net_files_) {
+    if (SamePath(known.first.wstring(), normal.wstring())) {
+      known.second = std::move(file);
+      return;
+    }
+  }
+  net_files_.emplace_back(normal, std::move(file));
+}
+
+void AddGameVaultDisc(int number, const std::filesystem::path& path) {
+  std::lock_guard<std::mutex> lock(gv_discs_lock_);
+  gv_discs_.push_back({number, path});
+}
+
+std::vector<GameVaultDisc> GameVaultDiscs() {
+  std::lock_guard<std::mutex> lock(gv_discs_lock_);
+  return gv_discs_;
+}
+
+void ClearGameVaultDiscs() {
+  {
+    std::lock_guard<std::mutex> lock(gv_discs_lock_);
+    gv_discs_.clear();
+  }
+  {
+    std::lock_guard<std::mutex> lock(net_file_lock_);
+    net_files_.clear();
+  }
+  std::lock_guard<std::mutex> lock(shared_file_lock_);
+  for (auto& disc : shared_discs_) {
+    CloseHandle(disc.second);
+  }
+  shared_discs_.clear();
 }
 
 // Game Vault: the one network folder game (see filesystem.h), and the readers of its files opened so far
@@ -214,12 +272,10 @@ bool PathExistsAny(const std::filesystem::path& path) {
 std::shared_ptr<NetFile> GetNetFile(const std::filesystem::path& path) {
   {
     std::lock_guard<std::mutex> lock(net_file_lock_);
-    if (net_file_) {
-      std::wstring a = path.lexically_normal().wstring();
-      std::wstring b = net_file_path_.wstring();
-      if (a.size() == b.size() &&
-          CompareStringOrdinal(a.c_str(), int(a.size()), b.c_str(), int(b.size()), TRUE) == CSTR_EQUAL) {
-        return net_file_;
+    std::wstring a = path.lexically_normal().wstring();
+    for (const auto& known : net_files_) {
+      if (SamePath(a, known.first.wstring())) {
+        return known.second;
       }
     }
   }
@@ -260,7 +316,8 @@ uint64_t FileSizeShared(const std::filesystem::path& path, std::error_code& erro
   {
     std::lock_guard<std::mutex> lock(shared_file_lock_);
     LARGE_INTEGER size;
-    if (IsSharedFile(path) && GetFileSizeEx(shared_file_handle_, &size)) {
+    HANDLE shared = SharedHandle(path);
+    if (shared != INVALID_HANDLE_VALUE && GetFileSizeEx(shared, &size)) {
       error.clear();
       return uint64_t(size.QuadPart);
     }

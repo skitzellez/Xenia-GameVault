@@ -678,6 +678,20 @@ void XamShowDirtyDiscErrorUI_entry(dword_t user_index,
 }
 DECLARE_XAM_EXPORT1(XamShowDirtyDiscErrorUI, kUI, kImplemented);
 
+// A game asked for a disc and the player has none to give: says so and leaves the game.
+void ShowDiscMissingAndExit() {
+  const Emulator* emulator = kernel_state()->emulator();
+  xeXamDispatchDialog<MessageBoxDialog>(
+      new MessageBoxDialog(emulator->imgui_drawer(), emulator->input_system(),
+                           "Another disc is needed",
+                           "This game needs its other disc. Put both discs "
+                           "where Game Vault finds them, named (Disc 1) and "
+                           "(Disc 2), then start it again.",
+                           {"OK"}, 0),
+      [](MessageBoxDialog*) -> X_RESULT { return X_ERROR_SUCCESS; }, 0);
+  kernel_state()->ExitToDashboard();
+}
+
 dword_result_t XamShowNuiDirtyDiscErrorUI_entry(dword_t tracking_id) {
   auto result = kernel_state()->nui()->NuiHudCheck(tracking_id);
   if (result) {
