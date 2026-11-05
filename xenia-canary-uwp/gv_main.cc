@@ -82,6 +82,7 @@ DEFINE_int32(gv_profile_ms, 0,
 // (the in-game menu's resolution scale; Xenia's own settings)
 DECLARE_int32(draw_resolution_scale_x);
 DECLARE_int32(draw_resolution_scale_y);
+extern uint32_t gv_requested_title;   // App.cpp: titleid= in the start link (Game Vault), 0 = not said
 extern int gv_requested_scale;   // App.cpp: scale= in the start link (Game Vault), 0 = none
 
 DEFINE_path(storage_root, "",
@@ -684,6 +685,26 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
   };
   std::vector<std::string> lines;
   for (std::string l; std::getline(in, l);) lines.push_back(l);
+  // Game Vault names the game starting (0.16.1.412+): only that game's add-ons go in now, the others wait for their
+  // own game. A package's header says whose it is: its place is <profile>\<title ID>\<type>\<name>. Without a name,
+  // or a header that cannot be read, a package goes in as before (and a broken one is reported as failed).
+  auto for_other_game = [&](const std::filesystem::path& package) {
+    if (!gv_requested_title) return false;
+    try {
+      Emulator::ContentInstallEntry entry(package);
+      if (emulator->ProcessContentPackageHeader(package, entry) != X_STATUS_SUCCESS) return false;
+      auto part = entry.data_installation_path_.begin();
+      if (part == entry.data_installation_path_.end() || ++part == entry.data_installation_path_.end()) return false;
+      const uint32_t title = uint32_t(std::strtoul(xe::path_to_utf8(*part).c_str(), nullptr, 16));
+      // a game's title ID starts with its publisher's two letters; anything else (themes, gamer pictures, ID 0) is no
+      // one game's: it would wait for good, so it goes in as before
+      const char a = char(title >> 24), b = char(title >> 16);
+      if (a < 'A' || a > 'Z' || b < 'A' || b > 'Z') return false;
+      return title != gv_requested_title;
+    } catch (...) {
+      return false;
+    }
+  };
   {
     int pending = 0;
     for (std::string l : lines) {
@@ -692,8 +713,9 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
       if (t2 == std::string::npos) continue;
       auto was = before.find(l.substr(t1 + 1, t2 - t1 - 1));
       std::error_code ec;
+      const auto package = std::filesystem::path(xe::to_path(l.substr(0, t1)));
       if ((was == before.end() || was->second.first != std::strtoull(l.substr(t2 + 1).c_str(), nullptr, 10)) &&
-          std::filesystem::exists(std::filesystem::path(xe::to_path(l.substr(0, t1))), ec))
+          std::filesystem::exists(package, ec) && !for_other_game(package))
         pending++;
     }
     gv_addons_done = 0;
@@ -723,6 +745,10 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
     trace << "package " << original << " (copy " << copy << ", " << size << " bytes)\n";
     if (!std::filesystem::exists(path, ec)) {   // Game Vault has not copied it yet
       trace << "  copy not there\n";
+      continue;
+    }
+    if (for_other_game(path)) {
+      trace << "  for another game: waits for that game\n";
       continue;
     }
     std::string result;

@@ -1031,8 +1031,17 @@ void ImGuiDrawer::UpdateGamepads() {
   auto& io = GetIO();
 
   if (!is_gamepad_connected) {
-    io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
-    return;
+    // Game Vault test presses (gv_press.txt) reach a message box with no controller on too
+    static bool test_press = false;
+    hid::X_INPUT_STATE pressed = {};
+    const bool now = input_system_->GetStateForUI(0, 1, &pressed) == X_ERROR_SUCCESS && pressed.gamepad.buttons != 0;
+    if (!now) {
+      if (test_press) io.ClearInputKeys();
+      test_press = false;
+      io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+      return;
+    }
+    test_press = true;
   }
 
   uint8_t controller_to_poke = XUserIndexNone;

@@ -89,6 +89,9 @@ void AddGameVaultDisc(int number, const std::filesystem::path& path);
 std::vector<GameVaultDisc> GameVaultDiscs();
 // A new game is starting: forgets the last one's discs and network readers.
 void ClearGameVaultDiscs();
+// Started from Game Vault's shelf: a disc it did not list is not there, and there is no file picker to ask with
+void SetStartedFromGameVault(bool from_game_vault);
+bool StartedFromGameVault();
 // True when path names the shared game file or a network game (it then needs no check on the drive).
 bool IsGameVaultFile(const std::filesystem::path& path);
 // The size of the shared file when path names it; otherwise std::filesystem::file_size(path).

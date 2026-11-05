@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include <atomic>
 #include <fcntl.h>
 #include <io.h>
 #include <shlobj.h>
@@ -179,6 +180,10 @@ void SetNetFile(const std::filesystem::path& path, std::shared_ptr<NetFile> file
   }
   net_files_.emplace_back(normal, std::move(file));
 }
+
+static std::atomic<bool> started_from_game_vault_{false};
+void SetStartedFromGameVault(bool from_game_vault) { started_from_game_vault_ = from_game_vault; }
+bool StartedFromGameVault() { return started_from_game_vault_; }
 
 void AddGameVaultDisc(int number, const std::filesystem::path& path) {
   std::lock_guard<std::mutex> lock(gv_discs_lock_);

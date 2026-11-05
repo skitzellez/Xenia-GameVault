@@ -36,6 +36,7 @@
 
 // Game Vault: the resolution scale the start link asked for (scale=1..3), 0 = Xenia's own setting (gv_main.cc)
 int gv_requested_scale = 0;
+uint32_t gv_requested_title = 0;
 #include "xenia/base/logging.h"
 #include "xenia/config.h"
 #include "xenia/ui/imgui_dialog.h"
@@ -304,6 +305,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
       int disc_number = 0;
       bool show_fps = false;
       int scale = 0;
+      gv_requested_title = 0;
       for (const auto& argument : query) {
         arguments.emplace_back(winrt::to_string(argument.Name()),
                                winrt::to_string(argument.Value()));
@@ -329,6 +331,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } else if (argument.Name() == L"scale") {
           // Game Vault 0.16.1.369+: the game's "Resolution scale" (Xbox 360 game settings)
           scale = _wtoi(argument.Value().c_str());
+        } else if (argument.Name() == L"titleid") {
+          // Game Vault 0.16.1.412+: the game starting, so only its own add-ons are installed now (gv_main.cc)
+          gv_requested_title = uint32_t(wcstoul(argument.Value().c_str(), nullptr, 16));
         }
       }
       // Game Vault: applied by gv_main.cc (GvApplyGameScale) when the graphics start, after the settings file
@@ -358,6 +363,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
       }
       if (!game_path.empty()) {
         xe::filesystem::ClearGameVaultDiscs();
+        xe::filesystem::SetStartedFromGameVault(activation.launch_on_exit.rfind("gamevault:", 0) == 0);
       }
       if (!game_path.empty() && !disctoken.empty()) {
         ShareFromGameVault(game_path, disctoken);

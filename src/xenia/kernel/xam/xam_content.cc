@@ -800,6 +800,15 @@ dword_result_t XamSwapDisc_entry(
       known_disc.clear();  // (a disc that does not mount: the player is asked)
       XELOGI("XamSwapDisc: disc {} from Game Vault", uint32_t(disc_number));
     } else {
+#if XE_PLATFORM_WIN32
+      // From Game Vault's shelf: the disc is not among its files, or it is not the disc its name says. The console
+      // has no way to pick another file, and the disc in the drive is out already: say so and leave.
+      if (xe::filesystem::StartedFromGameVault()) {
+        XELOGE("XamSwapDisc: Game Vault has no usable disc {}", uint32_t(disc_number));
+        ShowDiscMissingAndExit();
+        return X_ERROR_CANCELLED;
+      }
+#endif
       new_disc_path = kernel_state()->emulator()->GetNewDiscPath(
           xe::to_utf8(text_message) + "\n\n" + error_dialog_message);
     }

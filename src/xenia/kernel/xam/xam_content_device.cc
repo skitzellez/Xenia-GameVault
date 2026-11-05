@@ -7,6 +7,9 @@
  ******************************************************************************
  */
 
+#include <fstream>
+
+#include "xenia/base/filesystem.h"
 #include "xenia/kernel/xam/xam_content_device.h"
 
 #include "xenia/base/logging.h"
@@ -50,6 +53,17 @@ static const DummyDeviceInfo* dummy_device_infos_[] = {
     &dummy_odd_device_info_,
 };
 #undef ONE_GB
+
+// Game Vault testing: gv_test_freemb.txt in LocalState, holding a number of MB, makes games see that little free space
+static uint64_t GvContentFreeBytes() {
+  static const uint64_t test_mb = []() -> uint64_t {
+    std::ifstream file(xe::filesystem::GetUserFolder() / "gv_test_freemb.txt");
+    uint64_t mb = 0;
+    file >> mb;
+    return mb;
+  }();
+  return test_mb ? test_mb << 20 : kernel_state()->content_manager()->GetContentFreeSpace();
+}
 
 const DummyDeviceInfo* GetDummyDeviceInfo(uint32_t device_id) {
   const auto& begin = std::begin(dummy_device_infos_);
@@ -143,7 +157,7 @@ dword_result_t XamContentGetDeviceData_entry(
           : device_info->total_bytes;
   device_data->free_bytes =
       device_info->device_type == DeviceType::HDD
-          ? kernel_state()->content_manager()->GetContentFreeSpace()
+          ? GvContentFreeBytes()
           : device_info->free_bytes;
   xe::string_util::copy_and_swap_truncating(
       device_data->name_chars, device_info->name,
@@ -178,7 +192,7 @@ dword_result_t XamContentGetLocalizedDeviceData_entry(
           : device_info->total_bytes;
   device_data->free_bytes =
       device_info->device_type == DeviceType::HDD
-          ? kernel_state()->content_manager()->GetContentFreeSpace()
+          ? GvContentFreeBytes()
           : device_info->free_bytes;
   // enforces name by device type
   const std::u16string_view device_name =
@@ -231,7 +245,7 @@ dword_result_t XamContentCreateDeviceEnumerator_entry(dword_t content_type,
               : device_info->total_bytes;
       device_data->free_bytes =
           device_info->device_type == DeviceType::HDD
-              ? kernel_state()->content_manager()->GetContentFreeSpace()
+              ? GvContentFreeBytes()
               : device_info->free_bytes;
       xe::string_util::copy_and_swap_truncating(
           device_data->name_chars, device_info->name,
