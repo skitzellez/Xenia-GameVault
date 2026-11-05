@@ -1460,7 +1460,8 @@ void GameVaultXeniaApp::EmulatorThread() {
   // The game quit to the dashboard: back to Game Vault.
   emulator_->set_on_exit_to_dashboard([this]() {
     app_context().CallInUIThread([]() { UWP::RequestQuit(); });
-    return false;
+    // true: the game thread parks. Going on to TerminateTitle ended Xenia before the link back was sent (Dev Home).
+    return true;
   });
 
   app_context().CallInUIThreadSynchronous([this]() {
