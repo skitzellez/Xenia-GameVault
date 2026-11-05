@@ -1522,7 +1522,9 @@ void GameVaultXeniaApp::EmulatorThread() {
   // instead of a black screen
   gv_addons_busy = true;
   app_context().CallInUIThread([this]() { new AddOnProgress(imgui_drawer_.get()); });
-  InstallGameVaultAddOns(emulator_.get());
+  // Opened with no game (a new install has to be opened once from Dev Home before Game Vault can see it): nothing is
+  // installed now, or the player waits for every game's add-ons on a screen meant to say "open it once".
+  if (!cvars::target.empty() || UWP::HasGamePath()) InstallGameVaultAddOns(emulator_.get());
   std::filesystem::path game_vault_start;
   bool disc_data_ok = true;
   if (cvars::target.empty() && UWP::HasGamePath()) {

@@ -1339,6 +1339,14 @@ X_STATUS Emulator::InstallContentPackage(
   }
 
   if (error_code != X_ERROR_SUCCESS) {
+    // Game Vault: a half-unpacked package would look installed to the game
+    if (error_code == X_STATUS(0xC0000102L)) {
+      std::error_code ec;
+      std::filesystem::remove_all(installation_path, ec);
+      std::filesystem::remove(header_path, ec);
+      std::lock_guard<std::mutex> lock(*installation_info.mutex_);
+      installation_info.installation_error_message_ = "The package could not be read";
+    }
     std::lock_guard<std::mutex> lock(*installation_info.mutex_);
     installation_info.installation_state_ = InstallState::failed;
     return error_code;

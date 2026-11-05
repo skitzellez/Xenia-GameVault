@@ -471,6 +471,16 @@ X_STATUS VirtualFileSystem::ExtractContentFile(Entry* entry,
       size_t bytes_read = 0;
       in_file->ReadSync(std::span<uint8_t>(buffer, write_buffer_size), offset,
                         &bytes_read);
+      // Game Vault: a read that returns nothing used to repeat forever (NWOSTAR's NCAA Football 13 update stopped
+      // here for 36 minutes, with the game waiting behind it). The package is reported as failed instead.
+      if (bytes_read == 0) {
+        XELOGE("Could not read all of {}: {} bytes missing", entry->path(), remaining_size);
+        fclose(file);
+        in_file->Destroy();
+        delete[] buffer;
+        return X_STATUS(0xC0000102L);
+      }
+      bytes_read = std::min(bytes_read, remaining_size);
       fwrite(buffer, bytes_read, 1, file);
       offset += bytes_read;
       remaining_size -= bytes_read;
@@ -507,7 +517,10 @@ X_STATUS VirtualFileSystem::ExtractContentFiles(
       queue.push(entry.get());
     }
 
-    ExtractContentFile(entry, base_path, progress);
+    // (Other results keep being ignored as before: only data that cannot be read stops a package.)
+    if (ExtractContentFile(entry, base_path, progress) == X_STATUS(0xC0000102L)) {
+      return X_STATUS(0xC0000102L);
+    }
   }
   return X_STATUS_SUCCESS;
 }
