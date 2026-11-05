@@ -767,6 +767,9 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     // Blur: 3D far too bright without resolve read-back (its brightness adaptation reads the picture back; xenia-canary
     // game-compatibility issue 549, label gpu-readback). A player's Blur also lost the graphics device (2026-10-19).
     {"41560845", "[GPU]\nreadback_resolve = \"fast\"\n"},
+    // James Bond 007: Blood Stone (same studio as Blur): gameplay pure white without resolve read-back, menus and
+    // cutscenes fine (xenia-canary game-compatibility issue 587, label gpu-readback; console check 2026-11-05).
+    {"4156081F", "[GPU]\nreadback_resolve = \"fast\"\n"},
     // GTA IV (+ Episodes from Liberty City, same title ID): its resolves stay on the GPU (not labelled gpu-readback
     // on xenia-canary game-compatibility issue 14); reading ~1,700 of them back per second held the streets at ~20 fps
     // on the console. No visible change without it (user check, 2026-10-27).
