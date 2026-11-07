@@ -7,6 +7,7 @@
 // another while a game runs. The steps follow Edge's xenia_main.cc: Setup, SetupSubsystems, the presenter on the
 // window, LaunchPath; RelaunchTitle for the next game.
 
+#include <array>
 #include <algorithm>
 #include <atomic>
 #include <cfloat>
@@ -831,12 +832,14 @@ class NoGameMessage final : public ui::ImGuiDialog {
 
 // View + Menu during a game: the game stops and a menu comes up over it. The
 // controller then only moves through the menu; B goes back a page or resumes.
+static int GvDrawingScale();
+
 struct GameMenuActions {
   std::function<void()> fps_changed;    // the counter was turned on or off
   std::function<void()> restart;        // the game starts again
   std::function<void()> leave;          // back to Game Vault
   std::function<void()> clear_shaders;  // stored shaders go, then restart
-  std::function<void(int)> set_scale;   // resolution scale, then restart
+  std::function<void(int, bool)> set_scale;   // resolution scale; true: the game starts again now
 };
 
 class GameMenu final : public ui::ImGuiDialog {
@@ -883,7 +886,7 @@ class GameMenu final : public ui::ImGuiDialog {
   }
 
  protected:
-  enum class Page { kMain, kScale, kControllers };
+  enum class Page { kMain, kScale, kScaleApply, kControllers };
 
   void OnDraw(ImGuiIO& io) override {
     ++frames_;
@@ -915,6 +918,9 @@ class GameMenu final : public ui::ImGuiDialog {
         break;
       case Page::kScale:
         DrawScale(scale);
+        break;
+      case Page::kScaleApply:
+        DrawScaleApply(scale);
         break;
       case Page::kControllers:
         DrawControllers(scale);
@@ -970,9 +976,11 @@ class GameMenu final : public ui::ImGuiDialog {
     if (ImGui::Button("Restart game", button_)) {
       CloseThen(actions_.restart);
     }
-    const int current = std::max(1, int(cvars::draw_resolution_scale_x));
-    if (ImGui::Button(fmt::format("Resolution scale: {}x", current).c_str(),
-                      button_)) {
+    const int chosen = std::max(1, int(cvars::draw_resolution_scale_x));
+    const std::string scale_label =
+        chosen == GvDrawingScale() ? fmt::format("Resolution scale: {}x", chosen)
+                                   : fmt::format("Resolution scale: {}x  ({}x next start)", GvDrawingScale(), chosen);
+    if (ImGui::Button(scale_label.c_str(), button_)) {
       Show(Page::kScale);
     }
     if (ImGui::Button("Controllers", button_)) {
@@ -995,17 +1003,36 @@ class GameMenu final : public ui::ImGuiDialog {
 
   void DrawScale(float scale) {
     Title("Resolution scale", scale);
-    const int current = std::max(1, int(cvars::draw_resolution_scale_x));
+    const int drawing = GvDrawingScale();
+    const int chosen = std::max(1, int(cvars::draw_resolution_scale_x));
     static const char* kNames[] = {"1x  (720p, fastest)", "2x  (1440p)",
                                    "3x  (4K, sharpest)"};
     for (int i = 1; i <= 3; ++i) {
-      const std::string label =
-          fmt::format("{}{}", kNames[i - 1], i == current ? "   (now)" : "");
-      if (ImGui::Button(label.c_str(), button_) && i != current) {
-        CloseThen([this, i]() { actions_.set_scale(i); });
+      const char* note = i == drawing ? "   (now)" : i == chosen ? "   (next start)" : "";
+      const std::string label = fmt::format("{}{}", kNames[i - 1], note);
+      if (ImGui::Button(label.c_str(), button_)) {
+        if (i == drawing) {
+          // Back to what is on screen: nothing to start again for.
+          if (i != chosen) CloseThen([this, i]() { actions_.set_scale(i, false); });
+        } else {
+          scale_pick_ = i;
+          Show(Page::kScaleApply);
+        }
       }
     }
-    Hint("For every Xbox 360 game. The game restarts. B: back.", scale);
+    Hint("For every Xbox 360 game. B: back.", scale);
+  }
+
+  void DrawScaleApply(float scale) {
+    Title(fmt::format("Change to {}x", scale_pick_).c_str(), scale);
+    const int pick = scale_pick_;
+    if (ImGui::Button("Next time the game starts", button_)) {
+      CloseThen([this, pick]() { actions_.set_scale(pick, false); });
+    }
+    if (ImGui::Button("Restart the game now", button_)) {
+      CloseThen([this, pick]() { actions_.set_scale(pick, true); });
+    }
+    Hint("Restarting loses anything not saved in the game. B: back.", scale);
   }
 
   void DrawControllers(float scale) {
@@ -1047,6 +1074,7 @@ class GameMenu final : public ui::ImGuiDialog {
   GameMenu** open_menu_;
   kernel::GuestScheduler* scheduler_ = nullptr;
   Page page_ = Page::kMain;
+  int scale_pick_ = 1;
   uint64_t frames_ = 0;
   uint64_t page_frame_ = 1;
   ImVec2 button_;
@@ -1392,8 +1420,43 @@ void GameVaultXeniaApp::StartTitle(const std::filesystem::path& path) {
 // Xenia's own scale (its config), for a game Game Vault sends no scale with. The in-game menu changes it too
 // (krauser985 11-02: a scale picked there went back to the old one at the next game).
 static int gv_base_scale_x = -1, gv_base_scale_y = -1;
+// What the graphics were made with. Xenia reads the setting only then, so a new choice waits for the next start.
+static int gv_drawing_scale = 1;
+static int GvDrawingScale() { return gv_drawing_scale; }
 void GvSetBaseScale(int scale) {
   gv_base_scale_x = gv_base_scale_y = scale;
+}
+// The in-game menu's choice for a game Game Vault gives a scale of its own: the link would otherwise win and take it
+// back at the next start ("the resolution resets"). LocalState\\gv_menu_scale.txt, lines of "<title hex> <link's scale>
+// <menu's scale>"; a line counts only while the link still asks for that scale, so changing the game's setting in Game
+// Vault afterwards wins over it.
+static std::filesystem::path GvMenuScaleFile() {
+  return std::filesystem::path(xe::to_path(UWP::GetLocalState())) / "gv_menu_scale.txt";
+}
+static int GvMenuScaleFor(uint32_t title, int link_scale) {
+  std::ifstream file(GvMenuScaleFile());
+  uint32_t t;
+  int link, pick;
+  while (file >> std::hex >> t >> std::dec >> link >> pick) {
+    if (t == title && link == link_scale && pick >= 1 && pick <= 3) return pick;
+  }
+  return 0;
+}
+static void GvRememberMenuScale(uint32_t title, int link_scale, int pick) {
+  std::vector<std::array<uint32_t, 3>> lines;
+  {
+    std::ifstream file(GvMenuScaleFile());
+    uint32_t t;
+    int link, old;
+    while (file >> std::hex >> t >> std::dec >> link >> old) {
+      if (t != title) lines.push_back({t, uint32_t(link), uint32_t(old)});
+    }
+  }
+  lines.push_back({title, uint32_t(link_scale), uint32_t(pick)});
+  std::ofstream file(GvMenuScaleFile(), std::ios::trunc);
+  for (const auto& l : lines) {
+    file << fmt::format("{:08X} {} {}\n", l[0], l[1], l[2]);
+  }
 }
 void GvApplyGameScale() {
   int& base_x = gv_base_scale_x;
@@ -1402,11 +1465,14 @@ void GvApplyGameScale() {
     base_x = cvars::draw_resolution_scale_x;
     base_y = cvars::draw_resolution_scale_y;
   }
-  const int want = gv_requested_scale;
+  int want = gv_requested_scale;
+  const int menu = want ? GvMenuScaleFor(gv_requested_title, want) : 0;
+  if (menu) want = menu;
   cvars::draw_resolution_scale_x = want ? want : base_x;
   cvars::draw_resolution_scale_y = want ? want : base_y;
+  gv_drawing_scale = std::max(1, int(cvars::draw_resolution_scale_x));
   XELOGI("Game Vault: resolution scale {}x{}{}", cvars::draw_resolution_scale_x, cvars::draw_resolution_scale_y,
-         want ? " (the game's setting in Game Vault)" : "");
+         menu ? " (picked in the in-game menu)" : want ? " (the game's setting in Game Vault)" : "");
 }
 
 void GameVaultXeniaApp::EmulatorThread() {
@@ -1496,7 +1562,7 @@ void GameVaultXeniaApp::EmulatorThread() {
         gpu::RequestShaderStorageClear(emulator_->game_config_title_id());
         RestartTitle("shader cache cleared");
       };
-      actions.set_scale = [this](int scale) {
+      actions.set_scale = [this](int scale, bool restart_now) {
         // Saved as Xenia's own setting: a plain assignment changed only the live value, and SaveConfig wrote the
         // old one back, so the choice was gone at Xenia's next start (krauser985 11-02: "it fails again").
         for (const char* name : {"draw_resolution_scale_x", "draw_resolution_scale_y"}) {
@@ -1511,8 +1577,15 @@ void GameVaultXeniaApp::EmulatorThread() {
         cvars::draw_resolution_scale_y = scale;
         GvSetBaseScale(scale);
         config::SaveConfig();
+        if (gv_requested_scale) {
+          GvRememberMenuScale(gv_requested_title, gv_requested_scale, scale);
+        }
         XELOGI("Game Vault: in-game menu: resolution scale {}x (Xenia's own, for every game)", scale);
-        RestartTitle("resolution scale");
+        // The game no longer starts over by itself (PSYCHOsmurfZA 11-06). Changing it live was tried: the game goes on,
+        // but images it made on the GPU at loading are lost and the picture stays corrupted (MW3).
+        if (restart_now) {
+          RestartTitle("resolution scale");
+        }
       };
       new GameMenu(imgui_drawer_.get(), emulator_.get(), std::move(actions),
                    &game_menu_);
@@ -1631,6 +1704,7 @@ void GameVaultXeniaApp::RestartTitle(const char* why) {
     return;
   }
   XELOGI("Game Vault: in-game menu: the game starts again ({})", why);
+  GvApplyGameScale();   // the graphics are made again: what the menu shows follows
   switching_ = true;
   const std::filesystem::path path = current_path_;
   std::thread([this, path]() {
