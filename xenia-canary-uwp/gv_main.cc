@@ -1470,6 +1470,24 @@ void GvApplyGameScale() {
   if (menu) want = menu;
   cvars::draw_resolution_scale_x = want ? want : base_x;
   cvars::draw_resolution_scale_y = want ? want : base_y;
+  // Games that cannot draw above a scale: the highest one they work at is used instead. WWE 2K14 at 3x (owner
+  // console 2026-11-09): its loading screen asks for render targets the GPU cannot make (280x2344 4xMSAA depth and
+  // more, "Failed to create ... render target"), stays on that screen, memory climbs to ~5 GB and Xenia closes;
+  // at 2x it plays (53-58 fps).
+  static const struct {
+    uint32_t title;
+    int max_scale;
+  } kMaxScale[] = {
+      {0x545408B2, 2},   // WWE 2K14
+  };
+  for (const auto& m : kMaxScale) {
+    if (gv_requested_title == m.title && int(cvars::draw_resolution_scale_x) > m.max_scale) {
+      XELOGI("Game Vault: resolution scale {}x is too high for this game, {}x instead",
+             cvars::draw_resolution_scale_x, m.max_scale);
+      cvars::draw_resolution_scale_x = std::min(int(cvars::draw_resolution_scale_x), m.max_scale);
+      cvars::draw_resolution_scale_y = std::min(int(cvars::draw_resolution_scale_y), m.max_scale);
+    }
+  }
   gv_drawing_scale = std::max(1, int(cvars::draw_resolution_scale_x));
   XELOGI("Game Vault: resolution scale {}x{}{}", cvars::draw_resolution_scale_x, cvars::draw_resolution_scale_y,
          menu ? " (picked in the in-game menu)" : want ? " (the game's setting in Game Vault)" : "");
