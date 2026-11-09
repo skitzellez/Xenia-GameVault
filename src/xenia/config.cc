@@ -782,6 +782,10 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     // James Bond 007: Blood Stone (same studio as Blur): gameplay pure white without resolve read-back, menus and
     // cutscenes fine (xenia-canary game-compatibility issue 587, label gpu-readback; console check 2026-11-05).
     {"4156081F", "[GPU]\nreadback_resolve = \"fast\"\n"},
+    // Forza Motorsport 3: the road streaky and white without resolve read-back (xenia-canary game-compatibility
+    // issue 409, label gpu-readback). "full" drew it right but the race stuttered; our deferred copies under "fast"
+    // garbled the GPU commands while a race loaded (Xenia closed). Plain "fast": right road, smooth (2026-11-09).
+    {"4D53084D", "[GPU]\nreadback_resolve = \"fast\"\nreadback_resolve_deferred = false\n"},
     // GTA IV (+ Episodes from Liberty City, same title ID): its resolves stay on the GPU (not labelled gpu-readback
     // on xenia-canary game-compatibility issue 14); reading ~1,700 of them back per second held the streets at ~20 fps
     // on the console. No visible change without it (user check, 2026-10-27).

@@ -1479,6 +1479,7 @@ void GvApplyGameScale() {
     int max_scale;
   } kMaxScale[] = {
       {0x545408B2, 2},   // WWE 2K14
+      {0x4D53084D, 2},   // Forza Motorsport 3: 4.8 GB and locked up at 3x (2026-11-09)
   };
   for (const auto& m : kMaxScale) {
     if (gv_requested_title == m.title && int(cvars::draw_resolution_scale_x) > m.max_scale) {
