@@ -753,9 +753,21 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     {"5451085D", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // SmackDown vs. Raw 2011
     {"54510890", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE '12
     {"545108B4", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE 13
-    {"545408B2", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE 2K14
-    {"545408B6", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE 2K15
-    {"315A07D2", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE 2K16 (a 2K title ID)
+    // WWE 2K14, 2K15 and 2K16: the same engine as WWE 2K17, so the same three settings. 2K14 checked 2026-11-09 on
+    // the owner console (attract-mode match): without the shader setting the wrestlers lose legs, arms and heads,
+    // with it every body is whole (a player's photo showed the same: Undertaker's hat and coat, no head or hands).
+    {"545408B2",   // WWE 2K14
+     "[Memory]\nignore_offset_for_ranged_allocations = true\n"
+     "[GPU]\nreadback_resolve = \"fast\"\n"
+     "[GPU.Debug]\ndxbc_forward_jumps_without_loop = false\n"},
+    {"545408B6",   // WWE 2K15
+     "[Memory]\nignore_offset_for_ranged_allocations = true\n"
+     "[GPU]\nreadback_resolve = \"fast\"\n"
+     "[GPU.Debug]\ndxbc_forward_jumps_without_loop = false\n"},
+    {"315A07D2",   // WWE 2K16 (a 2K title ID)
+     "[Memory]\nignore_offset_for_ranged_allocations = true\n"
+     "[GPU]\nreadback_resolve = \"fast\"\n"
+     "[GPU.Debug]\ndxbc_forward_jumps_without_loop = false\n"},
     // Naruto: The Broken Bond (+ demo): black, stretched textures
     // (xenia-canary game-compatibility issue 87, xenia-canary issue 906).
     {"55530825",
