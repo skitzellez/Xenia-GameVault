@@ -82,6 +82,7 @@ DEFINE_bool(gv_readback_ignore_protect, false, "Game Vault debugging: read resol
 DEFINE_bool(gv_skip_depth_only_draws, false, "Game Vault debugging: skip depth-only (EDRAM mode depth) draws.", "D3D12");
 DEFINE_bool(gv_probe_memory, true, "Game Vault debugging: with the gv_seq_ps trigger, also save GPU memory probes.", "D3D12");
 DEFINE_int32(gv_probe_draw_every, 0, "Game Vault debugging: during a sequence trace, snapshot the bound color target after every N-th colour draw (0 = off).", "D3D12");
+DEFINE_int32(gv_readback_full_max_kb, 512, "Game Vault: with readback_resolve = \"full\", only copies up to this size (KB) wait for the GPU; bigger ones take the fast path. 0 = all full.", "D3D12");
 DEFINE_bool(gv_drop_superseded_readbacks, false, "Game Vault: drop pending deferred read-backs fully covered by a newer one (did not matter for Naughty Bear; off).", "D3D12");
 DEFINE_bool(d3d12_log_draw_pairs, false,
             "Game Vault debugging: log each new vertex/pixel shader pair once, with its primitive, vertex count, "
@@ -4075,6 +4076,14 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   }
 
   ReadbackResolveMode readback_mode = GetReadbackResolveMode();
+  // Game Vault: "full" waits for the GPU on every read-back. Source engine games need it for their letters (small
+  // copies), but waiting on the big ones (whole frames) too made Left 4 Dead 2 play badly with stutters (2026-11-10).
+  // Copies above the limit take the fast path. 0 = every copy full, as upstream.
+  if (readback_mode == ReadbackResolveMode::kFull && cvars::gv_readback_full_max_kb > 0 &&
+      readback_length > uint32_t(cvars::gv_readback_full_max_kb) * 1024u) {
+    readback_mode = ReadbackResolveMode::kFast;
+    gv_full_stats_.big++;
+  }
   uint64_t ring_start = 0;
   const bool deferred = readback_mode == ReadbackResolveMode::kFast &&
                         cvars::readback_resolve_deferred &&
@@ -4267,7 +4276,22 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
 
   if (readback_mode != ReadbackResolveMode::kFast) {
     // Wait for GPU to finish (accurate but slow)
-    if (!AwaitAllQueueOperationsCompletion()) {
+    auto gv_t0 = std::chrono::steady_clock::now();
+    bool gv_ok = AwaitAllQueueOperationsCompletion();
+    auto gv_now = std::chrono::steady_clock::now();
+    gv_full_stats_.count++;
+    gv_full_stats_.bytes += readback_length;
+    gv_full_stats_.max_bytes = std::max(gv_full_stats_.max_bytes, readback_length);
+    gv_full_stats_.wait_us += uint64_t(
+        std::chrono::duration_cast<std::chrono::microseconds>(gv_now - gv_t0).count());
+    if (gv_now - gv_full_stats_.since >= std::chrono::seconds(1)) {   // once a second, for reports
+      XELOGI("Game Vault: full read-backs last second: {} ({} KB, biggest {} KB), waited {} ms; {} big ones fast",
+             gv_full_stats_.count, gv_full_stats_.bytes / 1024, gv_full_stats_.max_bytes / 1024,
+             gv_full_stats_.wait_us / 1000, gv_full_stats_.big);
+      gv_full_stats_ = GvFullStats{};
+      gv_full_stats_.since = gv_now;
+    }
+    if (!gv_ok) {
       return true;
     }
   } else if (read_cache_miss) {

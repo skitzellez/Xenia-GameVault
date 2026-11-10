@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <memory>
 #include <optional>
@@ -778,6 +779,13 @@ class D3D12CommandProcessor final : public CommandProcessor {
   bool gv_readback_ring_failed_ = false;
   uint64_t gv_readback_ring_head_ = 0;
   std::deque<GvPendingReadback> gv_readback_pending_;
+  // Game Vault: full (waiting) read-backs in the current second, logged once a second
+  struct GvFullStats {
+    uint32_t count = 0, max_bytes = 0, big = 0;
+    uint64_t bytes = 0, wait_us = 0;
+    std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+  };
+  GvFullStats gv_full_stats_;
 
   // Simple single buffer for memexport (always syncs, no double-buffering)
   ID3D12Resource* memexport_readback_buffer_ = nullptr;
