@@ -794,6 +794,14 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     // Source engine draws its letters, resolves them and reads them back at once; "fast" hands it the previous
     // frame's copy (xenia-canary game-compatibility issue 235). Console check 2026-11-02: all text readable, 30 fps.
     {"4541080F", "[GPU]\nreadback_resolve = \"full\"\n"},
+    // The other Source engine games, same garbled text (labels tech-engine-source + gpu-readback on xenia-canary
+    // game-compatibility): Left 4 Dead 2 menu unreadable on the console (2026-11-10).
+    {"45410830", "[GPU]\nreadback_resolve = \"full\"\n"},   // Left 4 Dead
+    {"454108D4", "[GPU]\nreadback_resolve = \"full\"\n"},   // Left 4 Dead 2
+    {"45410912", "[GPU]\nreadback_resolve = \"full\"\n"},   // Portal 2
+    {"58410960", "[GPU]\nreadback_resolve = \"full\"\n"},   // Portal: Still Alive
+    {"5841125A", "[GPU]\nreadback_resolve = \"full\"\n"},   // Counter-Strike: GO
+    {"55530804", "[GPU]\nreadback_resolve = \"full\"\n"},   // Dark Messiah: Might and Magic Elements
 };
 
 void ApplyBuiltInGameConfig(const std::string_view title_id) {
