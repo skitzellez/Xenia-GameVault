@@ -9,6 +9,7 @@
 
 #include "xenia/cpu/mmio_handler.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "xenia/base/assert.h"
@@ -17,6 +18,10 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
+#if XE_PLATFORM_WIN32
+#include <atomic>
+#include "xenia/base/platform_win.h"
+#endif
 
 namespace xe {
 namespace cpu {
@@ -395,6 +400,60 @@ bool MMIOHandler::TryDecodeLoadStore(const uint8_t* p,
 #endif  // XE_ARCH
 }
 
+#if XE_PLATFORM_WIN32
+// Game Vault: physical guest memory committed at first touch (see
+// Memory::Initialize, gv_lazy_physical_commit).
+static std::atomic<bool> gv_lazy_physical_commit_{false};
+static std::atomic<uint64_t> gv_lazy_committed_bytes_{0};
+static std::atomic<uint32_t> gv_lazy_failures_{0};
+void GameVaultSetLazyPhysicalCommit(bool on) { gv_lazy_physical_commit_ = on; }
+uint64_t GameVaultLazyCommittedBytes() { return gv_lazy_committed_bytes_; }
+
+// True when the fault was on a physical-memory page that had no host memory
+// yet and now has: the access runs again.
+static bool GameVaultCommitOnTouch(uint64_t fault, uint64_t virtual_membase,
+                                   uint64_t physical_membase) {
+  if (!gv_lazy_physical_commit_.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  if (fault < physical_membase) {
+    // Only the views of physical memory (0x7F..., 0xA0000000 and up).
+    const uint64_t guest = fault - virtual_membase;
+    if (guest < 0x7F000000ull ||
+        (guest >= 0x80000000ull && guest < 0xA0000000ull)) {
+      return false;
+    }
+  }
+  MEMORY_BASIC_INFORMATION info = {};
+  if (!VirtualQuery(reinterpret_cast<void*>(fault), &info, sizeof(info)) ||
+      info.State != MEM_RESERVE) {
+    return false;
+  }
+  // 64 KB around the touch, kept inside the uncommitted run.
+  const uint64_t run_start = uint64_t(info.BaseAddress);
+  const uint64_t run_end = run_start + info.RegionSize;
+  uint64_t start = std::max(run_start, fault & ~uint64_t(0xFFFF));
+  uint64_t end = std::min(run_end, start + 0x10000);
+  if (!VirtualAllocFromApp(reinterpret_cast<void*>(start), size_t(end - start),
+                           MEM_COMMIT, PAGE_READWRITE)) {
+    // Not even 64 KB: the one page.
+    start = fault & ~uint64_t(0xFFF);
+    end = start + 0x1000;
+    if (!VirtualAllocFromApp(reinterpret_cast<void*>(start), 0x1000, MEM_COMMIT,
+                             PAGE_READWRITE)) {
+      if (gv_lazy_failures_.fetch_add(1) < 4) {
+        XELOGE("Game Vault: physical memory at host {:016X} could not be "
+               "committed at first touch: Windows error {}",
+               fault, uint32_t(GetLastError()));
+      }
+      return false;
+    }
+  }
+  gv_lazy_committed_bytes_.fetch_add(end - start, std::memory_order_relaxed);
+  return true;
+}
+#endif  // XE_PLATFORM_WIN32
+
 bool MMIOHandler::ExceptionCallbackThunk(Exception* ex, void* data) {
   return reinterpret_cast<MMIOHandler*>(data)->ExceptionCallback(ex);
 }
@@ -468,6 +527,12 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
     }
     return false;
 #else
+#if XE_PLATFORM_WIN32
+    if (GameVaultCommitOnTouch(ex->fault_address(), uint64_t(virtual_membase_),
+                               uint64_t(physical_membase_))) {
+      return true;
+    }
+#endif
     memory::PageAccess cur_access;
     size_t page_length = memory::page_size();
     memory::QueryProtect(fault_host_address, page_length, cur_access);

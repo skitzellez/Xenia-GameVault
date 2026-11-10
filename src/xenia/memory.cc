@@ -20,6 +20,13 @@
 #include <sys/mman.h>
 #endif
 
+#if XE_PLATFORM_WIN32
+// Game Vault: host commit failures are reported with the Windows error and
+// the state of the range (GameVaultCommitHostRange below).
+#include "xenia/base/platform_win.h"
+#include <psapi.h>
+#endif
+
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_stream.h"
@@ -49,6 +56,24 @@ DEFINE_bool(record_mmio_access_exceptions, true,
             "for them. This info can then be used on a subsequent run to "
             "instruct the recompiler to emit checks",
             "CPU");
+// Game Vault (tests only): takes memory away at start, to see on the owner's
+// console what a console with little memory left does. 0 = off (players).
+DEFINE_int32(gv_test_hold_shared_mb, 0,
+             "Test: commit this many MB of shared (section) memory at start "
+             "and keep it.",
+             "Memory");
+DEFINE_int32(gv_test_hold_private_mb, 0,
+             "Test: commit this many MB of private memory at start and keep "
+             "it.",
+             "Memory");
+// Game Vault: on the Xbox the game's memory (a shared section) is paid from
+// the console's small spare commit, not from the app's own 5 GB. Committing
+// all 496 MB of physical memory at start used up to half of what a console
+// has left, and games then got "no memory" and crashed at address 0.
+DEFINE_bool(gv_lazy_physical_commit, true,
+            "Commit physical guest memory when it is allocated or first "
+            "touched, not all 496 MB at start.",
+            "Memory");
 DEFINE_bool(protect_on_release, false,
             "Protect released memory to prevent accesses.", "Memory");
 DEFINE_bool(scribble_heap, false,
@@ -128,6 +153,210 @@ void CrashDump() {
   active_memory_->DumpMap();
   --in_crash_dump;
 }
+
+// Game Vault: commits guest pages on the host and, when Windows refuses, says
+// why in the log and tries the ways around it. Player logs showed "failed to
+// alloc range from host" right before most guest null-pointer crashes (the
+// game gets no memory and writes to address 0), at only 1.5-2 GB in use, with
+// no hint of the reason.
+//  1. The Windows error, the range and the memory left go to the log (first
+//     few times), so a report shows the cause.
+//  2. Pages that are committed already only need their protection set.
+//  3. A commit that is refused for lack of memory is tried again for a short
+//     while (another app closing frees memory a moment later), then page run
+//     by page run, so the part that fits is not lost.
+#if XE_PLATFORM_WIN32
+namespace cpu {
+void GameVaultSetLazyPhysicalCommit(bool on);
+uint64_t GameVaultLazyCommittedBytes();
+}  // namespace cpu
+#endif
+
+static void* GameVaultCommitHostRange(void* base, size_t length,
+                                      xe::memory::PageAccess access,
+                                      const char* heap_name) {
+  void* result = xe::memory::AllocFixed(
+      base, length, xe::memory::AllocationType::kCommit, access);
+#if XE_PLATFORM_WIN32
+  if (result) {
+    return result;
+  }
+  const DWORD first_error = GetLastError();
+  static std::atomic<uint32_t> failures{0};
+  const uint32_t failure_number = failures.fetch_add(1) + 1;
+  const bool log_it = failure_number <= 12 || (failure_number % 256) == 0;
+
+  // What is the range made of?
+  size_t committed = 0, reserved = 0, free_bytes = 0;
+  DWORD first_state = 0, first_protect = 0, first_type = 0;
+  {
+    uint8_t* p = static_cast<uint8_t*>(base);
+    uint8_t* end = p + length;
+    bool first = true;
+    while (p < end) {
+      MEMORY_BASIC_INFORMATION info = {};
+      if (!VirtualQuery(p, &info, sizeof(info)) || !info.RegionSize) {
+        break;
+      }
+      const size_t part =
+          std::min<size_t>(info.RegionSize, static_cast<size_t>(end - p));
+      if (first) {
+        first_state = info.State;
+        first_protect = info.Protect;
+        first_type = info.Type;
+        first = false;
+      }
+      if (info.State == MEM_COMMIT) {
+        committed += part;
+      } else if (info.State == MEM_RESERVE) {
+        reserved += part;
+      } else {
+        free_bytes += part;
+      }
+      p += part;
+    }
+  }
+  MEMORYSTATUSEX status = {sizeof(status)};
+  GlobalMemoryStatusEx(&status);
+  PROCESS_MEMORY_COUNTERS_EX counters = {sizeof(counters)};
+  K32GetProcessMemoryInfo(GetCurrentProcess(),
+                          reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
+                          sizeof(counters));
+  if (log_it) {
+    XELOGE(
+        "Game Vault: host commit failed (#{}): Windows error {}, {} heap, "
+        "host {} + {} KB, access {}; range now: {} KB committed, {} KB "
+        "reserved, {} KB free (first part state 0x{:X} protect 0x{:X} type "
+        "0x{:X}); memory: this app {} MB private, {} MB working set; console "
+        "{}% in use, {} of {} MB physical free, {} of {} MB commit free; "
+        "{} MB committed at first touch",
+        failure_number, first_error, heap_name, base, length >> 10,
+        static_cast<uint32_t>(access), committed >> 10, reserved >> 10,
+        free_bytes >> 10, first_state, first_protect, first_type,
+        uint64_t(counters.PrivateUsage) >> 20,
+        uint64_t(counters.WorkingSetSize) >> 20, status.dwMemoryLoad,
+        status.ullAvailPhys >> 20, status.ullTotalPhys >> 20,
+        status.ullAvailPageFile >> 20, status.ullTotalPageFile >> 20,
+        cpu::GameVaultLazyCommittedBytes() >> 20);
+  }
+
+  // Already committed everywhere: the protection is all that is asked.
+  if (committed == length) {
+    if (xe::memory::Protect(base, length, access, nullptr)) {
+      if (log_it) {
+        XELOGW("Game Vault: host commit #{}: the pages were committed "
+               "already, protection set instead",
+               failure_number);
+      }
+      return base;
+    }
+  }
+
+  // Refused for lack of memory: wait a little for memory to come free.
+  const bool memory_error = first_error == ERROR_NOT_ENOUGH_MEMORY ||
+                            first_error == ERROR_OUTOFMEMORY ||
+                            first_error == ERROR_COMMITMENT_LIMIT ||
+                            first_error == ERROR_NO_SYSTEM_RESOURCES ||
+                            first_error == ERROR_WORKING_SET_QUOTA ||
+                            first_error == ERROR_PAGEFILE_QUOTA ||
+                            first_error == ERROR_NOT_ENOUGH_QUOTA;
+  if (memory_error) {
+    for (int attempt = 1; attempt <= 20; ++attempt) {
+      Sleep(25);
+      result = xe::memory::AllocFixed(
+          base, length, xe::memory::AllocationType::kCommit, access);
+      if (result) {
+        if (log_it) {
+          XELOGW("Game Vault: host commit #{}: worked on try {} ({} ms later)",
+                 failure_number, attempt + 1, attempt * 25);
+        }
+        return result;
+      }
+    }
+  }
+
+  // Run by run: committed runs get the protection, the others a commit of
+  // their own (64 KB at a time when even a run is refused).
+  {
+    uint8_t* p = static_cast<uint8_t*>(base);
+    uint8_t* end = p + length;
+    bool all_ok = true;
+    while (p < end && all_ok) {
+      MEMORY_BASIC_INFORMATION info = {};
+      if (!VirtualQuery(p, &info, sizeof(info)) || !info.RegionSize) {
+        all_ok = false;
+        break;
+      }
+      const size_t part =
+          std::min<size_t>(info.RegionSize, static_cast<size_t>(end - p));
+      if (info.State == MEM_COMMIT) {
+        all_ok = xe::memory::Protect(p, part, access, nullptr);
+      } else if (info.State == MEM_RESERVE) {
+        if (!xe::memory::AllocFixed(p, part,
+                                    xe::memory::AllocationType::kCommit,
+                                    access)) {
+          const size_t step = 64 * 1024;
+          for (size_t done = 0; done < part && all_ok; done += step) {
+            all_ok = xe::memory::AllocFixed(
+                         p + done, std::min(step, part - done),
+                         xe::memory::AllocationType::kCommit,
+                         access) != nullptr;
+          }
+        }
+      } else {
+        all_ok = false;
+      }
+      p += part;
+    }
+    if (all_ok) {
+      if (log_it) {
+        XELOGW("Game Vault: host commit #{}: worked in parts", failure_number);
+      }
+      return base;
+    }
+  }
+  if (log_it) {
+    XELOGE("Game Vault: host commit #{}: no way around it worked (last "
+           "Windows error {}); the game gets no memory here",
+           failure_number, uint32_t(GetLastError()));
+  }
+  SetLastError(first_error);
+  return nullptr;
+#else
+  return result;
+#endif  // XE_PLATFORM_WIN32
+}
+
+#if XE_PLATFORM_WIN32
+static void GameVaultHoldTestMemory() {
+  static std::atomic<bool> done{false};
+  if (done.exchange(true)) {
+    return;
+  }
+  const auto report = [](const char* what, int mb, bool ok) {
+    MEMORYSTATUSEX status = {sizeof(status)};
+    GlobalMemoryStatusEx(&status);
+    XELOGW("Game Vault: TEST: held {} MB of {} memory: {} (Windows error {}); "
+           "now {} of {} MB commit free, {} of {} MB physical free",
+           mb, what, ok ? "ok" : "FAILED", ok ? 0u : uint32_t(GetLastError()),
+           status.ullAvailPageFile >> 20, status.ullTotalPageFile >> 20,
+           status.ullAvailPhys >> 20, status.ullTotalPhys >> 20);
+  };
+  if (cvars::gv_test_hold_shared_mb > 0) {
+    const uint64_t size = uint64_t(cvars::gv_test_hold_shared_mb) << 20;
+    HANDLE section =
+        CreateFileMappingFromApp(INVALID_HANDLE_VALUE, nullptr,
+                                 PAGE_READWRITE | SEC_COMMIT, size, nullptr);
+    report("shared", cvars::gv_test_hold_shared_mb, section != nullptr);
+  }
+  if (cvars::gv_test_hold_private_mb > 0) {
+    const size_t size = size_t(cvars::gv_test_hold_private_mb) << 20;
+    void* block = VirtualAllocFromApp(nullptr, size, MEM_RESERVE | MEM_COMMIT,
+                                      PAGE_READWRITE);
+    report("private", cvars::gv_test_hold_private_mb, block != nullptr);
+  }
+}
+#endif  // XE_PLATFORM_WIN32
 
 static inline bool ShouldSkipHostCommit(const BaseHeap& heap) {
   // Any mprotect over an imported range invalidates the GPU's page pin, and the
@@ -213,6 +442,9 @@ Memory::~Memory() {
 }
 
 bool Memory::Initialize() {
+#if XE_PLATFORM_WIN32
+  GameVaultHoldTestMemory();
+#endif
   file_name_ = fmt::format("xenia_memory_{}", Clock::QueryHostTickCount());
 
   // Create main page file-backed mapping. This is all reserved but
@@ -325,9 +557,23 @@ bool Memory::Initialize() {
   // That's why we're commiting whole physical memory range and deal with
   // allocations issues on custom page protection level.
   // Commit the entire 512MB physical memory range
-  xe::memory::AllocFixed(heaps_.physical.TranslateRelative(0x01000000),
-                         0x1F000000, xe::memory::AllocationType::kCommit,
-                         xe::memory::PageAccess::kReadWrite);
+  // Game Vault: the result was not looked at; a refusal here leaves the game
+  // without its memory and only shows much later as a null-pointer crash.
+#if XE_PLATFORM_WIN32
+  const bool gv_lazy = cvars::gv_lazy_physical_commit;
+#else
+  const bool gv_lazy = false;
+#endif
+  if (gv_lazy) {
+    XELOGI("Game Vault: physical memory is committed as the game takes or "
+           "touches it (not 496 MB at start)");
+  } else
+  if (!GameVaultCommitHostRange(heaps_.physical.TranslateRelative(0x01000000),
+                                0x1F000000, xe::memory::PageAccess::kReadWrite,
+                                "physical (whole, at start)")) {
+    XELOGE("Game Vault: the 496 MB of physical memory could not be committed "
+           "at start");
+  }
 
   // Add handlers for MMIO.
   mmio_handler_ = cpu::MMIOHandler::Install(
@@ -339,6 +585,11 @@ bool Memory::Initialize() {
     assert_always();
     return false;
   }
+
+#if XE_PLATFORM_WIN32
+  // After the handler is in: it commits a physical page at its first touch.
+  cpu::GameVaultSetLazyPhysicalCommit(gv_lazy);
+#endif
 
   ReserveKernelPageTable();
   AddVirtualMappedRange(kKernelPageTableBase, ~(kKernelPageTableSize - 1),
@@ -2673,10 +2924,12 @@ bool BaseHeap::CommitHostPages(uint32_t start_page_number, uint32_t page_count,
   // protection of the guest pages sharing it.
   if (page_size_ >= xe_page_size &&
       (host_address_offset_ & page_size_mask) == 0) {
-    void* result = xe::memory::AllocFixed(
+    void* result = GameVaultCommitHostRange(
         TranslateRelative(start_page_number * page_size_),
-        page_count * page_size_, xe::memory::AllocationType::kCommit,
-        ToPageAccess(protect));
+        size_t(page_count) * page_size_, ToPageAccess(protect),
+        heap_type_ == HeapType::kGuestPhysical
+            ? "physical"
+            : heap_type_ == HeapType::kGuestXex ? "xex" : "virtual");
     if (!result) {
       return false;
     }
