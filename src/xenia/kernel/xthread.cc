@@ -108,9 +108,11 @@ XThread::~XThread() {
   if (thread_state_) {
     delete thread_state_;
   }
-  kernel_state()->memory()->SystemHeapFree(tls_static_address_);
-  kernel_state()->memory()->SystemHeapFree(pcr_address_);
-  FreeStack();
+  if (!gv_forgot_guest_memory_) {
+    kernel_state()->memory()->SystemHeapFree(tls_static_address_);
+    kernel_state()->memory()->SystemHeapFree(pcr_address_);
+    FreeStack();
+  }
 
   if (thread_) {
     // TODO(benvanik): platform kill
@@ -1585,6 +1587,138 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
         thread->handle(), thread->thread_state(), thread);
   }
 
+  return object_ref<XThread>(thread);
+}
+
+bool XThread::GvSave(ByteStream* stream) {
+  if (!SaveObject(stream)) {
+    return false;
+  }
+  stream->Write(std::string_view(thread_name_));
+  ThreadSavedState state = {};
+  state.thread_id = thread_id_;
+  state.is_main_thread = main_thread_;
+  state.is_running = running_;
+  state.tls_static_address = tls_static_address_;
+  state.tls_dynamic_address = tls_dynamic_address_;
+  state.tls_total_size = tls_total_size_;
+  state.pcr_address = pcr_address_;
+  state.stack_base = stack_base_;
+  state.stack_limit = stack_limit_;
+  state.stack_alloc_base = stack_alloc_base_;
+  state.stack_alloc_size = stack_alloc_size_;
+  stream->Write(&state, sizeof(ThreadSavedState));
+  stream->Write(&creation_params_, sizeof(creation_params_));
+  stream->Write<int32_t>(priority_);
+  stream->Write<int32_t>(base_priority_);
+  stream->Write<int32_t>(boost_amount_);
+  return true;
+}
+
+bool XThread::GvAdopt(ByteStream* stream) {
+  const bool allocated = stream->Read<uint32_t>() > 0;
+  const uint32_t guest_ptr = stream->Read<uint32_t>();
+  GvSetGuestObject(allocated, guest_ptr, stream->Read<uint32_t>());
+  const uint32_t handle_count = stream->Read<uint32_t>();
+  stream->Advance(handle_count * sizeof(X_HANDLE));
+  thread_name_ = stream->Read<std::string>();
+  ThreadSavedState state;
+  stream->Read(&state, sizeof(ThreadSavedState));
+  stream->Read(&creation_params_, sizeof(creation_params_));
+  priority_ = stream->Read<int32_t>();
+  base_priority_ = stream->Read<int32_t>();
+  boost_amount_ = stream->Read<int32_t>();
+  if (state.thread_id != thread_id_) {
+    return false;
+  }
+  tls_static_address_ = state.tls_static_address;
+  tls_dynamic_address_ = state.tls_dynamic_address;
+  tls_total_size_ = state.tls_total_size;
+  pcr_address_ = state.pcr_address;
+  stack_base_ = state.stack_base;
+  stack_limit_ = state.stack_limit;
+  stack_alloc_base_ = state.stack_alloc_base;
+  stack_alloc_size_ = state.stack_alloc_size;
+  return true;
+}
+
+void XThread::GvRunFrom(uint32_t pc) {
+  auto* context = thread_state_->context();
+  context->gv_host_depth = 1;
+  context->gv_extern_pc = 0;
+  guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_RUNNING;
+  uint32_t next_address = pc;
+#if XE_PLATFORM_WIN32
+  while (next_address != 0) {
+    if (setjmp(reentry_jmp_buf_) != 0) {
+      next_address = reentry_address_;
+    } else {
+      kernel_state()->processor()->ExecuteRaw(thread_state_, next_address);
+      next_address = 0;
+    }
+  }
+#endif
+  Exit(static_cast<int>(context->r[3]));
+}
+
+object_ref<XThread> XThread::GvRestore(KernelState* kernel_state,
+                                       ByteStream* stream, uint32_t pc) {
+  auto thread = new XThread(nullptr);
+  thread->kernel_state_ = kernel_state;
+  if (!thread->RestoreObject(stream)) {
+    return nullptr;
+  }
+  thread->thread_name_ = stream->Read<std::string>();
+  ThreadSavedState state;
+  stream->Read(&state, sizeof(ThreadSavedState));
+  stream->Read(&thread->creation_params_, sizeof(thread->creation_params_));
+  thread->priority_ = stream->Read<int32_t>();
+  thread->base_priority_ = stream->Read<int32_t>();
+  thread->boost_amount_ = stream->Read<int32_t>();
+  thread->thread_id_ = state.thread_id;
+  thread->main_thread_ = state.is_main_thread;
+  thread->tls_static_address_ = state.tls_static_address;
+  thread->tls_dynamic_address_ = state.tls_dynamic_address;
+  thread->tls_total_size_ = state.tls_total_size;
+  thread->pcr_address_ = state.pcr_address;
+  thread->stack_base_ = state.stack_base;
+  thread->stack_limit_ = state.stack_limit;
+  thread->stack_alloc_base_ = state.stack_alloc_base;
+  thread->stack_alloc_size_ = state.stack_alloc_size;
+  if (next_xthread_id_ < thread->thread_id_) {
+    next_xthread_id_ = thread->thread_id_;  // (a state from another run of Xenia)
+  }
+  kernel_state->RegisterThread(thread);
+  thread->thread_state_ =
+      new cpu::ThreadState(kernel_state->processor(), thread->thread_id_,
+                           thread->stack_base_, thread->pcr_address_);
+  thread->thread_state_->context()->kernel_state = kernel_state;
+
+  thread->fiber_exit_event_ =
+      xe::threading::Event::CreateManualResetEvent(false);
+  xe::threading::Fiber::CreationParameters fiber_params;
+  fiber_params.stack_size = 16_MiB;
+  thread->fiber_ = xe::threading::Fiber::Create(fiber_params, [thread, pc]() {
+    thread->kernel_state()->guest_scheduler()->ExitIfTerminated();
+    thread->running_ = true;
+    if (pc) {
+      XELOGI("Game Vault: save state: thread {:08X} '{}' (made again) goes on at {:08X}",
+             thread->thread_id(), thread->thread_name(), pc);
+      thread->GvRunFrom(pc);  // never returns
+    } else {
+      thread->Execute();  // never returns
+    }
+  });
+  if (!thread->fiber_) {
+    XELOGE("Game Vault: save state: no fiber for thread {:08X}", thread->thread_id_);
+    return nullptr;
+  }
+  // As Create does: held until the scheduler reclaims the exited fiber.
+  thread->Retain();
+  thread->running_ = pc != 0;
+  thread->scheduler_links_.has_run = pc != 0;
+  thread->emulator()->processor()->OnThreadCreated(
+      thread->handle(), thread->thread_state_, thread);
   return object_ref<XThread>(thread);
 }
 

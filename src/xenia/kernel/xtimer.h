@@ -27,6 +27,9 @@ class XTimer : public XObject {
 
   explicit XTimer(KernelState* kernel_state, bool host_object = false);
   ~XTimer() override;
+  bool Save(ByteStream* stream) override;
+  static object_ref<XTimer> GvRestore(KernelState* kernel_state,
+                                      ByteStream* stream);
 
   void Initialize(uint32_t timer_type);
   // Backs a KTIMER the guest initialized itself.

@@ -50,6 +50,11 @@ class ObjectTable {
   // Restores a XObject reference with a handle. Mainly for internal use - do
   // not use.
   X_STATUS RestoreHandle(X_HANDLE handle, XObject* object);
+  // Game Vault save states: a handle's count, and a handle taken away whatever its count.
+  int32_t GvHandleRefCount(X_HANDLE handle);
+  void GvSetHandleRefCount(X_HANDLE handle, int32_t count);
+  void GvDropHandle(X_HANDLE handle);
+  void GvEnsureSlot(X_HANDLE handle);
   template <typename T>
   object_ref<T> LookupObject(X_HANDLE handle, bool already_locked = false) {
     auto object = LookupObject(handle, already_locked);

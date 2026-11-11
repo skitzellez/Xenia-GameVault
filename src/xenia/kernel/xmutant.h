@@ -35,6 +35,12 @@ class XMutant : public XObject {
   bool Save(ByteStream* stream) override;
   static object_ref<XMutant> Restore(KernelState* kernel_state,
                                      ByteStream* stream);
+  // Game Vault save states: who holds the mutant and how many times over; a mutant made again from a state
+  // (free until GvSetOwner says otherwise); the holder as a state has it (game memory already says the same).
+  void GvGetOwner(uint32_t* thread_id, uint32_t* recursion);
+  static object_ref<XMutant> GvRestore(KernelState* kernel_state,
+                                       ByteStream* stream);
+  void GvSetOwner(XThread* owner, uint32_t recursion);
 
   // Mark every mutant in |thread|'s mutants_list abandoned and unlink it.
   // Called from XThread::Exit/Terminate.

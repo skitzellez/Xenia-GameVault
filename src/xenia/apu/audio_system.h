@@ -54,6 +54,22 @@ class AudioSystem {
   X_STATUS RegisterClient(uint32_t callback, uint32_t callback_arg,
                           size_t* out_index);
   void UnregisterClient(size_t index);
+  // Game Vault save states: (slot, callback, argument) of each client; after a load from another run of Xenia,
+  // clients the state has and this run lacks are registered, and each argument block in game memory rewritten.
+  std::vector<std::array<uint32_t, 3>> GvClients();
+  void GvMatchClients(const std::vector<std::array<uint32_t, 3>>& saved);
+  // Game Vault: is the game making sound? Frames the game has handed over so far, and the loudest sample (0..1)
+  // since |reader| (0 or 1, each with its own peak) last asked.
+  void GvSoundStats(int reader, uint64_t* frames, float* peak);
+  // Game Vault save states: the worker stays out of the game's sound callback while a state is taken or put back
+  // (the callback runs game code on the worker's own stack in game memory). False if a callback did not end in
+  // |ms|. Every true is followed by one GvReleaseWorker().
+  bool GvHoldWorker(int ms);
+  void GvReleaseWorker();
+  // Callbacks made so far, and for how long the worker has been inside one right now (0: it is not).
+  void GvWorkerStats(uint64_t* callbacks, uint64_t* in_callback_ms);
+  // Every client may be called again at once (output slots that were waiting on frames the game no longer owes).
+  void GvRefillSlots();
   void SubmitFrame(size_t index, float* samples);
 
   // Get performance statistics for a client
@@ -117,6 +133,11 @@ class AudioSystem {
     std::mutex callback_mutex;
   };
   ClientSlot clients_[kMaximumClientCount];
+  std::atomic<uint64_t> gv_sound_frames_{0};
+  std::mutex gv_callback_gate_;
+  std::atomic<uint64_t> gv_callbacks_{0};
+  std::atomic<uint64_t> gv_callback_since_ms_{0};
+  std::atomic<float> gv_sound_peak_[2] = {};
 
   int FindFreeClient();
 

@@ -186,6 +186,18 @@ class CommandProcessor {
                        uint32_t n_values);
 
   bool is_paused() const { return paused_; }
+  // Game Vault save states: every command the game queued has been taken.
+  bool GvRingIdle() const {
+    return read_ptr_index_ == write_ptr_index_.load();
+  }
+  // Game Vault save states: the picture's brightness tables (256 and 3 * 128 entries) and where the game's
+  // writing of them stands; put back with RestoreGammaRamp.
+  void GvGetGammaRamp(reg::DC_LUT_30_COLOR* table, reg::DC_LUT_PWL_DATA* pwl,
+                      uint32_t* component) const {
+    std::memcpy(table, gamma_ramp_256_entry_table_, sizeof(gamma_ramp_256_entry_table_));
+    std::memcpy(pwl, gamma_ramp_pwl_rgb_, sizeof(gamma_ramp_pwl_rgb_));
+    *component = gamma_ramp_rw_component_;
+  }
   // Game Vault: the GPU thread, for the frame rate counter's GPU load.
   kernel::XHostThread* worker_thread() const { return worker_thread_.get(); }
   void Pause();

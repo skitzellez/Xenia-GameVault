@@ -449,6 +449,11 @@ typedef struct alignas(64) PPCContext_s {
   // call it made, which is often nowhere near the loop it is actually stuck in;
   // this names a block it provably reached.
   uint32_t last_safepoint_pc;
+  // Game Vault save states: the kernel import this thread is inside (guest
+  // address of its thunk, 0 outside one), and how many host calls into guest
+  // code are stacked (1 = only the thread's own entry).
+  uint32_t gv_extern_pc;
+  uint32_t gv_host_depth;
 
   template <typename T = uint8_t*>
   inline T TranslateVirtual(uint32_t guest_address) XE_RESTRICT const {

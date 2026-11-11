@@ -179,7 +179,9 @@ static void PreemptCurrentFiber(void* /*raw_context*/) {
     self->SaveInterruptedUserCr();
   }
   // Involuntary quantum end, so no yield to a lower-priority thread.
+  links.gv_at_safepoint = true;
   self->kernel_state()->guest_scheduler()->YieldCurrentThread(true, false);
+  links.gv_at_safepoint = false;
   if (in_user_code) {
     self->RestoreInterruptedUserCr();
   }
@@ -962,7 +964,87 @@ void GuestScheduler::YieldToScheduler() {
   cpus_[t_current_cpu].idle_fiber->SwitchTo();
 }
 
+bool GuestScheduler::GvQuiesce(uint32_t timeout_ms) {
+  if (!started_.load() || !paused_.load()) {
+    return false;
+  }
+  const uint64_t until = Clock::QueryHostUptimeMillis() + timeout_ms;
+  for (;;) {
+    bool all_held = true;
+    {
+      std::lock_guard<std::mutex> lock(lock_);
+      for (Cpu& cpu : cpus_) {
+        if (!cpu.host_thread) {
+          continue;
+        }
+        if (!cpu.gv_held.load()) {
+          all_held = false;
+          if (XThread* running = cpu.current_thread) {
+            running->thread_state()->context()->preempt_requested = 1;
+          }
+          if (cpu.ready_event) {
+            cpu.ready_event->Set();
+          }
+        }
+      }
+    }
+    if (all_held) {
+      return true;
+    }
+    if (Clock::QueryHostUptimeMillis() >= until) {
+      return false;
+    }
+    xe::threading::Sleep(std::chrono::milliseconds(2));
+  }
+}
+
+void GuestScheduler::GvReenterThread(XThread* thread, uint32_t pc) {
+  std::lock_guard<std::mutex> lock(lock_);
+  auto& links = thread->scheduler_links();
+  links.gv_reenter_pc = pc;
+  links.gv_reenter_pending.store(true);
+  if (links.blocked && links.cpu >= 0) {
+    Cpu& cpu = cpus_[links.cpu];
+    UnlinkLocked(cpu.blocked_head, cpu.blocked_tail, thread);
+    links.blocked = false;
+    links.ready_next = nullptr;
+    links.queued = true;
+    LinkReadyLocked(cpu, thread, true);
+  } else if (links.suspended && links.cpu >= 0 && thread->suspend_count() == 0) {
+    Cpu& cpu = cpus_[links.cpu];
+    UnlinkLocked(cpu.suspended_head, cpu.suspended_tail, thread);
+    links.suspended = false;
+    links.ready_next = nullptr;
+    links.queued = true;
+    LinkReadyLocked(cpu, thread, true);
+  }
+}
+
+void GuestScheduler::GvReenterIfPending() {
+  XThread* self = XThread::GetCurrentFiberThread();
+  if (!self) {
+    return;
+  }
+  auto& links = self->scheduler_links();
+  if (!links.gv_reenter_pending.exchange(false)) {
+    return;
+  }
+  const uint32_t pc = links.gv_reenter_pc;
+  XObject::AbandonCooperativeWait(self);
+  links.gv_at_safepoint = false;
+  auto* context = self->thread_state()->context();
+  context->gv_extern_pc = 0;
+  context->gv_host_depth = 1;
+  context->preempt_requested = 0;
+  self->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_RUNNING;
+  context->processor->backend()->PrepareForReentry(context);
+  XELOGI("Game Vault: save state: thread {:08X} '{}' goes on at {:08X}",
+         self->thread_id(), self->thread_name(), pc);
+  self->Reenter(pc);  // never returns
+}
+
 void GuestScheduler::ExitIfTerminated() {
+  GvReenterIfPending();
   XThread* self = XThread::GetCurrentFiberThread();
   if (!self || !self->scheduler_links().terminate_pending.load(
                    std::memory_order_relaxed)) {
@@ -971,7 +1053,9 @@ void GuestScheduler::ExitIfTerminated() {
   // The wait registration may be newer than the one Terminate abandoned.
   XObject::AbandonCooperativeWait(self);
   // A park or dispatch since the terminate may have overwritten this.
-  self->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_TERMINATED;
+  if (!self->gv_forgot_guest_memory()) {
+    self->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_TERMINATED;
+  }
   NotifyThreadExited(self);
   YieldToScheduler();  // never returns
 }
@@ -1543,8 +1627,10 @@ void GuestScheduler::RunLoop(int cpu_index) {
   while (!shutting_down_.load()) {
     // Game Vault: the in-game menu holds the game here, between fibers.
     while (paused_.load(std::memory_order_relaxed) && !shutting_down_.load()) {
+      cpu.gv_held.store(true);
       xe::threading::Sleep(std::chrono::milliseconds(10));
     }
+    cpu.gv_held.store(false);
     if (cpu_index == 0) {
       ReportStatsIfDue();
     }

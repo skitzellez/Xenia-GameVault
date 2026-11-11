@@ -1194,7 +1194,17 @@ dword_result_t NtSignalAndWaitForSingleObjectEx_entry(dword_t signal_handle,
   auto wait_object =
       kernel_state()->object_table()->LookupObject<XObject>(wait_handle, true);
   global_critical_region::mutex().unlock();
-  if (signal_object && wait_object) {
+  XThread* current = XThread::GetCurrentThread();
+  const bool skip_signal = current && current->gv_skip_signal_once;
+  if (current) {
+    current->gv_skip_signal_once = false;
+  }
+  if (wait_object && skip_signal) {
+    // Game Vault save state: this thread was waiting here when the state was saved; its signal was given then.
+    uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+    result = wait_object->Wait(3, wait_mode, alertable,
+                               timeout_ptr ? &timeout : nullptr);
+  } else if (signal_object && wait_object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
     result = XObject::SignalAndWait(signal_object.get(), wait_object.get(), 3,
                                     wait_mode, alertable,

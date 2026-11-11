@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <span>
 
+#include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/user_profile.h"
@@ -94,6 +95,97 @@ object_ref<XSession> XSession::FromGuest(KernelState* kernel_state,
     return nullptr;
   }
   return session;
+}
+
+// Game Vault save states (see xenia/gv_savestate.cc).
+bool XSession::Save(ByteStream* stream) {
+  std::lock_guard lock(mutex_);
+  for (const Member& member : members_) {
+    if (member.user_index == XUserIndexNone) {
+      return false;  // players on other consoles are in it: not ours to keep
+    }
+  }
+  if (!SaveObject(stream)) {
+    return false;
+  }
+  stream->Write<uint32_t>(registered_key_ ? 1 : 0);
+  stream->Write<uint32_t>(flags_);
+  stream->Write<uint32_t>(user_index_);
+  stream->Write<uint32_t>(max_public_slots_);
+  stream->Write<uint32_t>(max_private_slots_);
+  stream->Write<uint32_t>(game_type_);
+  stream->Write<uint32_t>(game_mode_);
+  stream->Write<uint32_t>(uint32_t(state_));
+  stream->Write<uint64_t>(nonce_);
+  stream->Write(&info_, sizeof(info_));
+  stream->Write<uint32_t>(uint32_t(members_.size()));
+  for (const Member& member : members_) {
+    stream->Write<uint64_t>(member.xuid);
+    stream->Write<uint32_t>(member.user_index);
+    stream->Write<uint32_t>(member.private_slot ? 1 : 0);
+  }
+  return true;
+}
+
+void XSession::GvReadFields(ByteStream* stream) {
+  const bool had_key = stream->Read<uint32_t>() != 0;
+  std::unique_lock lock(mutex_);
+  flags_ = stream->Read<uint32_t>();
+  user_index_ = stream->Read<uint32_t>();
+  max_public_slots_ = stream->Read<uint32_t>();
+  max_private_slots_ = stream->Read<uint32_t>();
+  game_type_ = stream->Read<uint32_t>();
+  game_mode_ = stream->Read<uint32_t>();
+  state_ = State(stream->Read<uint32_t>());
+  nonce_ = stream->Read<uint64_t>();
+  stream->Read(&info_, sizeof(info_));
+  const uint32_t count = std::min<uint32_t>(stream->Read<uint32_t>(), 64);
+  members_.clear();
+  for (uint32_t i = 0; i < count; ++i) {
+    Member member;
+    member.xuid = stream->Read<uint64_t>();
+    member.user_index = stream->Read<uint32_t>();
+    member.private_slot = stream->Read<uint32_t>() != 0;
+    members_.push_back(member);
+  }
+  // A session open to the network has its key known to System Link again (as Create does).
+  if (had_key && !registered_key_ && (flags_ & SessionFlags::PEER_NETWORK)) {
+    const XSESSION_INFO info = info_;
+    lock.unlock();
+    if (auto link = xam::GetSystemLink(kernel_state_)) {
+      const uint32_t error = link->RegisterKey(info.session_id, info.key_exchange_key);
+      if (!error || error == net::kWsaAlready) {
+        lock.lock();
+        system_link_ = link;
+        registered_key_ = info.session_id;
+      } else {
+        XELOGW("Game Vault: load state: System Link refused the session key, error {}", error);
+      }
+    }
+  }
+}
+
+object_ref<XSession> XSession::GvRestore(KernelState* kernel_state,
+                                         ByteStream* stream) {
+  auto session = new XSession(nullptr);  // (no new handle: it takes its old ones)
+  session->kernel_state_ = kernel_state;
+  if (!session->RestoreObject(stream)) {
+    return nullptr;
+  }
+  session->GvReadFields(stream);
+  return object_ref<XSession>(session);
+}
+
+void XSession::GvApply(ByteStream* stream) {
+  // Past what SaveObject wrote: three words, then the handles.
+  stream->Read<uint32_t>();
+  stream->Read<uint32_t>();
+  stream->Read<uint32_t>();
+  const uint32_t handles = stream->Read<uint32_t>();
+  for (uint32_t i = 0; i < handles && i < 4096; ++i) {
+    stream->Read<uint32_t>();
+  }
+  GvReadFields(stream);
 }
 
 X_RESULT XSession::Create(uint32_t flags, uint32_t user_index,

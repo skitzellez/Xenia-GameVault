@@ -45,6 +45,7 @@
 #include "xenia/cpu/function.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/emulator.h"
+#include "xenia/gv_savestate.h"
 #include "xenia/memory.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/shader_storage.h"
@@ -85,6 +86,17 @@ DECLARE_int32(draw_resolution_scale_x);
 DECLARE_int32(draw_resolution_scale_y);
 extern uint32_t gv_requested_title;   // App.cpp: titleid= in the start link (Game Vault), 0 = not said
 extern int gv_requested_scale;   // App.cpp: scale= in the start link (Game Vault), 0 = none
+
+DEFINE_bool(gv_savestate_test, false,
+            "Game Vault testing: save states by file. Put a file "
+            "gv_savestate_cmd.txt holding 'save' or 'load' in the app's "
+            "LocalState; the answer lands in gv_savestate_result.txt. Off for "
+            "players.",
+            "General");
+
+DEFINE_bool(gv_save_states_beta, true,
+            "Game Vault TEST BUILD: 'Save state (beta)' and 'Load state (beta)' in the in-game menu (View + Menu).",
+            "General");
 
 DEFINE_path(storage_root, "",
             "Root path for persistent internal data storage (config, etc.), or "
@@ -830,6 +842,101 @@ class NoGameMessage final : public ui::ImGuiDialog {
   Emulator* emulator_;
 };
 
+// Save states (beta): one line over the game for a few seconds ("State saved"). Set from any thread; drawn by a
+// dialog that lives as long as the app and shows nothing in between.
+static std::mutex gv_state_note_lock;
+static std::string gv_state_note;
+static std::chrono::steady_clock::time_point gv_state_note_until;
+static void GvStateNote(const std::string& text, int seconds = 4) {
+  std::lock_guard<std::mutex> lock(gv_state_note_lock);
+  gv_state_note = text;
+  gv_state_note_until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+}
+
+class StateNote final : public ui::ImGuiDialog {
+ public:
+  explicit StateNote(ui::ImGuiDrawer* drawer) : ui::ImGuiDialog(drawer) {}
+
+ protected:
+  void OnDraw(ImGuiIO& io) override {
+    std::string text;
+    {
+      std::lock_guard<std::mutex> lock(gv_state_note_lock);
+      if (gv_state_note.empty() || std::chrono::steady_clock::now() >= gv_state_note_until) return;
+      text = gv_state_note;
+    }
+    ImDrawList* list = ImGui::GetForegroundDrawList();
+    ImFont* font = ImGui::GetFont();
+    const float size = ImGui::GetFontSize() * 2.6f * io.DisplaySize.y / 1080.0f;
+    const ImVec2 box = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str());
+    const float pad = size * 0.6f;
+    const ImVec2 at((io.DisplaySize.x - box.x) * 0.5f, io.DisplaySize.y * 0.08f);
+    list->AddRectFilled(ImVec2(at.x - pad, at.y - pad * 0.6f), ImVec2(at.x + box.x + pad, at.y + box.y + pad * 0.6f),
+                        IM_COL32(12, 18, 32, 235), size * 0.4f);
+    list->AddText(font, size, at, IM_COL32(255, 255, 255, 245), text.c_str());
+  }
+};
+
+// Where a game's state file lives: Game Vault's shared games folder (beside xenia-config), so an update of Xenia
+// keeps it; Xenia's own LocalState when that folder is not known.
+static std::filesystem::path GvStateFile(uint32_t title_id) {
+  std::filesystem::path folder;
+  if (!config::gamevault_settings_folder.empty()) {
+    folder = config::gamevault_settings_folder.parent_path() / "xenia-states";
+  } else {
+    folder = std::filesystem::path(xe::to_path(UWP::GetLocalState())) / "savestate";
+  }
+  return folder / fmt::format("{:08X}.gvstate", title_id);
+}
+
+// A load that broke off half-way leaves the game held and unfit to go on: the player is told, then it is back to
+// Game Vault (and Xenia closes by itself if that does not happen).
+static std::function<void()> gv_state_leave;
+static void GvStateGiveUp() {
+  XELOGE("Game Vault: load state: the game can't go on after a broken load: back to Game Vault");
+  xe::FlushLog();
+  GvStateNote("The saved state is damaged. Closing the game...", 30);
+  std::this_thread::sleep_for(std::chrono::seconds(4));
+  if (gv_state_leave) gv_state_leave();
+  std::this_thread::sleep_for(std::chrono::seconds(8));
+  std::quick_exit(5);
+}
+
+// Saves or loads the running game's state, with the line for the player. Not on the window's thread.
+static bool GvStateAction(Emulator* emulator, bool save, const char* from) {
+  if (!emulator || !emulator->is_title_open()) return false;
+  // One at a time: a second save or load asked for while one is going is dropped.
+  static std::mutex busy;
+  std::unique_lock<std::mutex> one(busy, std::try_to_lock);
+  if (!one.owns_lock()) {
+    XELOGW("Game Vault: {}: {} state asked for while another save or load is going: dropped", from,
+           save ? "save" : "load");
+    return false;
+  }
+  const auto state_file = GvStateFile(emulator->title_id());
+  std::string message;
+  if (save) GvStateNote("Saving state...", 20);
+  const bool ok = save ? GvSaveState(emulator, state_file, &message) : GvLoadState(emulator, state_file, &message);
+  XELOGI("Game Vault: {}: {} state -> {} ({}), file {}", from, save ? "save" : "load", ok ? "ok" : "FAILED", message,
+         std::string(xe::path_to_utf8(state_file)));
+  std::string note = message;
+  if (!ok && !save && message.rfind("No saved state", 0) != 0 && message.rfind("Load refused: this state is from", 0) != 0) {
+    note = "Can't load in this game yet";
+  } else if (!ok && !save && message.rfind("Load refused: this state is from", 0) == 0) {
+    note = "This state is from another version of Xenia";
+  } else if (!ok && save && message.rfind("Save failed: not enough", 0) == 0) {
+    note = "Not enough free storage for a state";
+  } else if (!ok && save) {
+    note = "Can't save right now";
+  }
+  GvStateNote(note);
+  const bool broken = !ok && !save && message.rfind("Load failed part-way", 0) == 0;
+  std::ofstream(std::filesystem::path(xe::to_path(UWP::GetLocalState())) / "gv_savestate_result.txt", std::ios::trunc)
+      << (save ? "save" : "load") << (ok ? " ok: " : " FAILED: ") << message << std::endl;
+  if (broken) GvStateGiveUp();
+  return ok;
+}
+
 // View + Menu during a game: the game stops and a menu comes up over it. The
 // controller then only moves through the menu; B goes back a page or resumes.
 static int GvDrawingScale();
@@ -840,6 +947,7 @@ struct GameMenuActions {
   std::function<void()> leave;          // back to Game Vault
   std::function<void()> clear_shaders;  // stored shaders go, then restart
   std::function<void(int, bool)> set_scale;   // resolution scale; true: the game starts again now
+  std::function<void(bool)> save_state;       // test only: true saves the state, false loads it
 };
 
 class GameMenu final : public ui::ImGuiDialog {
@@ -975,6 +1083,14 @@ class GameMenu final : public ui::ImGuiDialog {
     }
     if (ImGui::Button("Restart game", button_)) {
       CloseThen(actions_.restart);
+    }
+    if ((cvars::gv_save_states_beta || cvars::gv_savestate_test) && actions_.save_state) {   // TEST BUILD
+      if (ImGui::Button("Save state  (beta)", button_)) {
+        CloseThen([this]() { actions_.save_state(true); });
+      }
+      if (ImGui::Button("Load state  (beta)", button_)) {
+        CloseThen([this]() { actions_.save_state(false); });
+      }
     }
     const int chosen = std::max(1, int(cvars::draw_resolution_scale_x));
     const std::string scale_label =
@@ -1332,6 +1448,30 @@ bool GameVaultXeniaApp::OnInitialize() {
       std::make_unique<ui::ImGuiDrawer>(window_.get(), kZOrderImGui);
 
   emulator_thread_ = std::thread(&GameVaultXeniaApp::EmulatorThread, this);
+  GvSetStateBuildTag(fmt::format("{}", UWP::GetPackageVersion()));
+  new StateNote(imgui_drawer_.get());   // (owned by the drawer) the "State saved" line
+  gv_state_leave = [this]() {
+    app_context().CallInUIThread([this]() { UWP::ReturnToFrontend(imgui_drawer_.get()); });
+  };
+  if (cvars::gv_savestate_test) {
+    // Test only: save and load states on a word in a file (no controller).
+    XELOGI("Game Vault: save state test trigger is on");
+    std::thread([this]() {
+      const auto folder = std::filesystem::path(xe::to_path(UWP::GetLocalState()));
+      const auto cmd_file = folder / "gv_savestate_cmd.txt";
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::error_code ec;
+        if (!std::filesystem::exists(cmd_file, ec)) continue;
+        std::string word;
+        { std::ifstream in(cmd_file); in >> word; }
+        std::filesystem::remove(cmd_file, ec);
+        if (!emulator_ || !emulator_->is_title_open()) continue;
+        if (word == "save" || word == "load") GvStateAction(emulator_.get(), word == "save", "test file");
+        if (word == "giveup") GvStateGiveUp();   // the way out after a broken load, tried without one
+      }
+    }).detach();
+  }
   return true;
 }
 
@@ -1606,6 +1746,10 @@ void GameVaultXeniaApp::EmulatorThread() {
           RestartTitle("resolution scale");
         }
       };
+      actions.save_state = [this](bool save) {
+        // Off the window's thread: a save takes a couple of seconds.
+        std::thread([this, save]() { GvStateAction(emulator_.get(), save, "in-game menu"); }).detach();
+      };
       new GameMenu(imgui_drawer_.get(), emulator_.get(), std::move(actions),
                    &game_menu_);
     });
@@ -1647,7 +1791,7 @@ void GameVaultXeniaApp::EmulatorThread() {
   // (test runs and player reports show the speed without a screenshot).
   std::thread([this]() {
     LoadMeter load(emulator_.get());
-    uint64_t last = 0;
+    uint64_t last = 0, last_sound_frames = 0;
     auto last_time = std::chrono::steady_clock::now();
     for (;;) {
       std::this_thread::sleep_for(std::chrono::seconds(30));
@@ -1669,6 +1813,15 @@ void GameVaultXeniaApp::EmulatorThread() {
         gpu::d3d12::GameVaultTakeSubmitStats(st);
         const double secs =
             std::chrono::duration<double>(now - last_time).count();
+        if (auto* audio = emulator_->audio_system()) {
+          // Is the game making sound (a silent game shows here without anyone listening).
+          uint64_t sound_frames = 0;
+          float sound_peak = 0.0f;
+          audio->GvSoundStats(0, &sound_frames, &sound_peak);
+          GV_LIVE("Game Vault: sound {:.0f} frames/s, loudest {:.2f}",
+                  double(sound_frames - last_sound_frames) / secs, sound_peak);
+          last_sound_frames = sound_frames;
+        }
         const auto pct = [secs](uint64_t ns) {
           return 100.0 * double(ns) / (secs * 1e9);
         };

@@ -6,7 +6,7 @@ file(GLOB _core_sources
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cc"
 )
 target_sources(xenia-core PRIVATE ${_core_sources})
-target_link_libraries(xenia-core PUBLIC fmt xenia-base)
+target_link_libraries(xenia-core PUBLIC fmt xenia-base zstd)
 xe_target_defaults(xenia-core)
 
 add_subdirectory(base)

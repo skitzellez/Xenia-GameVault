@@ -42,6 +42,8 @@ class XmaDecoder {
 
   uint32_t AllocateContext();
   void ReleaseContext(uint32_t guest_ptr);
+  // Game Vault save states: which decoder contexts the game holds.
+  BitMap& gv_context_bitmap() { return context_bitmap_; }
   bool BlockOnContext(uint32_t guest_ptr, bool poll);
 
   uint32_t ReadRegister(uint32_t addr);

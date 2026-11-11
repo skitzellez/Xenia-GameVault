@@ -2335,6 +2335,202 @@ bool BaseHeap::Restore(ByteStream* stream) {
   return true;
 }
 
+// Game Vault save states. Pages the game has but the host never committed
+// (gv_lazy_physical_commit) are not written: they read as zero.
+uint64_t BaseHeap::GvSavePages(
+    const std::function<void(const void*, size_t)>& write, bool contents) {
+  const uint32_t page_count = uint32_t(page_table_.size());
+  write(&page_count, sizeof(page_count));
+  write(page_table_.data(), size_t(page_count) * sizeof(PageEntry));
+  uint64_t pages = 0;
+#if XE_PLATFORM_WIN32
+  if (contents) {
+    uint32_t i = 0;
+    while (i < page_count) {
+      if (!(page_table_[i].state & kMemoryAllocationCommit)) {
+        ++i;
+        continue;
+      }
+      uint8_t* addr = TranslateRelative(size_t(i) * page_size_);
+      MEMORY_BASIC_INFORMATION info = {};
+      if (!VirtualQuery(addr, &info, sizeof(info)) ||
+          info.State != MEM_COMMIT) {
+        ++i;
+        continue;
+      }
+      // As far as the host range is one piece and the game has it committed.
+      const uint8_t* region_end =
+          static_cast<uint8_t*>(info.BaseAddress) + info.RegionSize;
+      uint32_t run = 0;
+      while (i + run < page_count &&
+             (page_table_[i + run].state & kMemoryAllocationCommit) &&
+             addr + size_t(run + 1) * page_size_ <= region_end) {
+        ++run;
+      }
+      if (!run) {
+        ++i;
+        continue;
+      }
+      const size_t length = size_t(run) * page_size_;
+      const bool unreadable =
+          (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0;
+      DWORD old_protect = 0;
+      if (unreadable) {
+        VirtualProtect(addr, length, PAGE_READWRITE, &old_protect);
+      }
+      write(&i, sizeof(i));
+      write(&run, sizeof(run));
+      write(addr, length);
+      if (unreadable) {
+        VirtualProtect(addr, length, old_protect, &old_protect);
+      }
+      pages += run;
+      i += run;
+    }
+    const uint32_t end[2] = {UINT32_MAX, 0};
+    write(end, sizeof(end));
+  }
+#endif
+  return pages;
+}
+
+uint64_t BaseHeap::GvRestorePages(
+    const std::function<void(void*, size_t)>& read, bool contents) {
+  uint32_t page_count = 0;
+  read(&page_count, sizeof(page_count));
+  if (page_count != uint32_t(page_table_.size())) {
+    XELOGE("Game Vault: save state: heap {:08X} has {} pages, the file {}",
+           heap_base_, page_table_.size(), page_count);
+    return UINT64_MAX;
+  }
+  std::vector<PageEntry> saved(page_count);
+  read(saved.data(), size_t(page_count) * sizeof(PageEntry));
+  uint64_t pages = 0;
+#if XE_PLATFORM_WIN32
+  if (contents) {
+    std::vector<bool> written(page_count);
+    for (;;) {
+      uint32_t run[2];
+      read(run, sizeof(run));
+      if (run[0] == UINT32_MAX) {
+        break;
+      }
+      if (uint64_t(run[0]) + run[1] > page_count) {
+        return UINT64_MAX;
+      }
+      uint8_t* addr = TranslateRelative(size_t(run[0]) * page_size_);
+      const size_t length = size_t(run[1]) * page_size_;
+      xe::memory::AllocFixed(addr, length, memory::AllocationType::kCommit,
+                             memory::PageAccess::kReadWrite);
+      xe::memory::Protect(addr, length, memory::PageAccess::kReadWrite,
+                          nullptr);
+      read(addr, length);
+      for (uint32_t p = run[0]; p < run[0] + run[1]; ++p) {
+        written[p] = true;
+      }
+      pages += run[1];
+    }
+    // Host protection as the saved table says; pages the save left out were
+    // never touched then, so they are zero again.
+    for (uint32_t p = 0; p < page_count; ++p) {
+      const PageEntry& page = saved[p];
+      if (!(page.state & kMemoryAllocationCommit)) {
+        continue;
+      }
+      uint8_t* addr = TranslateRelative(size_t(p) * page_size_);
+      if (!written[p]) {
+        MEMORY_BASIC_INFORMATION info = {};
+        if (VirtualQuery(addr, &info, sizeof(info)) &&
+            info.State == MEM_COMMIT) {
+          xe::memory::Protect(addr, page_size_, memory::PageAccess::kReadWrite,
+                              nullptr);
+          std::memset(addr, 0, page_size_);
+        } else {
+          continue;
+        }
+      }
+      memory::PageAccess access = memory::PageAccess::kNoAccess;
+      if ((page.current_protect & kMemoryProtectRead) &&
+          IsWritableProtect(page.current_protect)) {
+        access = memory::PageAccess::kReadWrite;
+      } else if (page.current_protect & kMemoryProtectRead) {
+        access = memory::PageAccess::kReadOnly;
+      }
+      if (access != memory::PageAccess::kReadWrite) {
+        xe::memory::Protect(addr, page_size_, access, nullptr);
+      }
+    }
+  }
+#endif
+  page_table_ = std::move(saved);
+  RebuildFreeBlocks();
+  return pages;
+}
+
+namespace {
+struct GvHeapPart {
+  BaseHeap* heap;
+  bool contents;
+};
+}  // namespace
+
+bool Memory::GvSaveState(const std::function<void(const void*, size_t)>& write,
+                         uint64_t* out_bytes) {
+  auto lock = global_critical_region_.Acquire();
+  uint64_t bytes = 0;
+  const GvHeapPart parts[] = {
+      {&heaps_.v00000000, true},  {&heaps_.v40000000, true},
+      {&heaps_.v80000000, true},  {&heaps_.v90000000, true},
+      {&heaps_.physical, true},   {&heaps_.v7F000000, false},
+      {&heaps_.vA0000000, false}, {&heaps_.vC0000000, false},
+      {&heaps_.vE0000000, false},
+  };
+  for (const GvHeapPart& part : parts) {
+    const uint64_t pages = part.heap->GvSavePages(write, part.contents);
+    bytes += pages * part.heap->page_size();
+    XELOGI("Game Vault: save state: heap {:08X}: {} pages, {} MB",
+           part.heap->heap_base(), pages,
+           pages * part.heap->page_size() / (1024 * 1024));
+  }
+  if (out_bytes) {
+    *out_bytes = bytes;
+  }
+  return true;
+}
+
+bool Memory::GvRestoreState(const std::function<void(void*, size_t)>& read,
+                            uint64_t* out_bytes) {
+  // Whatever watches the game's memory (texture and vertex caches) is told
+  // all of it changed, and its page protection goes, before pages are written.
+  PhysicalHeap* watched[] = {&heaps_.v7F000000, &heaps_.vA0000000,
+                             &heaps_.vC0000000, &heaps_.vE0000000};
+  for (PhysicalHeap* heap : watched) {
+    auto unique_lock = global_critical_region_.Acquire();
+    heap->TriggerCallbacks(std::move(unique_lock), heap->heap_base(),
+                           heap->heap_size(), true, true, true);
+  }
+  auto lock = global_critical_region_.Acquire();
+  uint64_t bytes = 0;
+  const GvHeapPart parts[] = {
+      {&heaps_.v00000000, true},  {&heaps_.v40000000, true},
+      {&heaps_.v80000000, true},  {&heaps_.v90000000, true},
+      {&heaps_.physical, true},   {&heaps_.v7F000000, false},
+      {&heaps_.vA0000000, false}, {&heaps_.vC0000000, false},
+      {&heaps_.vE0000000, false},
+  };
+  for (const GvHeapPart& part : parts) {
+    const uint64_t pages = part.heap->GvRestorePages(read, part.contents);
+    if (pages == UINT64_MAX) {
+      return false;
+    }
+    bytes += pages * part.heap->page_size();
+  }
+  if (out_bytes) {
+    *out_bytes = bytes;
+  }
+  return true;
+}
+
 void BaseHeap::RebuildFreeBlocks() {
   free_blocks_.clear();
   uint32_t run_start = UINT32_MAX;

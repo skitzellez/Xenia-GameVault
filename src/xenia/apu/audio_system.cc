@@ -9,6 +9,7 @@
 
 #include "xenia/apu/audio_system.h"
 
+#include <cmath>
 #include <limits>
 
 #include "xenia/apu/apu_flags.h"
@@ -204,9 +205,22 @@ void AudioSystem::WorkerThreadMain() {
 
     if (client_callback) {
       SCOPE_profile_cpu_i("apu", "xe::apu::AudioSystem->client_callback");
-      uint64_t args[] = {client_callback_arg};
-      processor_->Execute(worker_thread_->thread_state(), client_callback, args,
-                          xe::countof(args));
+      // Game Vault: not while a save state is taken or put back.
+      std::lock_guard<std::mutex> gv_gate(gv_callback_gate_);
+      {
+        // (a state put back while this waited may have changed the callback)
+        std::lock_guard<std::mutex> clients_lock(clients_mutex_);
+        client_callback = clients_[client_index].in_use ? clients_[client_index].callback : 0;
+        client_callback_arg = clients_[client_index].wrapped_callback_arg;
+      }
+      if (client_callback) {
+        ++gv_callbacks_;
+        gv_callback_since_ms_ = Clock::QueryHostUptimeMillis();
+        uint64_t args[] = {client_callback_arg};
+        processor_->Execute(worker_thread_->thread_state(), client_callback, args,
+                            xe::countof(args));
+        gv_callback_since_ms_ = 0;
+      }
     }
   }
   worker_running_ = false;
@@ -351,7 +365,61 @@ void AudioSystem::SubmitFrame(size_t index, float* samples) {
   }
   clients_[index].frames_submitted++;
   clients_[index].frames_processed++;
+  {
+    // Game Vault: how loud the frame is (big-endian floats), for the log.
+    float peak = 0.0f;
+    for (uint32_t i = 0; i < apu::AudioDriver::kFrameSamplesMax; i += 2) {
+      const float value = std::fabs(xe::byte_swap(samples[i]));
+      if (value > peak && value < 16.0f) {
+        peak = value;
+      }
+    }
+    ++gv_sound_frames_;
+    for (auto& have : gv_sound_peak_) {
+      if (peak > have.load(std::memory_order_relaxed)) {
+        have.store(peak, std::memory_order_relaxed);
+      }
+    }
+  }
   (clients_[index].driver)->SubmitFrame(samples);
+}
+
+bool AudioSystem::GvHoldWorker(int ms) {
+  for (int waited = 0;; waited += 5) {
+    if (gv_callback_gate_.try_lock()) {
+      return true;
+    }
+    if (waited >= ms) {
+      return false;
+    }
+    xe::threading::Sleep(std::chrono::milliseconds(5));
+  }
+}
+
+void AudioSystem::GvReleaseWorker() { gv_callback_gate_.unlock(); }
+
+void AudioSystem::GvWorkerStats(uint64_t* callbacks, uint64_t* in_callback_ms) {
+  *callbacks = gv_callbacks_.load();
+  const uint64_t since = gv_callback_since_ms_.load();
+  const uint64_t now = Clock::QueryHostUptimeMillis();
+  *in_callback_ms = since && now > since ? now - since : 0;
+}
+
+void AudioSystem::GvRefillSlots() {
+  std::lock_guard<std::mutex> clients_lock(clients_mutex_);
+  for (uint32_t i = 0; i < kMaximumClientCount; i++) {
+    if (!clients_[i].in_use) {
+      continue;
+    }
+    for (uint32_t n = 0; n < queued_frames_ && client_semaphores_[i]->Release(1, nullptr); ++n) {
+    }
+  }
+  pending_work_event_->Set();
+}
+
+void AudioSystem::GvSoundStats(int reader, uint64_t* frames, float* peak) {
+  *frames = gv_sound_frames_.load();
+  *peak = gv_sound_peak_[reader & 1].exchange(0.0f);
 }
 
 bool AudioSystem::GetClientPerformance(size_t index,
@@ -409,6 +477,53 @@ void AudioSystem::UnregisterClient(size_t index) {
                                       std::chrono::milliseconds(0));
   } while (wait_result == xe::threading::WaitResult::kSuccess);
   assert_true(wait_result == xe::threading::WaitResult::kTimeout);
+}
+
+std::vector<std::array<uint32_t, 3>> AudioSystem::GvClients() {
+  std::lock_guard<std::mutex> clients_lock(clients_mutex_);
+  std::vector<std::array<uint32_t, 3>> list;
+  for (uint32_t i = 0; i < kMaximumClientCount; i++) {
+    if (clients_[i].in_use) {
+      list.push_back({i, clients_[i].callback, clients_[i].callback_arg});
+    }
+  }
+  return list;
+}
+
+void AudioSystem::GvMatchClients(
+    const std::vector<std::array<uint32_t, 3>>& saved) {
+  for (const auto& want : saved) {
+    bool have = false;
+    {
+      std::lock_guard<std::mutex> clients_lock(clients_mutex_);
+      if (want[0] >= kMaximumClientCount) {
+        continue;
+      }
+      auto& client = clients_[want[0]];
+      if (client.in_use) {
+        have = true;
+        if (client.callback != want[1] || client.callback_arg != want[2]) {
+          XELOGI("Game Vault: load state: sound client {} takes the state's callback {:08X}", want[0], want[1]);
+          client.callback = want[1];
+          client.callback_arg = want[2];
+        }
+      }
+    }
+    if (!have) {
+      size_t index = 0;
+      const X_STATUS status = RegisterClient(want[1], want[2], &index);
+      XELOGI("Game Vault: load state: sound client {} registered again (status {:08X}, slot {})", want[0], status,
+             index);
+    }
+  }
+  std::lock_guard<std::mutex> clients_lock(clients_mutex_);
+  for (uint32_t i = 0; i < kMaximumClientCount; i++) {
+    if (clients_[i].in_use && clients_[i].wrapped_callback_arg) {
+      xe::store_and_swap<uint32_t>(
+          memory()->TranslateVirtual(clients_[i].wrapped_callback_arg),
+          clients_[i].callback_arg);
+    }
+  }
 }
 
 bool AudioSystem::Save(ByteStream* stream) {

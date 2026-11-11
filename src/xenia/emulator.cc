@@ -10,6 +10,7 @@
 #include <ranges>
 
 #include "xenia/emulator.h"
+#include "xenia/gv_savestate.h"
 #include "xenia/config.h"
 
 #include <algorithm>
@@ -1977,6 +1978,7 @@ bool Emulator::ExceptionCallback(Exception* ex) {
     // loop, so if a fiber is current halt just that fiber to keep the
     // dispatcher and the other fibers alive.
     if (auto* fiber_self = kernel::XThread::GetCurrentFiberThread()) {
+      GvCloseIfCrashAfterLoad("fault in host code on a game thread");
       // ASLR moves the absolute PC each run, so log a stable module offset that
       // resolves against the pdb with "ln xenia_edge+<offset>".
       uint64_t module_base = 0;
@@ -2100,6 +2102,7 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   }
   XELOGE("{}", crash_msg);
   FlushLog();
+  GvCloseIfCrashAfterLoad("guest crash");
 
   // Only pause the entire emulator if debugging is enabled. After the dump,
   // since Pause() can block (e.g. waiting on the GPU/audio systems).

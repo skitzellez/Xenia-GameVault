@@ -1124,7 +1124,8 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
       // place a direct write to it can be picked up.
       result->SyncFromGuest();
     }
-  } else {
+  }
+  if (!result) {
     // First use, create new.
     // https://www.nirsoft.net/kernel_struct/vista/KOBJECTS.html
     // Host objects: an inlined KeInitializeEvent gets no handle on the console,

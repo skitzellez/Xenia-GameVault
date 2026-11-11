@@ -8,6 +8,7 @@
  */
 
 #include "xenia/kernel/xtimer.h"
+#include "xenia/base/byte_stream.h"
 
 #include <algorithm>
 #include <mutex>
@@ -81,6 +82,25 @@ void XTimer::InitializeNative(void* native_ptr,
   Initialize(header->type == X_OBJECT_TYPES::TimerSynchronizationObject ? 1
                                                                         : 0);
   SetNativePointer(memory()->HostToGuestVirtual(native_ptr), true);
+}
+
+bool XTimer::Save(ByteStream* stream) {
+  if (!SaveObject(stream)) {
+    return false;
+  }
+  stream->Write<uint32_t>(manual_reset_ ? 0 : 1);
+  return true;
+}
+
+object_ref<XTimer> XTimer::GvRestore(KernelState* kernel_state,
+                                     ByteStream* stream) {
+  auto timer = new XTimer(nullptr);
+  timer->kernel_state_ = kernel_state;
+  if (!timer->RestoreObject(stream)) {
+    return nullptr;
+  }
+  timer->Initialize(stream->Read<uint32_t>());
+  return object_ref<XTimer>(timer);
 }
 
 void XTimer::CancelAll() {

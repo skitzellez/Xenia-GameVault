@@ -467,13 +467,44 @@ bool ObjectTable::Restore(ByteStream* stream) {
   return true;
 }
 
+int32_t ObjectTable::GvHandleRefCount(X_HANDLE handle) {
+  auto global_lock = global_critical_region_.Acquire();
+  ObjectTableEntry* entry = LookupTableInLock(handle);
+  return entry ? entry->handle_ref_count : 0;
+}
+
+void ObjectTable::GvSetHandleRefCount(X_HANDLE handle, int32_t count) {
+  auto global_lock = global_critical_region_.Acquire();
+  if (ObjectTableEntry* entry = LookupTableInLock(handle)) {
+    entry->handle_ref_count = count;
+  }
+}
+
+void ObjectTable::GvEnsureSlot(X_HANDLE handle) {
+  auto global_lock = global_critical_region_.Acquire();
+  const bool host = XObject::is_handle_host_object(handle);
+  const uint32_t slot = GetHandleSlot(handle, host);
+  const uint32_t capacity = host ? host_table_capacity_ : table_capacity_;
+  if (slot >= capacity) {
+    Resize(std::max(slot + 64, capacity * 2), host);
+  }
+}
+
+void ObjectTable::GvDropHandle(X_HANDLE handle) {
+  auto global_lock = global_critical_region_.Acquire();
+  if (ObjectTableEntry* entry = LookupTableInLock(handle)) {
+    entry->handle_ref_count = 0;
+    RemoveHandle(handle);
+  }
+}
+
 X_STATUS ObjectTable::RestoreHandle(X_HANDLE handle, XObject* object) {
   const bool is_host_object = XObject::is_handle_host_object(handle);
   uint32_t slot = GetHandleSlot(handle, is_host_object);
   uint32_t capacity = is_host_object ? host_table_capacity_ : table_capacity_;
   assert_true(capacity >= slot);
 
-  if (capacity >= slot) {
+  if (capacity > slot) {
     auto& entry = is_host_object ? host_table_[slot] : table_[slot];
     entry.object = object;
     object->Retain();

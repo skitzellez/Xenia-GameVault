@@ -10,6 +10,7 @@
 #ifndef XENIA_MEMORY_H_
 #define XENIA_MEMORY_H_
 
+#include <functional>
 #include <atomic>
 #include <cstdint>
 #include <map>
@@ -266,6 +267,12 @@ class BaseHeap {
 
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);
+  // Game Vault save states: the page table, and with |contents| every
+  // committed page. Returns the number of pages written or read back.
+  uint64_t GvSavePages(const std::function<void(const void*, size_t)>& write,
+                       bool contents);
+  uint64_t GvRestorePages(const std::function<void(void*, size_t)>& read,
+                          bool contents);
 
   void Reset();
 
@@ -835,6 +842,11 @@ class Memory {
 
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);
+  // Game Vault save states (gv_savestate.cc): all of the game memory.
+  bool GvSaveState(const std::function<void(const void*, size_t)>& write,
+                   uint64_t* out_bytes);
+  bool GvRestoreState(const std::function<void(void*, size_t)>& read,
+                      uint64_t* out_bytes);
 
   void SetMMIOExceptionRecordingCallback(cpu::MmioAccessRecordCallback callback,
                                          void* context);

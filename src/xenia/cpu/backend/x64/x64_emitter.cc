@@ -1344,7 +1344,11 @@ void X64Emitter::CallExtern(const hir::Instr* instr, const Function* function) {
       mov(rcx, reinterpret_cast<uint64_t>(extern_function->extern_handler()));
       mov(rdx,
           qword[GetContextReg() + offsetof(ppc::PPCContext, kernel_state)]);
+      // Game Vault save states: names the import a parked thread is inside.
+      mov(dword[GetContextReg() + offsetof(ppc::PPCContext, gv_extern_pc)],
+          function->address());
       call(backend()->guest_to_host_thunk());
+      mov(dword[GetContextReg() + offsetof(ppc::PPCContext, gv_extern_pc)], 0);
       // rax = host return
     }
   }
@@ -2268,8 +2272,13 @@ void X64Emitter::EmitPreemptCheck(uint32_t guest_address) {
   }
   cmp(byte[GetContextReg() + offsetof(ppc::PPCContext, preempt_requested)], 0);
   Xbyak::Label& do_yield =
-      AddToTail([&restore, &after](X64Emitter& e, Xbyak::Label& tail) {
+      AddToTail([&restore, &after, guest_address](X64Emitter& e,
+                                                  Xbyak::Label& tail) {
         e.L(tail);
+        // Game Vault save states: where a thread parked here continues.
+        e.mov(e.dword[e.GetContextReg() +
+                      offsetof(ppc::PPCContext, last_safepoint_pc)],
+              guest_address);
         e.mov(e.byte[e.GetContextReg() +
                      offsetof(ppc::PPCContext, preempt_requested)],
               0);

@@ -91,6 +91,14 @@ class XSession : public XObject {
   // Fills XSESSION_LOCAL_DETAILS and as many members as fit in the buffer.
   X_RESULT GetDetails(uint32_t size_ptr, uint32_t details_ptr);
 
+  // Game Vault save states: a session with only this console's players in it is
+  // written down and can be made again, or put back to how the state has it.
+  bool Save(ByteStream* stream) override;
+  static object_ref<XSession> GvRestore(KernelState* kernel_state,
+                                        ByteStream* stream);
+  // |stream| holds what Save wrote, object part included.
+  void GvApply(ByteStream* stream);
+
  private:
   enum State : uint32_t {
     kLobby = 0,
@@ -107,6 +115,7 @@ class XSession : public XObject {
   };
 
   // A context of the user who created the session, 0 when unset.
+  void GvReadFields(ByteStream* stream);
   uint32_t CreatorContext(uint32_t id) const;
   // Public and private slots the members take, with mutex_ held.
   std::pair<uint32_t, uint32_t> UsedSlots() const;

@@ -305,6 +305,36 @@ void XMutant::SyncFromGuest() {
   WakeCooperativeWaiters();
 }
 
+void XMutant::GvGetOwner(uint32_t* thread_id, uint32_t* recursion) {
+  XThread* owner = owning_thread_.load();
+  *thread_id = owner ? owner->thread_id() : 0;
+  *recursion = owner ? recursion_count_ : 0;
+}
+
+object_ref<XMutant> XMutant::GvRestore(KernelState* kernel_state,
+                                       ByteStream* stream) {
+  auto mutant = new XMutant();
+  mutant->kernel_state_ = kernel_state;
+  if (!mutant->RestoreObject(stream)) {
+    delete mutant;
+    return nullptr;
+  }
+  mutant->free_signal_ = xe::threading::Semaphore::Create(1, 1);
+  return object_ref<XMutant>(mutant);
+}
+
+void XMutant::GvSetOwner(XThread* owner, uint32_t recursion) {
+  while (xe::threading::Wait(free_signal_.get(), false,
+                             std::chrono::milliseconds(0)) ==
+         xe::threading::WaitResult::kSuccess) {
+  }
+  owning_thread_ = owner;
+  recursion_count_ = owner ? recursion : 0;
+  if (!owner) {
+    free_signal_->Release(1, nullptr);
+  }
+}
+
 void XMutant::CooperativeWaitBegin(XThread* thread) { waiters_.Add(thread); }
 
 void XMutant::CooperativeWaitEnd(XThread* thread) {

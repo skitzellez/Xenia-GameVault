@@ -960,9 +960,18 @@ bool Processor::Execute(ThreadState* thread_state, uint32_t address) {
   uint64_t previous_lr = context->lr;
   context->lr = 0xBCBCBCBC;
 
+  // Game Vault save states: a host call into guest code is stacked while this
+  // runs (plain stores: a re-entry jumps over this frame and sets them anew).
+  const uint32_t gv_previous_depth = context->gv_host_depth;
+  const uint32_t gv_previous_extern = context->gv_extern_pc;
+  context->gv_host_depth = gv_previous_depth + 1;
+  context->gv_extern_pc = 0;
+
   // Execute the function.
   auto result = function->Call(thread_state, uint32_t(context->lr));
 
+  context->gv_host_depth = gv_previous_depth;
+  context->gv_extern_pc = gv_previous_extern;
   context->lr = previous_lr;
   context->r[1] += 64 + 112;
 

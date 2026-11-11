@@ -58,6 +58,16 @@ class GuestScheduler {
   // host threads, nothing is stopped while holding a lock.
   void SetPaused(bool paused) { paused_.store(paused); }
   bool paused() const { return paused_.load(); }
+  // Game Vault save states. With SetPaused(true): waits until every CPU's
+  // dispatch loop is held between fibers, so each guest thread is parked.
+  // False if a fiber would not give way in |timeout_ms|.
+  bool GvQuiesce(uint32_t timeout_ms);
+  // Makes a parked fiber drop what is on its host stack and go on at guest
+  // address |pc| when it is next dispatched (its registers are the caller's
+  // to set first). A blocked one is made ready; a suspended one stays so.
+  void GvReenterThread(XThread* thread, uint32_t pc);
+  // Called where a parked fiber comes back; does the re-entry if one is due.
+  void GvReenterIfPending();
   // Game Vault: the host thread of each emulated CPU's dispatch loop (null
   // before it starts), for the frame rate log's per-CPU load.
   static constexpr int cpu_count() { return kMaxCpus; }
@@ -236,6 +246,8 @@ class GuestScheduler {
     // anyway. RunLoop re-checks them after setting this, so a wake that only
     // saw it false is never slept through.
     std::atomic<bool> parked{false};
+    // Game Vault: this CPU's loop sits in the pause hold, no fiber on it.
+    std::atomic<bool> gv_held{false};
     // Counts fiber dispatches on this CPU, so a yielder can tell whether
     // anything else ran before it resumed.
     std::atomic<uint64_t> switch_seq{0};

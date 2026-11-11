@@ -205,6 +205,20 @@ class XObject {
 
   const std::string& name() const { return name_; }
   uint32_t guest_object() const { return guest_object_ptr_; }
+  // Game Vault save states: a number no other object of this run of Xenia has.
+  uint64_t gv_serial() const { return gv_serial_; }
+  // Made by Xenia for a structure the game set up itself (no handle of the game's).
+  bool gv_is_native() const {
+    return host_object_ && guest_object_ptr_ && !allocated_guest_object_;
+  }
+  // Game Vault save states: the object's blocks in game memory are no longer its to free (a loaded state has
+  // put that memory to other use).
+  virtual void GvForgetGuestMemory() { allocated_guest_object_ = false; }
+  void GvSetGuestObject(bool allocated, uint32_t ptr, uint32_t type_ptr) {
+    allocated_guest_object_ = allocated;
+    guest_object_ptr_ = ptr;
+    guest_object_type_ptr_.store(type_ptr);
+  }
   uint32_t guest_object_type() const { return guest_object_type_ptr_.load(); }
 
   // Has this object been created for use by the host?
@@ -299,6 +313,8 @@ class XObject {
  public:
   // Bumped by every state change that could satisfy a cooperative waiter, so
   // the scheduler can skip re-polling a parked waiter until it moves.
+  // Game Vault save states: host state re-read from the guest header.
+  void GvSyncFromGuest() { SyncFromGuest(); }
   uint32_t cooperative_signal_epoch() const {
     return cooperative_signal_epoch_.load();
   }
@@ -381,6 +397,11 @@ class XObject {
   // if we allocated it!
   uint32_t guest_object_ptr_ = 0;
   bool allocated_guest_object_ = false;
+  static uint64_t GvNextSerial() {
+    static std::atomic<uint64_t> next{1};
+    return next.fetch_add(1);
+  }
+  uint64_t gv_serial_ = GvNextSerial();
 
   std::atomic<uint32_t> guest_object_type_ptr_{0};
 };

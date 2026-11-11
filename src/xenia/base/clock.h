@@ -73,6 +73,8 @@ class Clock {
   static uint64_t QueryGuestTickCount();
 
   static uint64_t* GetGuestTickCountPointer();
+  // Game Vault save states: the guest tick count goes on from |ticks|.
+  static void GvSetGuestTickCount(uint64_t ticks);
   // Queries the guest time, in FILETIME format, accounting for scaling.
   static uint64_t QueryGuestSystemTime();
   // Queries the milliseconds since the guest began, accounting for scaling.

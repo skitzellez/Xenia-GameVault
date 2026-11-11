@@ -42,7 +42,9 @@ XFile::XFile() : XObject(kObjectType), completion_port_lock_() {
 XFile::~XFile() {
   // TODO(benvanik): signal that the file is closing?
   async_event_->Set();
-  file_->Destroy();
+  if (file_) {
+    file_->Destroy();
+  }
 }
 
 GuestScheduler::BlockingCallClass XFile::io_call_class() const {

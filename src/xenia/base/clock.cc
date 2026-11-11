@@ -176,6 +176,11 @@ uint64_t Clock::QueryGuestTickCount() {
 }
 
 uint64_t* Clock::GetGuestTickCountPointer() { return &last_guest_tick_count_; }
+void Clock::GvSetGuestTickCount(uint64_t ticks) {
+  std::lock_guard<tick_mutex_type> lock(tick_mutex_);
+  last_host_tick_count_ = Clock::QueryHostTickCount();
+  last_guest_tick_count_ = ticks;
+}
 uint64_t Clock::QueryGuestSystemTime() {
   if (cvars::clock_no_scaling) {
     return Clock::QueryHostSystemTime();

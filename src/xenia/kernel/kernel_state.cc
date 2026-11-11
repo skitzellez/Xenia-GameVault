@@ -1056,7 +1056,8 @@ void KernelState::RegisterThread(XThread* thread) {
 void KernelState::UnregisterThread(XThread* thread) {
   auto global_lock = global_critical_region_.Acquire();
   auto it = threads_by_id_.find(thread->thread_id());
-  if (it != threads_by_id_.end()) {
+  // (Game Vault: a loaded state may have made a thread with this number again.)
+  if (it != threads_by_id_.end() && it->second == thread) {
     threads_by_id_.erase(it);
   }
 }

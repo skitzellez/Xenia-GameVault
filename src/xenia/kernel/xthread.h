@@ -694,6 +694,11 @@ class XThread : public XObject, public cpu::Thread {
     // thread and no quantum is charged.
     bool repoll_preempt = false;
     bool has_run = false;  // diagnostic: dispatched at least once
+    // Game Vault save states: parked by a JIT safepoint (not inside a kernel
+    // call), and a pending re-entry at a guest address (GvReenterThread).
+    bool gv_at_safepoint = false;
+    std::atomic<bool> gv_reenter_pending{false};
+    uint32_t gv_reenter_pc = 0;
     // Raw host ticks when this thread was linked into a ready list, so a
     // dispatch can measure how long it waited behind higher priorities.
     uint64_t ready_since_tick = 0;
@@ -748,6 +753,23 @@ class XThread : public XObject, public cpu::Thread {
   xe::threading::WaitHandle* wait_handle() { return GetWaitHandle(); }
 
   virtual bool Save(ByteStream* stream) override;
+  // Game Vault save states (the registers are kept by the caller). GvRestore makes the thread again on a
+  // fiber: at guest address |pc|, or with pc 0 from its start (a thread that had not run yet).
+  bool GvSave(ByteStream* stream);
+  static object_ref<XThread> GvRestore(KernelState* kernel_state,
+                                       ByteStream* stream, uint32_t pc);
+  void GvForgetGuestMemory() override {
+    XObject::GvForgetGuestMemory();
+    gv_forgot_guest_memory_ = true;
+  }
+  bool gv_forgot_guest_memory() const { return gv_forgot_guest_memory_; }
+  // Save states: the next NtSignalAndWaitForSingleObjectEx of this thread is the one it was in at the save
+  // (signal already given): it only waits.
+  bool gv_skip_signal_once = false;
+  void GvRunFrom(uint32_t pc);
+  // A running thread becomes the one a state from another run of Xenia has under the same number and handle:
+  // its blocks in game memory are where that state has them.
+  bool GvAdopt(ByteStream* stream);
   static object_ref<XThread> Restore(KernelState* kernel_state,
                                      ByteStream* stream);
 
@@ -801,6 +823,7 @@ class XThread : public XObject, public cpu::Thread {
   bool main_thread_ = false;  // Entry-point thread
   bool running_ = false;
 
+  bool gv_forgot_guest_memory_ = false;
   int32_t priority_ = 0;       // current effective priority (may be decayed)
   int32_t base_priority_ = 0;  // priority floor — decay never goes below this
   int32_t boost_amount_ = 0;   // accumulated priority boost above base
