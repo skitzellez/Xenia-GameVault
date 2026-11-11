@@ -766,6 +766,9 @@ class XThread : public XObject, public cpu::Thread {
   // Save states: the next NtSignalAndWaitForSingleObjectEx of this thread is the one it was in at the save
   // (signal already given): it only waits.
   bool gv_skip_signal_once = false;
+  // Save states: the next NtSuspendThread this thread makes on itself is the one it was in at the save (already
+  // counted in the game's memory): it only waits to be resumed.
+  bool gv_skip_suspend_once = false;
   void GvRunFrom(uint32_t pc);
   // A running thread becomes the one a state from another run of Xenia has under the same number and handle:
   // its blocks in game memory are where that state has them.

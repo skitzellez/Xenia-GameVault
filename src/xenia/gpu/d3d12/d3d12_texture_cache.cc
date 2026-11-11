@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include "xenia/base/gv_perf.h"
 #include "xenia/gpu/d3d12/d3d12_texture_cache.h"
 
 #include <array>
@@ -34,6 +35,11 @@ DEFINE_bool(
     "Off by default on UWP, where the Xbox driver crashes in "
     "UpdateTileMappings.",
     "D3D12");
+
+DEFINE_int32(gv_texture_pool_mb, 0,
+             "Game Vault: megabytes of host textures of destroyed game textures kept for reuse by new textures of the "
+             "same size and format (games that stream textures make and drop them all the time). 0 = off (the default: no gain measured yet).",
+             "D3D12");
 
 namespace xe {
 namespace gpu {
@@ -703,6 +709,8 @@ bool D3D12TextureCache::Initialize() {
 
 void D3D12TextureCache::ClearCache() {
   TextureCache::ClearCache();
+  gv_pool_.clear();
+  gv_pool_bytes_ = 0;
 
   // Clear texture descriptor cache.
   srv_descriptor_cache_free_.clear();
@@ -1587,6 +1595,36 @@ D3D12TextureCache::D3D12Texture::~D3D12Texture() {
   for (const auto& descriptor_pair : srv_descriptors_) {
     d3d12_texture_cache.ReleaseTextureDescriptor(descriptor_pair.second);
   }
+  if (gv_pool_key_ && resource_) {
+    d3d12_texture_cache.GvPoolGive(gv_pool_key_, {std::move(resource_), resource_state_, GetHostMemoryUsage()});
+  }
+}
+
+// Game Vault: everything CreateTexture puts in the description, in one number.
+uint64_t D3D12TextureCache::GvPoolKey(const D3D12_RESOURCE_DESC& desc) {
+  return (uint64_t(desc.Format) & 0x3FF) | (uint64_t(desc.Dimension) << 10) | (uint64_t(desc.Width) << 14) |
+         (uint64_t(desc.Height) << 30) | (uint64_t(desc.DepthOrArraySize) << 46) | (uint64_t(desc.MipLevels) << 58) |
+         (uint64_t(1) << 63);
+}
+
+bool D3D12TextureCache::GvPoolTake(uint64_t pool_key, GvPooledResource& out) {
+  auto it = gv_pool_.find(pool_key);
+  if (it == gv_pool_.end() || it->second.empty()) {
+    return false;
+  }
+  out = std::move(it->second.back());
+  it->second.pop_back();
+  gv_pool_bytes_ -= out.bytes;
+  return true;
+}
+
+void D3D12TextureCache::GvPoolGive(uint64_t pool_key, GvPooledResource&& resource) {
+  if (cvars::gv_texture_pool_mb <= 0 ||
+      gv_pool_bytes_ + resource.bytes > (uint64_t(cvars::gv_texture_pool_mb) << 20)) {
+    return;  // dropped here: the driver frees it, as before
+  }
+  gv_pool_bytes_ += resource.bytes;
+  gv_pool_[pool_key].push_back(std::move(resource));
 }
 
 bool D3D12TextureCache::IsDecompressionNeeded(xenos::TextureFormat format,
@@ -1712,19 +1750,30 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(
   // Assuming untiling will be the next operation.
   D3D12_RESOURCE_STATES resource_state = D3D12_RESOURCE_STATE_COPY_DEST;
   Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+  // Game Vault: one of the same kind from a destroyed texture, if there is one (its last use has finished on the GPU,
+  // or it would not have been destroyed). It comes in the state it was left in; loading moves it on from there.
+  const uint64_t gv_pool_key = GvPoolKey(desc);
+  GvPooledResource gv_pooled;
+  if (cvars::gv_texture_pool_mb > 0 && GvPoolTake(gv_pool_key, gv_pooled)) {
+    auto* gv_texture = new D3D12Texture(*this, key, gv_pooled.resource.Get(), gv_pooled.state);
+    gv_texture->GvSetPoolKey(gv_pool_key);
+    return std::unique_ptr<Texture>(gv_texture);
+  }
   if (FAILED(device->CreateCommittedResource(
           &ui::d3d12::util::kHeapPropertiesDefault,
           provider.GetHeapFlagCreateNotZeroed(), &desc, resource_state, nullptr,
           IID_PPV_ARGS(&resource)))) {
     return nullptr;
   }
-  return std::unique_ptr<Texture>(
-      new D3D12Texture(*this, key, resource.Get(), resource_state));
+  auto* gv_new_texture = new D3D12Texture(*this, key, resource.Get(), resource_state);
+  gv_new_texture->GvSetPoolKey(gv_pool_key);
+  return std::unique_ptr<Texture>(gv_new_texture);
 }
 
 bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                                               bool load_base,
                                                               bool load_mips) {
+  xe::gv_perf::Scope gv_scope(xe::gv_perf::texture_load);
   D3D12Texture& d3d12_texture = static_cast<D3D12Texture&>(texture);
   TextureKey texture_key = d3d12_texture.key();
 

@@ -7,7 +7,9 @@
  ******************************************************************************
  */
 
+#include "xenia/base/gv_perf.h"
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
+#include <fstream>
 #include <cstdlib>
 #include <cstdio>
 #include <algorithm>
@@ -3046,6 +3048,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
+  uint64_t gv_t = __rdtsc();
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -3251,6 +3254,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
 
   // Process primitives.
   PrimitiveProcessor::ProcessingResult primitive_processing_result;
+  xe::gv_perf::DrawStage(0, gv_t);
   if (!primitive_processor_->Process(primitive_processing_result)) {
     return false;
   }
@@ -3295,6 +3299,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
           : DxbcShaderTranslator::Modification(0);
 
   // Set up the render targets - this may perform dispatches and draws.
+  xe::gv_perf::DrawStage(1, gv_t);
   if (!render_target_cache_->Update(is_rasterization_done,
                                     normalized_depth_control,
                                     normalized_color_mask, *vertex_shader)) {
@@ -3341,6 +3346,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   }
   void* pipeline_handle;
   ID3D12RootSignature* root_signature;
+  xe::gv_perf::DrawStage(2, gv_t);
   if (!pipeline_cache_->ConfigurePipeline(
           vertex_shader_translation, pixel_shader_translation,
           primitive_processing_result, normalized_depth_control,
@@ -3352,8 +3358,11 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     return false;
   }
 
+  xe::gv_perf::draws.fetch_add(1, std::memory_order_relaxed);
   if (cvars::async_shader_compilation) {
-    if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
+    if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr &&
+        !pipeline_cache_->GvBuildPipelineNow(pipeline_handle)) {
+      xe::gv_perf::draws_skipped.fetch_add(1, std::memory_order_relaxed);
       XELOGGPU(
           "Skipping draw - pipeline not ready: VS {:016X} mod {:016X}, PS "
           "{:016X} mod {:016X}",
@@ -3373,6 +3382,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       (pixel_shader != nullptr
            ? pixel_shader->GetUsedTextureMaskAfterTranslation()
            : 0);
+  xe::gv_perf::DrawStage(3, gv_t);
   texture_cache_->RequestTextures(used_texture_mask);
 
   // Bind the pipeline after configuring it and doing everything that may bind
@@ -3439,6 +3449,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   scissor.extent[1] *= draw_resolution_scale_y;
 #endif
   // Update viewport, scissor, blend factor and stencil reference.
+  xe::gv_perf::DrawStage(4, gv_t);
   UpdateFixedFunctionState(viewport_info, scissor, primitive_polygonal,
                            normalized_depth_control, normalized_color_mask,
                            bound_depth_and_color_render_target_bits);
@@ -3453,6 +3464,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       apply_host_depth_polygon_offset ? &host_depth_polygon_offset : nullptr);
 
   // Update constant buffers, descriptors and root parameters.
+  xe::gv_perf::DrawStage(5, gv_t);
   if (!UpdateBindings(vertex_shader, pixel_shader, root_signature,
                       memexport_used)) {
     return false;
@@ -3506,6 +3518,17 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       }
     }
 
+    // Game Vault: nearly always the vertex data is in the shared memory already, and that takes no lock to see. MW3
+    // has about 300,000 draws a second, each taking the global lock the game's threads need too. A page invalidated
+    // right after this check is the same as one invalidated right after the locked check.
+    for (uint32_t gv_i = 0; gv_i < vfetch_current_queued; ++gv_i) {
+      if (!shared_memory_->IsRangeValid(vfetch_addresses[gv_i] << 2, vfetch_sizes[gv_i] << 2)) {
+        break;
+      }
+      if (gv_i + 1 == vfetch_current_queued) {
+        vfetch_current_queued = 0;
+      }
+    }
     if (vfetch_current_queued) {
       // so far, i have never seen vfetch_current_queued > 4. 1 is most common,
       // 2 happens occasionally. did not test many games though pre-acquire the
@@ -3525,6 +3548,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       }
     }
   }
+  xe::gv_perf::DrawStage(6, gv_t);
   // Gather memexport ranges and ensure the heaps for them are resident, and
   // also load the data surrounding the export and to fill the regions that
   // won't be modified by the shaders.
@@ -3628,6 +3652,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     }
   }
   // Draw.
+  xe::gv_perf::DrawStage(7, gv_t);
   if (primitive_processing_result.index_buffer_type ==
       PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
     if (!memexport_used) {

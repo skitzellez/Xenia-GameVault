@@ -1978,6 +1978,19 @@ bool Emulator::ExceptionCallback(Exception* ex) {
     // loop, so if a fiber is current halt just that fiber to keep the
     // dispatcher and the other fibers alive.
     if (auto* fiber_self = kernel::XThread::GetCurrentFiberThread()) {
+      // Game Vault: where it happened goes to the log before the guard below closes Xenia (a report then says which
+      // code a thread from a loaded state fell over in).
+      {
+        uint64_t gv_base = 0;
+#if XE_PLATFORM_WIN32 == 1
+        gv_base = reinterpret_cast<uint64_t>(GetModuleHandleW(nullptr));
+#endif
+        XELOGE("Game Vault: host fault on game thread {:08X} '{}' at xenia+{:X}, address {:016X}, game lr {:08X}",
+               fiber_self->thread_id(), fiber_self->thread_name(),
+               (gv_base && ex->pc() >= gv_base) ? ex->pc() - gv_base : 0, uint64_t(ex->fault_address()),
+               fiber_self->thread_state() ? uint32_t(fiber_self->thread_state()->context()->lr) : 0);
+        xe::FlushLog();
+      }
       GvCloseIfCrashAfterLoad("fault in host code on a game thread");
       // ASLR moves the absolute PC each run, so log a stable module offset that
       // resolves against the pdb with "ln xenia_edge+<offset>".

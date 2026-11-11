@@ -209,6 +209,13 @@ struct ThreadRecord {
 
 // The thread sits in NtSignalAndWaitForSingleObjectEx after its signal: made again, it only waits.
 constexpr uint32_t kSkipSignal = 1;
+// The thread had suspended itself (it sits in NtSuspendThread until another thread resumes it): made again, the call
+// does not count a second suspension, it only waits for the one the state already holds.
+constexpr uint32_t kSkipSuspend = 2;
+
+bool IsSelfSuspend(const std::string& name) {
+  return name.find("NtSuspendThread") != std::string::npos;
+}
 bool IsSignalAndWait(const std::string& name) {
   return name.find("SignalAndWait") != std::string::npos;
 }
@@ -254,6 +261,13 @@ Park Classify(Emulator* emulator, kernel::XThread* thread, uint32_t* out_pc,
     if (links.blocked && !links.wait_interruptible) {
       *why = "in a wait that can't be left: " + name;
       return Park::kNo;
+    }
+    if (IsSelfSuspend(name) && links.suspended && thread->suspend_count()) {
+      // A worker that put itself to sleep (OutRun Online Arcade keeps one like this all the time). It never leaves
+      // the call by itself, so waiting for it made every save fail with "the game was busy".
+      *out_pc = context->gv_extern_pc;
+      *why = name;
+      return Park::kWait;
     }
     if (!IsRepeatableWait(name)) {
       *why = "inside " + name;
@@ -515,6 +529,9 @@ bool GvSaveState(Emulator* emulator, const std::filesystem::path& path,
       record.suspend_count = thread->suspend_count();
       if (record.park == Park::kWait && IsSignalAndWait(why)) {
         record.flags |= kSkipSignal;
+      }
+      if (record.park == Park::kWait && IsSelfSuspend(why)) {
+        record.flags |= kSkipSuspend;
       }
       if (record.park == Park::kNo) {
         settled = false;
@@ -1052,6 +1069,39 @@ bool GvLoadState(Emulator* emulator, const std::filesystem::path& path,
       table->GvDropHandle(handle);
     }
   }
+  // Threads that ENDED by themselves since the save are still there as objects until the game closes their handles,
+  // and free their stack and thread blocks in game memory when they finally go. After the load that memory belongs
+  // to the thread made again in their place (or to whatever the state has there), so they must leave it alone:
+  // OutRun Online Arcade's start-up thread ends seconds after the title screen, and a load from then on crashed the
+  // game a few seconds later.
+  {
+    uint64_t newest_serial = 0;
+    for (uint64_t serial : thread_serials) {
+      newest_serial = std::max(newest_serial, serial);
+    }
+    uint32_t left_alone = 0;
+    const auto forget = [&left_alone](kernel::XThread* old) {
+      if (old && old->is_guest_thread() && !old->gv_forgot_guest_memory() && !old->is_running() &&
+          old->scheduler_links().has_run) {
+        old->GvForgetGuestMemory();
+        ++left_alone;
+      }
+    };
+    for (uint32_t i = 0; i < thread_count; ++i) {
+      if (!thread_now[i]) {
+        forget(emulator->kernel_state()->GetThreadByID(records[i].thread_id).get());
+      }
+    }
+    for (auto& old : table->GetObjectsByType<kernel::XThread>(kernel::XObject::Type::Thread)) {
+      // From another run every thread of this run is foreign to the state; in the same run, the ones made after it.
+      if (!same_session || old->gv_serial() > newest_serial) {
+        forget(old.get());
+      }
+    }
+    if (left_alone) {
+      XELOGI("Game Vault: load state: {} ended thread(s) will not free game memory when cleared away", left_alone);
+    }
+  }
   // Objects made since the save go while the memory they sit in is still theirs.
   XELOGI("Game Vault: load state: step 1, {} newer handles taken away", to_drop.size());
   xe::FlushLog();
@@ -1222,6 +1272,7 @@ bool GvLoadState(Emulator* emulator, const std::filesystem::path& path,
         ->TranslateVirtual<kernel::X_KPCR*>(thread->pcr_ptr())
         ->host_stash = reinterpret_cast<uint64_t>(thread->thread_state()->context());
     thread->gv_skip_signal_once = record.park == Park::kWait && (record.flags & kSkipSignal);
+    thread->gv_skip_suspend_once = record.park == Park::kWait && (record.flags & kSkipSuspend);
     if (made) {
       if (record.park != Park::kNeverRan || !record.suspend_count) {
         hold.scheduler()->MarkReady(thread);

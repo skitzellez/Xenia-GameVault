@@ -26,6 +26,7 @@
 #include <thread>
 
 #include "third_party/fmt/include/fmt/format.h"
+#include "xenia/base/gv_perf.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/platform_win.h"
 
@@ -1786,6 +1787,104 @@ void GameVaultXeniaApp::EmulatorThread() {
       CpuSampler(emulator_.get()).Run(cvars::gv_profile_ms);
     }).detach();
   }
+
+  // Game Vault: gv_dips.log. Each second under 52 fps gets a line saying what the emulator was doing then, and every
+  // 30 s a line with the same numbers averaged over the good seconds to compare with.
+  std::thread([this]() {
+    namespace gp = xe::gv_perf;
+    LoadMeter load(emulator_.get());
+    uint64_t last = 0, seconds = 0;
+    auto last_time = std::chrono::steady_clock::now();
+    struct Row {
+      double fps = 0, cpu = 0, gpu = 0, net_ms = 0, net_max = 0, tex_ms = 0, tex_max = 0, up_ms = 0, up_mb = 0;
+      uint64_t net = 0, tex = 0, draws = 0, skipped = 0, queued = 0, tex_made = 0, tex_gone = 0, up_count = 0;
+      double stage[8] = {};
+      uint64_t now_count = 0;
+      double now_ms = 0;
+    } good;
+    uint64_t good_seconds = 0, last_tsc = __rdtsc();
+    const auto path = std::filesystem::path(xe::to_path(UWP::GetLocalState())) / "gv_dips.log";
+    std::ofstream(path, std::ios::trunc) << "Game Vault dip log: each second under 52 fps, then the average of the good seconds\n";
+    const auto write = [&path](const char* what, uint64_t second, const Row& r, const std::string& cpus) {
+      std::error_code ec;
+      if (std::filesystem::file_size(path, ec) > (1u << 20)) return;
+      std::ofstream(path, std::ios::app) << fmt::format(
+          "{} {:5}s fps {:4.1f} cpu {:3.0f}% gpu-thread {:3.0f}% | disc {} reads {:.0f} ms, longest {:.0f} | textures {} "
+          "{:.0f} ms, longest {:.0f} | uploads {:.1f} MB {:.1f} ms | draws {} skipped {} | new pipelines {} built now {} {:.0f} ms | cpus {} | "
+          "draw ms: setup {:.0f} prim {:.0f} rt {:.0f} pipe {:.0f} tex {:.0f} state {:.0f} bind+vfetch {:.0f} memexport+rest {:.0f} | "
+          "texcache {} held {} MB, made {} destroyed {} | memory: faults {} locked requests {} uploads {}\n",
+          what, second, r.fps, r.cpu, r.gpu, r.net, r.net_ms, r.net_max, r.tex, r.tex_ms, r.tex_max, r.up_mb, r.up_ms,
+          r.draws, r.skipped, r.queued, r.now_count, r.now_ms, cpus, r.stage[0], r.stage[1], r.stage[2], r.stage[3], r.stage[4], r.stage[5],
+          r.stage[6], r.stage[7], gp::tex_count.load(), gp::tex_mb.load(), r.tex_made, r.tex_gone, gp::mem_faults.exchange(0), gp::mem_slow_requests.exchange(0), r.up_count);
+    };
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      auto* presenter = presenter_painting_;
+      if (!presenter || !emulator_->is_title_open()) {
+        last = 0;
+        continue;
+      }
+      const uint64_t frames = presenter->guest_output_refresh_count();
+      const auto now = std::chrono::steady_clock::now();
+      const double secs = std::chrono::duration<double>(now - last_time).count();
+      Row r;
+      double memory_mb;
+      load.Sample(&r.cpu, &r.gpu, &memory_mb);
+      r.net = gp::net_read.count.exchange(0);
+      r.net_ms = gp::net_read.us.exchange(0) / 1000.0;
+      r.net_max = gp::net_read.max_us.exchange(0) / 1000.0;
+      r.tex = gp::texture_load.count.exchange(0);
+      r.tex_ms = gp::texture_load.us.exchange(0) / 1000.0;
+      r.tex_max = gp::texture_load.max_us.exchange(0) / 1000.0;
+      r.up_count = gp::memory_upload.count.exchange(0);
+      gp::memory_upload.max_us.exchange(0);
+      r.up_ms = gp::memory_upload.us.exchange(0) / 1000.0;
+      r.up_mb = gp::upload_bytes.exchange(0) / 1048576.0;
+      r.draws = gp::draws.exchange(0);
+      r.tex_made = gp::tex_created.exchange(0);
+      r.tex_gone = gp::tex_destroyed.exchange(0);
+      r.skipped = gp::draws_skipped.exchange(0);
+      r.queued = gp::pipelines_queued.exchange(0);
+      r.now_count = gp::pipeline_now.count.exchange(0);
+      r.now_ms = gp::pipeline_now.us.exchange(0) / 1000.0;
+      gp::pipeline_now.max_us.exchange(0);
+      const uint64_t tsc = __rdtsc();
+      const double ticks_per_ms = secs > 0 ? double(tsc - last_tsc) / (secs * 1000.0) : 1.0;
+      last_tsc = tsc;
+      for (int i = 0; i < 8; ++i) {
+        r.stage[i] = gp::draw_stage[i].exchange(0) / ticks_per_ms;
+      }
+      if (last && frames >= last && secs > 0) {
+        ++seconds;
+        r.fps = double(frames - last) / secs;
+        if (r.fps < 52) {
+          write("DIP ", seconds, r, load.PerCpu());
+        } else {
+          ++good_seconds;
+          good.fps += r.fps, good.cpu += r.cpu, good.gpu += r.gpu, good.net_ms += r.net_ms, good.tex_ms += r.tex_ms;
+          good.up_ms += r.up_ms, good.up_mb += r.up_mb, good.net += r.net, good.tex += r.tex, good.draws += r.draws;
+          good.skipped += r.skipped, good.queued += r.queued;
+          good.now_count += r.now_count, good.now_ms += r.now_ms;
+          good.net_max = std::max(good.net_max, r.net_max), good.tex_max = std::max(good.tex_max, r.tex_max);
+          for (int i = 0; i < 8; ++i) good.stage[i] += r.stage[i];
+        }
+        if (seconds % 30 == 0 && good_seconds) {
+          Row a = good;
+          const double n = double(good_seconds);
+          a.fps /= n, a.cpu /= n, a.gpu /= n, a.net_ms /= n, a.tex_ms /= n, a.up_ms /= n, a.up_mb /= n;
+          a.net = uint64_t(a.net / n), a.tex = uint64_t(a.tex / n), a.draws = uint64_t(a.draws / n);
+          a.skipped = uint64_t(a.skipped / n), a.queued = uint64_t(a.queued / n);
+          a.now_count = uint64_t(a.now_count / n), a.now_ms /= n;
+          for (int i = 0; i < 8; ++i) a.stage[i] /= n;
+          write("good", seconds, a, std::to_string(good_seconds) + " seconds");
+          good = Row{};
+          good_seconds = 0;
+        }
+      }
+      last = frames;
+      last_time = now;
+    }
+  }).detach();
 
   // The game's frame rate, CPU and GPU load and memory in the log every 30 s
   // (test runs and player reports show the speed without a screenshot).

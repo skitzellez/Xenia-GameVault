@@ -15,6 +15,14 @@
 #include "xenia/base/bit_range.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/cvar.h"
+#include "xenia/base/gv_perf.h"
+
+// Game Vault: see SharedMemory::RequestRange.
+DEFINE_bool(gv_request_range_lock_free, true,
+            "Game Vault: a request for game memory that is already up to date on the GPU returns without taking the "
+            "lock the game's threads share.",
+            "GPU");
 
 namespace xe {
 namespace gpu {
@@ -390,6 +398,16 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
 
   SCOPE_profile_cpu_f("gpu");
 
+  // Game Vault: nearly every request (index buffers, vertex buffers, textures, several per draw) is for memory that
+  // is up to date already, and seeing that needs no lock: the page flags are single 64-bit words. The lock below is
+  // the one every game thread takes for kernel calls and write faults, so a busy game (Modern Warfare 3 split
+  // screen: ~290,000 draws a second) had the GPU thread queue for it all the time. A page made invalid right after
+  // this look is the same as one made invalid right after the locked look.
+  if (cvars::gv_request_range_lock_free && IsRangeValid(start, length)) {
+    return true;
+  }
+
+  xe::gv_perf::mem_slow_requests.fetch_add(1, std::memory_order_relaxed);
   if (!EnsureHostGpuMemoryAllocated(start, length)) {
     return false;
   }
@@ -572,6 +590,7 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
   uint32_t block_last = page_last >> 6;
 
   auto global_lock = global_critical_region_.Acquire();
+  xe::gv_perf::mem_faults.fetch_add(1, std::memory_order_relaxed);
 
   if (!exact_range) {
     // Check if a somewhat wider range (up to 256 KB with 4 KB pages) can be

@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_D3D12_PIPELINE_CACHE_H_
 #define XENIA_GPU_D3D12_PIPELINE_CACHE_H_
 
+#include <filesystem>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -110,6 +111,9 @@ class PipelineCache {
 
   // Returns a pipeline with deferred creation by its handle. May return nullptr
   // if failed to create the pipeline or still being created asynchronously.
+  // Game Vault: a draw needs this pipeline now. Builds it on this thread (the GPU thread), or waits for the creation
+  // thread already building it. False if there is still no pipeline (failed, or the option is off).
+  bool GvBuildPipelineNow(void* handle);
   ID3D12PipelineState* GetD3D12PipelineByHandle(void* handle) const {
     return reinterpret_cast<const Pipeline*>(handle)->state.load(
         std::memory_order_acquire);
@@ -383,6 +387,9 @@ class PipelineCache {
   struct Pipeline {
     // nullptr if creation has failed or still pending.
     std::atomic<ID3D12PipelineState*> state{nullptr};
+    // Game Vault: whoever sets this first builds the pipeline; gv_done when it has finished, well or not.
+    std::atomic_flag gv_claimed = ATOMIC_FLAG_INIT;
+    std::atomic<bool> gv_done{false};
     PipelineRuntimeDescription description;
     // For background creation: stores the untranslated shaders.
     // Background thread translates both VS and PS together, then creates the
@@ -392,12 +399,25 @@ class PipelineCache {
     // Priority for async compilation (higher = compiled sooner).
     // Pipelines that write to visible render targets get higher priority.
     uint8_t priority{0};
+    // Game Vault: order queued in. Stored pipelines are in the order the game first used them, so building them in
+    // that order has the next ones ready before it asks.
+    uint32_t gv_order{0};
+    // Game Vault: the game has drawn with it, now or in an earlier session (the title's .gvhot list). Those are built
+    // first at a title's start.
+    bool gv_hot{false};
+    bool gv_used{false};
   };
 
   // Comparator for priority queue - higher priority first.
   struct PipelineCreationPriorityCompare {
     bool operator()(const Pipeline* a, const Pipeline* b) const {
-      return a->priority < b->priority;  // max-heap: lower priority at bottom
+      if (a->gv_hot != b->gv_hot) {
+        return b->gv_hot;
+      }
+      if (!a->gv_hot && a->priority != b->priority) {
+        return a->priority < b->priority;  // max-heap: lower priority at bottom
+      }
+      return a->gv_order > b->gv_order;
     }
   };
 
@@ -464,6 +484,23 @@ class PipelineCache {
   // creation_request_cond_ when set.
   size_t creation_threads_shutdown_from_ = SIZE_MAX;
   std::vector<std::unique_ptr<xe::threading::Thread>> creation_threads_;
+  // Game Vault: while the stored pipelines are built in the background at a
+  // title's start, the creation threads run at the lowest priority. Protected
+  // by creation_request_lock_.
+  bool gv_startup_build_low_priority_ = false;
+  bool gv_startup_build_queued_ = false;
+  size_t gv_startup_build_threads_ = SIZE_MAX;
+  uint32_t gv_next_order_ = 0;
+  bool gv_have_hot_list_ = false;
+  // The title's used list by position, for finding what the game used right after a given pipeline.
+  std::vector<Pipeline*> gv_hot_by_order_;
+  // Pipelines the game is likely to want next (under creation_request_lock_); they are in the queue as well.
+  std::deque<Pipeline*> gv_next_up_;
+  // Until this time (ms) all creation threads work: the game is waiting for pipelines anyway.
+  std::atomic<int64_t> gv_boost_until_ms_{0};
+  void GvHelpWithStall(Pipeline* pipeline);
+  std::filesystem::path gv_hot_path_;
+  void GvNoteUsed(Pipeline* pipeline, uint64_t hash);
 };
 inline bool PipelineCache::PipelineDescription::operator==(
     const PipelineDescription& other) const {

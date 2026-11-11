@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include "xenia/base/gv_perf.h"
 #include "xenia/gpu/d3d12/d3d12_shared_memory.h"
 
 #include <cstring>
@@ -320,6 +321,11 @@ bool D3D12SharedMemory::UploadRanges(
     uint32_t num_upload_page_ranges) {
   if (!num_upload_page_ranges) {
     return true;
+  }
+  xe::gv_perf::Scope gv_scope(xe::gv_perf::memory_upload);
+  for (uint32_t gv_i = 0; gv_i < num_upload_page_ranges; ++gv_i) {
+    xe::gv_perf::upload_bytes.fetch_add(uint64_t(upload_page_ranges[gv_i].second) * 4096,
+                                        std::memory_order_relaxed);
   }
   CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
   command_processor_.SubmitBarriers();

@@ -273,6 +273,21 @@ dword_result_t NtSuspendThread_entry(dword_t handle,
     if (thread->type() == XObject::Type::Thread) {
       auto current_pcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
 
+      // Game Vault save state: this thread had suspended itself when the state was saved, and makes the call again
+      // after a load. The suspension is in the state already, so it is not counted twice; the thread sleeps until
+      // the game resumes it, as it would have.
+      if (thread->gv_skip_suspend_once &&
+          current_pcr->prcb_data.current_thread == thread->guest_object()) {
+        thread->gv_skip_suspend_once = false;
+        if (thread->suspend_count() && XThread::GetCurrentFiberThread() == thread.get()) {
+          kernel_state()->guest_scheduler()->YieldCurrentThread(false);
+        }
+        if (suspend_count_ptr) {
+          *suspend_count_ptr = 0;
+        }
+        return X_STATUS_SUCCESS;
+      }
+
 #if XE_PLATFORM_WIN32
       if (current_pcr->prcb_data.current_thread == thread->guest_object() ||
           !thread->guest_object<X_KTHREAD>()->terminated) {

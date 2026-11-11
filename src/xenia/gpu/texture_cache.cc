@@ -8,6 +8,10 @@
  */
 
 #include "xenia/gpu/texture_cache.h"
+#include "xenia/base/gv_perf.h"
+#include <filesystem>
+#include <fstream>
+#include "xenia/base/filesystem.h"
 #include <mutex>
 #include <map>
 
@@ -235,6 +239,8 @@ void TextureCache::CompletedSubmissionUpdated(
   uint32_t limit_soft_lifetime =
       cvars::texture_cache_memory_limit_soft_lifetime * 1000;
   bool destroyed_any = false;
+  xe::gv_perf::tex_count.store(textures_.size(), std::memory_order_relaxed);
+  xe::gv_perf::tex_mb.store(textures_total_host_memory_usage_ >> 20, std::memory_order_relaxed);
   while (texture_used_first_ != nullptr) {
     uint64_t total_host_memory_usage_mb =
         (textures_total_host_memory_usage_ + ((UINT32_C(1) << 20) - 1)) >> 20;
@@ -265,6 +271,7 @@ void TextureCache::CompletedSubmissionUpdated(
     if (found_texture_it != textures_.end()) {
       assert_true(found_texture_it->second.get() == texture);
       textures_.erase(found_texture_it);
+      xe::gv_perf::tex_destroyed.fetch_add(1, std::memory_order_relaxed);
       // `texture` is invalid now.
     }
   }
@@ -706,6 +713,7 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
         textures_.emplace(key, std::move(new_texture)).first->second.get();
   }
   COUNT_profile_set("gpu/texture_cache/textures", textures_.size());
+  xe::gv_perf::tex_created.fetch_add(1, std::memory_order_relaxed);
   texture->LogAction("Created");
   return texture;
 }

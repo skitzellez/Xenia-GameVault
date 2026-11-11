@@ -627,9 +627,13 @@ class D3D12TextureCache final : public TextureCache {
       srv_descriptors_.emplace(descriptor_key, descriptor_index);
     }
 
+    // Game Vault: made by CreateTexture, so its resource goes back to the pool (GvPoolTake / GvPoolGive).
+    void GvSetPoolKey(uint64_t pool_key) { gv_pool_key_ = pool_key; }
+
    private:
     Microsoft::WRL::ComPtr<ID3D12Resource> resource_;
     D3D12_RESOURCE_STATES resource_state_;
+    uint64_t gv_pool_key_ = 0;
 
     // Cached 2D view of the first slice, managed as a standalone texture
     // object.
@@ -851,6 +855,20 @@ class D3D12TextureCache final : public TextureCache {
   uint32_t srv_descriptor_cache_allocated_;
   // Indices of cached descriptors used by deleted textures, for reuse.
   std::vector<uint32_t> srv_descriptor_cache_free_;
+
+  // Game Vault: host textures of destroyed guest textures, kept for the next texture of the same size and format.
+  // A game that streams textures (Modern Warfare 3: about 90 new ones a second in split screen, as many dropped)
+  // otherwise has the driver make and free a texture for each, which took a tenth of the GPU thread's time.
+  struct GvPooledResource {
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    D3D12_RESOURCE_STATES state;
+    uint64_t bytes;
+  };
+  std::unordered_map<uint64_t, std::vector<GvPooledResource>> gv_pool_;
+  uint64_t gv_pool_bytes_ = 0;
+  static uint64_t GvPoolKey(const D3D12_RESOURCE_DESC& desc);
+  bool GvPoolTake(uint64_t pool_key, GvPooledResource& out);
+  void GvPoolGive(uint64_t pool_key, GvPooledResource&& resource);
 
   enum class NullSRVDescriptorIndex {
     k2DArray,

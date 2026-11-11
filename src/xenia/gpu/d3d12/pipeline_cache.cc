@@ -7,8 +7,12 @@
  ******************************************************************************
  */
 
+#include "xenia/base/gv_perf.h"
 #include "xenia/gpu/d3d12/pipeline_cache.h"
 
+#include <chrono>
+#include <unordered_map>
+#include <fstream>
 #include <cmath>
 #include <cstring>
 #include <thread>
@@ -59,6 +63,15 @@ DEFINE_int32(
     "the number of threads explicitly (up to the number of logical CPU cores), "
     "0 to disable multithreaded pipeline creation.",
     "D3D12");
+DEFINE_int32(gv_startup_pipeline_threads, 3,
+             "Game Vault: threads building a game's stored pipelines in the "
+             "background while it starts.",
+             "D3D12");
+DEFINE_bool(gv_build_needed_pipeline_now, true,
+            "Game Vault: a draw whose pipeline is not ready builds it at once "
+            "instead of being skipped. A skipped draw can leave noise in what "
+            "the game then copies into its textures.",
+            "D3D12");
 DEFINE_bool(d3d12_tessellation_wireframe, false,
             "Display tessellated surfaces as wireframe for debugging.",
             "D3D12");
@@ -72,6 +85,11 @@ namespace d3d12 {
 
 // Game Vault test probe (1.1.8.158 test, The Amazing Spider-Man 2 darkness): every distinct way a draw writes to a
 // 16-bit fixed-point render target (format, write mask, RB_BLENDCONTROL), once each, for gv_live.log.
+static int64_t GvNowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 static std::mutex gv_rt16_mutex;
 static std::unordered_set<uint64_t> gv_rt16_seen;
 static std::vector<std::string> gv_rt16_lines;
@@ -236,6 +254,8 @@ void PipelineCache::Shutdown() {
     }
     delete it.second;
   }
+  gv_hot_by_order_.clear();
+  gv_next_up_.clear();
   pipelines_.clear();
   COUNT_profile_set("gpu/pipeline_cache/pipelines", 0);
 
@@ -302,6 +322,23 @@ void PipelineCache::InitializeShaderStorage(
   shader_storage_file_flush_needed_ = false;
   pipeline_storage_file_flush_needed_ = false;
 
+  // Game Vault: the pipelines this title has really drawn with, in the order it first did.
+  gv_hot_path_ = cache_root / fmt::format("{:08X}.gvhot", title_id);
+  std::unordered_map<uint64_t, uint32_t> gv_hot_list;
+  {
+    std::ifstream hot_file(gv_hot_path_);
+    std::string hot_line;
+    while (std::getline(hot_file, hot_line)) {
+      if (!hot_line.empty()) {
+        gv_hot_list.emplace(std::strtoull(hot_line.c_str(), nullptr, 16),
+                            uint32_t(gv_hot_list.size()));
+      }
+    }
+  }
+  gv_have_hot_list_ = !gv_hot_list.empty();
+  gv_hot_by_order_.assign(gv_hot_list.size(), nullptr);
+  XELOGI("Game Vault: {} pipelines on the title's used list", gv_hot_list.size());
+
   // Create the pipelines.
   if (!pipeline_stored_descriptions.empty()) {
     uint64_t pipeline_creation_start_ = xe::Clock::QueryHostTickCount();
@@ -317,7 +354,8 @@ void PipelineCache::InitializeShaderStorage(
         std::min(pipeline_stored_descriptions.size(), logical_processor_count) -
             size_t(1),
         creation_thread_original_count);
-    while (creation_threads_.size() < creation_thread_needed_count) {
+    // Game Vault: only a blocking load (nothing else running) takes every core.
+    while (blocking && creation_threads_.size() < creation_thread_needed_count) {
       size_t creation_thread_index = creation_threads_.size();
       std::unique_ptr<xe::threading::Thread> creation_thread =
           xe::threading::Thread::Create({}, [this, creation_thread_index]() {
@@ -326,6 +364,22 @@ void PipelineCache::InitializeShaderStorage(
       assert_not_null(creation_thread);
       creation_thread->set_name("D3D12 Pipelines");
       creation_threads_.push_back(std::move(creation_thread));
+    }
+
+    // Game Vault: the non-blocking build runs while the game plays its intro
+    // (MW3's video fell to about 20 fps with its sound breaking up, the threads
+    // taking 75% of the CPU), so it only gets what the game leaves over. Back
+    // to normal when done: then a pipeline in the queue is one the game needs.
+    if (!blocking && !creation_threads_.empty()) {
+      std::lock_guard<xe_mutex> lock(creation_request_lock_);
+      gv_startup_build_low_priority_ = true;
+      gv_startup_build_queued_ = false;
+      // Game Vault: threads above this number sit out the start-up build.
+      gv_startup_build_threads_ =
+          size_t(std::max(cvars::gv_startup_pipeline_threads, int32_t(1)));
+      for (auto& creation_thread : creation_threads_) {
+        creation_thread->set_priority(xe::threading::ThreadPriority::kLowest);
+      }
     }
 
     size_t pipelines_created = 0;
@@ -456,6 +510,14 @@ void PipelineCache::InitializeShaderStorage(
             bound_rts, pixel_shader->writes_color_targets(),
             pixel_shader->writes_depth());
       }
+      new_pipeline->gv_order = 0x100000 + gv_next_order_++;
+      auto gv_hot_it = gv_hot_list.find(pipeline_stored_description.description_hash);
+      if (gv_hot_it != gv_hot_list.end()) {
+        new_pipeline->gv_hot = true;
+        new_pipeline->gv_used = true;
+        new_pipeline->gv_order = gv_hot_it->second;
+        gv_hot_by_order_[gv_hot_it->second] = new_pipeline;
+      }
       pipelines_.emplace(pipeline_stored_description.description_hash,
                          new_pipeline);
       COUNT_profile_set("gpu/pipeline_cache/pipelines", pipelines_.size());
@@ -465,7 +527,7 @@ void PipelineCache::InitializeShaderStorage(
           std::lock_guard<xe_mutex> lock(creation_request_lock_);
           creation_queue_.push(new_pipeline);
         }
-        creation_request_cond_.notify_one();
+        creation_request_cond_.notify_all();
       } else {
         new_pipeline->state.store(
             CreateD3D12Pipeline(pipeline_runtime_description),
@@ -511,14 +573,20 @@ void PipelineCache::InitializeShaderStorage(
           }
         }
         if (await_creation_completion_event) {
-          creation_request_cond_.notify_one();
+          creation_request_cond_.notify_all();
           xe::threading::Wait(creation_completion_event_.get(), false);
         }
       } else {
         // Non-blocking mode: let background threads handle all pipeline
         // creation. Store completion callback to be invoked when done.
         std::lock_guard<xe_mutex> lock(creation_request_lock_);
+        gv_startup_build_queued_ = true;
         if (creation_queue_.empty() && creation_threads_busy_ == 0) {
+          gv_startup_build_low_priority_ = false;
+          for (auto& creation_thread : creation_threads_) {
+            creation_thread->set_priority(
+                xe::threading::ThreadPriority::kNormal);
+          }
           // No work pending - callback will be invoked at end of function.
         } else {
           creation_completion_callback_ = std::move(completion_callback);
@@ -577,7 +645,7 @@ void PipelineCache::EndSubmission() {
     // Don't wait for pipeline creation - let background threads work
     // asynchronously. Draws will be skipped until pipelines are ready.
     // This avoids frame-time spikes from blocking on pipeline creation.
-    creation_request_cond_.notify_one();
+    creation_request_cond_.notify_all();
   }
 }
 
@@ -606,7 +674,7 @@ void PipelineCache::AwaitPipelineCompletion() {
   }
 
   if (await_creation_completion_event) {
-    creation_request_cond_.notify_one();
+    creation_request_cond_.notify_all();
     xe::threading::Wait(creation_completion_event_.get(), false);
   }
 }
@@ -921,6 +989,7 @@ bool PipelineCache::ConfigurePipeline(
   for (auto it = found_range.first; it != found_range.second; ++it) {
     Pipeline* found_pipeline = it->second;
     if (found_pipeline->description.description == description) {
+      GvNoteUsed(found_pipeline, hash);
       current_pipeline_ = found_pipeline;
       *pipeline_handle_out = found_pipeline;
       *root_signature_out = found_pipeline->description.root_signature;
@@ -933,6 +1002,7 @@ bool PipelineCache::ConfigurePipeline(
               sizeof(runtime_description));
   pipelines_.emplace(hash, new_pipeline);
   COUNT_profile_set("gpu/pipeline_cache/pipelines", pipelines_.size());
+  GvNoteUsed(new_pipeline, hash);
 
   if (use_async) {
     // Queue for background thread.
@@ -950,7 +1020,8 @@ bool PipelineCache::ConfigurePipeline(
       std::lock_guard<xe_mutex> lock(creation_request_lock_);
       creation_queue_.push(new_pipeline);
     }
-    creation_request_cond_.notify_one();
+    xe::gv_perf::pipelines_queued.fetch_add(1, std::memory_order_relaxed);
+    creation_request_cond_.notify_all();
   } else {
     // Sync mode or no creation threads: create synchronously.
     new_pipeline->state.store(CreateD3D12Pipeline(runtime_description),
@@ -3453,10 +3524,36 @@ void PipelineCache::CreationThread(size_t thread_index) {
     // pipeline if there is any.
     {
       std::unique_lock<xe_mutex> lock(creation_request_lock_);
+      if (gv_startup_build_low_priority_ &&
+          thread_index < creation_threads_shutdown_from_) {
+        // Pipelines the game really uses get the start-up threads; once those are built the rest take only one, so
+        // they never get in its way.
+        size_t limit = gv_startup_build_threads_;
+        if (gv_have_hot_list_ && !creation_queue_.empty() &&
+            !creation_queue_.top()->gv_hot) {
+          limit = 1;
+        }
+        if (GvNowMs() < gv_boost_until_ms_.load(std::memory_order_relaxed)) {
+          limit = SIZE_MAX;
+        }
+        if (thread_index >= limit) {
+          creation_request_cond_.wait(lock);
+          continue;
+        }
+      }
       if (thread_index >= creation_threads_shutdown_from_ ||
           creation_queue_.empty()) {
         if (creation_threads_busy_ == 0) {
           // Last pipeline in the queue created.
+          if (gv_startup_build_low_priority_ && gv_startup_build_queued_) {
+            gv_startup_build_low_priority_ = false;
+            creation_request_cond_.notify_all();
+            XELOGI("Game Vault: stored pipelines built, normal priority again");
+            for (auto& creation_thread : creation_threads_) {
+              creation_thread->set_priority(
+                  xe::threading::ThreadPriority::kNormal);
+            }
+          }
           if (creation_completion_set_event_) {
             // Signal the event if requested (blocking mode).
             creation_completion_set_event_ = false;
@@ -3491,9 +3588,22 @@ void PipelineCache::CreationThread(size_t thread_index) {
       // until the pipeline is created - other threads must be able to dequeue
       // requests, but can't set the completion event until the pipelines are
       // fully created (rather than just started creating).
-      pipeline_to_create = creation_queue_.top();
-      creation_queue_.pop();
+      if (!gv_next_up_.empty()) {
+        // Still in the queue too: whoever pops it later finds it claimed and goes on.
+        pipeline_to_create = gv_next_up_.front();
+        gv_next_up_.pop_front();
+      } else {
+        pipeline_to_create = creation_queue_.top();
+        creation_queue_.pop();
+      }
       ++creation_threads_busy_;
+    }
+
+    if (pipeline_to_create->gv_claimed.test_and_set()) {
+      // The GPU thread needed it first and has it.
+      std::lock_guard<xe_mutex> lock(creation_request_lock_);
+      --creation_threads_busy_;
+      continue;
     }
 
     // Translate pending shaders and update root signature.
@@ -3522,6 +3632,7 @@ void PipelineCache::CreationThread(size_t thread_index) {
                        .ucode_data_hash()
                  : 0);
     }
+    pipeline_to_create->gv_done.store(true, std::memory_order_release);
 
     // Pipeline created - the thread is not busy anymore, safe to set the
     // completion event if needed (at the next iteration, or in some other
@@ -3546,6 +3657,10 @@ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
       creation_queue_.pop();
     }
 
+    if (pipeline_to_create->gv_claimed.test_and_set()) {
+      continue;
+    }
+
     // Translate pending shaders and update root signature.
     EnsurePipelineShadersTranslated(pipeline_to_create, *shader_translator_,
                                     ucode_disasm_buffer_, dxbc_converter_,
@@ -3562,7 +3677,73 @@ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
     } else {
       XELOGW("ProcessorThread: Pipeline creation failed");
     }
+    pipeline_to_create->gv_done.store(true, std::memory_order_release);
   }
+}
+
+void PipelineCache::GvNoteUsed(Pipeline* pipeline, uint64_t hash) {
+  if (pipeline->gv_used) {
+    return;
+  }
+  pipeline->gv_used = true;
+  if (!gv_hot_path_.empty()) {
+    std::ofstream(gv_hot_path_, std::ios::app) << fmt::format("{:016X}\n", hash);
+  }
+}
+
+void PipelineCache::GvHelpWithStall(Pipeline* pipeline) {
+  std::lock_guard<xe_mutex> lock(creation_request_lock_);
+  if (!gv_startup_build_low_priority_) {
+    return;
+  }
+  // The game stands still until this pipeline is there, so nothing is in the way of the other creation threads (they
+  // stay at the lowest priority).
+  gv_boost_until_ms_.store(GvNowMs() + 3000, std::memory_order_relaxed);
+  // What came after this one when the game first used it is the best guess at what it asks for next: a mode that was
+  // played last time (split screen, a map) sits together on the list.
+  if (pipeline->gv_hot) {
+    constexpr uint32_t kNext = 32;
+    for (uint32_t i = kNext; i != 0; --i) {
+      const uint64_t order = uint64_t(pipeline->gv_order) + i;
+      if (order < gv_hot_by_order_.size() && gv_hot_by_order_[order] &&
+          !gv_hot_by_order_[order]->state.load(std::memory_order_relaxed)) {
+        gv_next_up_.push_front(gv_hot_by_order_[order]);
+      }
+    }
+    while (gv_next_up_.size() > 256) {
+      gv_next_up_.pop_back();
+    }
+  }
+  creation_request_cond_.notify_all();
+}
+
+bool PipelineCache::GvBuildPipelineNow(void* handle) {
+  if (!cvars::gv_build_needed_pipeline_now) {
+    return false;
+  }
+  Pipeline* pipeline = reinterpret_cast<Pipeline*>(handle);
+  if (pipeline->state.load(std::memory_order_acquire)) {
+    return true;
+  }
+  xe::gv_perf::Scope gv_scope(xe::gv_perf::pipeline_now);
+  GvHelpWithStall(pipeline);
+  if (!pipeline->gv_claimed.test_and_set()) {
+    EnsurePipelineShadersTranslated(pipeline, *shader_translator_,
+                                    ucode_disasm_buffer_, dxbc_converter_,
+                                    dxc_utils_, dxc_compiler_,
+                                    /*use_try_claim=*/true,
+                                    /*handle_non_placeholder=*/true);
+    ID3D12PipelineState* new_state = CreateD3D12Pipeline(pipeline->description);
+    if (new_state != nullptr) {
+      pipeline->state.store(new_state, std::memory_order_release);
+    }
+    pipeline->gv_done.store(true, std::memory_order_release);
+  } else {
+    while (!pipeline->gv_done.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+  }
+  return pipeline->state.load(std::memory_order_acquire) != nullptr;
 }
 
 }  // namespace d3d12

@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_D3D12_D3D12_COMMAND_PROCESSOR_H_
 #define XENIA_GPU_D3D12_D3D12_COMMAND_PROCESSOR_H_
 
+#include <filesystem>
 #include <algorithm>
 #include <atomic>
 #include <chrono>

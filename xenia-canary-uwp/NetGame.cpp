@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "NetGame.h"
+#include "xenia/base/gv_perf.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 
@@ -230,6 +231,7 @@ class SmbGame : public xe::filesystem::NetFile {
     if (offset > size_ || length > size_ - offset) {
       return false;
     }
+    xe::gv_perf::Scope gv_scope(xe::gv_perf::net_read);
     std::lock_guard<std::mutex> lock(lock_);
     auto* out = static_cast<uint8_t*>(buffer);
     while (length) {
@@ -487,6 +489,7 @@ class SmbFolderFile : public xe::filesystem::NetFile {
     if (offset > size_ || length > size_ - offset) {
       return false;
     }
+    xe::gv_perf::Scope gv_scope(xe::gv_perf::net_read);
     std::lock_guard<std::mutex> lock(lock_);
     auto* out = static_cast<uint8_t*>(buffer);
     while (length) {
