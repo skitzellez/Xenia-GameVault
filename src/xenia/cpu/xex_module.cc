@@ -33,6 +33,7 @@
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/xex2_util.h"
 #include "xenia/kernel/xmodule.h"
+#include "xenia/kernel/xbdm/xbdm_module.h"
 
 #include "third_party/mbedtls/include/mbedtls/aes.h"
 #include "third_party/mbedtls/include/mbedtls/sha1.h"
@@ -88,6 +89,8 @@ void aes_decrypt_buffer(const uint8_t* session_key, const uint8_t* input_buffer,
                         input_buffer, output_buffer);
   mbedtls_aes_free(&context);
 }
+
+DECLARE_int32(console_type);
 
 namespace xe {
 namespace cpu {
@@ -1014,6 +1017,18 @@ bool XexModule::Load(const std::string_view name, const std::string_view path,
       devkit_key || (opt_file_format_info() &&
                      opt_file_format_info()->encryption_type ==
                          XEX_ENCRYPTION_NONE);
+  // Game Vault: they also call the dev kit's debug library (xbdm.xex), which
+  // Xenia only provides when it is set up as a dev kit (console_type): without
+  // it, its functions and variables stay unresolved and NX1 crashed at once
+  // reading through one. Provided for these programs only (retail games keep
+  // seeing a retail console: an anti-cheat checks for it, 415608C3).
+  if (not_retail && !kernel_state_->IsModuleLoaded("xbdm.xex")) {
+    if (cvars::console_type < 0) {
+      cvars::console_type = 0;   // DmGetConsoleType: a development kit
+    }
+    kernel_state_->LoadKernelModule<kernel::xbdm::XbdmModule>();
+    XELOGI("Game Vault: {} gets the dev kit's debug library (xbdm.xex)", name);
+  }
   if (not_retail && cvars::protect_zero && cvars::gv_open_zero_for_devkit) {
     auto zero_heap = memory()->LookupHeap(0);
     if (zero_heap &&

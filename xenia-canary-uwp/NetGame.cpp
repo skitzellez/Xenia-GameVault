@@ -614,8 +614,10 @@ std::string Open(const std::string& url, const std::string& cred_file) {
       return stand_in;
     }
   }
-  if (cut != std::string::npos &&
-      (!_stricmp(program.c_str(), "default.xex") || program.find('.') == std::string::npos)) {
+  // (any .xex: a prototype / dev-kit build's programs have other names than default.xex, Call of Duty NX1)
+  size_t dot = program.find_last_of('.');
+  bool xex = dot != std::string::npos && !_stricmp(program.c_str() + dot, ".xex");
+  if (cut != std::string::npos && (xex || program.find('.') == std::string::npos)) {
     std::string base = path.substr(0, cut);
     auto folder = std::make_shared<SmbFolder>(api, std::move(cred), base);
     DWORD start = GetTickCount();
