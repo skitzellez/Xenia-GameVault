@@ -746,13 +746,21 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     // The other WWE games crash when a match starts without it, like WWE 2K17 (xenia-canary game-compatibility
     // 72 WWE '12, 32 WWE 2K14, 85 SvR 2011: "ignore_offset_for_ranged_allocations = true to prevent crashes at the
     // start of matches"; a player asked 11-02 "whenever I start a match the game crashes").
-    {"545107E0", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // SmackDown vs. Raw 2007
-    {"5451080B", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // SmackDown vs. Raw 2008
-    {"54510826", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // SmackDown vs. Raw 2009
-    {"54510844", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // SmackDown vs. Raw 2010
-    {"5451085D", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // SmackDown vs. Raw 2011
-    {"54510890", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE '12
-    {"545108B4", "[Memory]\nignore_offset_for_ranged_allocations = true\n"},   // WWE 13
+    // They also get the two picture settings WWE 2K14-2K17 have (same Yuke's engine): WWE '12's attract-mode match
+    // showed only shadows and floating pieces of the wrestlers; with all three the bodies are whole (owner check on
+    // the console, 2026-11-11: "its fixed"). Owner: "floating characters like all the other ones", so the whole
+    // series gets them.
+#define GV_WWE_SETTINGS                                       \
+  "[Memory]\nignore_offset_for_ranged_allocations = true\n" \
+  "[GPU]\nreadback_resolve = \"fast\"\n"                    \
+  "[GPU.Debug]\ndxbc_forward_jumps_without_loop = false\n"
+    {"545107E0", GV_WWE_SETTINGS},   // SmackDown vs. Raw 2007
+    {"5451080B", GV_WWE_SETTINGS},   // SmackDown vs. Raw 2008
+    {"54510826", GV_WWE_SETTINGS},   // SmackDown vs. Raw 2009
+    {"54510844", GV_WWE_SETTINGS},   // SmackDown vs. Raw 2010
+    {"5451085D", GV_WWE_SETTINGS},   // SmackDown vs. Raw 2011
+    {"54510890", GV_WWE_SETTINGS},   // WWE '12
+    {"545108B4", GV_WWE_SETTINGS},   // WWE 13
     // WWE 2K14, 2K15 and 2K16: the same engine as WWE 2K17, so the same three settings. 2K14 checked 2026-11-09 on
     // the owner console (attract-mode match): without the shader setting the wrestlers lose legs, arms and heads,
     // with it every body is whole (a player's photo showed the same: Undertaker's hat and coat, no head or hands).
