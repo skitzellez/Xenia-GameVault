@@ -12,6 +12,7 @@
 #include "xenia/vfs/devices/xcontent_container_device.h"
 
 #include "devices/host_path_entry.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
@@ -312,7 +313,10 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
       if (host_path) {
         auto const file_path = host_path->host_path() / entry->name();
 
-        if (!std::filesystem::exists(file_path)) {
+        // (Game Vault: PathExistsAny also knows the network folder game,
+        // whose files never exist on the console's own disks: every file of
+        // it was "not found" - Ice Age 3 black screen, Call of Duty NX1)
+        if (!xe::filesystem::PathExistsAny(file_path)) {
           // Remove cached entry
           entry->Delete();
           entry = nullptr;

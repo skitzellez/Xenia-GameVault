@@ -19,6 +19,7 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/xex_module.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/xbox.h"
@@ -28,6 +29,8 @@ DEFINE_bool(
     "Allows to ignore 4k offset for physical allocations with provided range. "
     "Certain titles check if result matches provided lower range.",
     "Memory");
+
+DECLARE_int32(console_type);
 
 namespace xe {
 namespace kernel {
@@ -657,15 +660,32 @@ dword_result_t xeMmQueryStatistics(
       physical_heaps, std::size(physical_heaps), reserved_pages,
       unreserved_pages, used_pages, reserved_pages_bytes);
 
+  // Game Vault: a dev-kit / prototype program (console_type set for it, see
+  // XexModule::Load) checks its own size against the memory used at boot
+  // (Call of Duty NX1: "g_exe_size < mem_used_at_boot" and then a hang). On a
+  // console the title's image is part of what it uses; count it there. Retail
+  // games keep the numbers they always had.
+  uint32_t gv_image_pages = 0;
+  if (cvars::console_type >= 0) {
+    if (auto exe = kernel_state()->GetExecutableModule()) {
+      if (exe->xex_module()) {
+        gv_image_pages = (exe->xex_module()->image_size() + 0xFFF) >> 12;
+      }
+    }
+  }
+  used_pages += gv_image_pages;
+
   assert_true(used_pages < stats_ptr->total_physical_pages);
   stats_ptr->title.available_pages =
       stats_ptr->total_physical_pages - stats_ptr->kernel_pages - used_pages;
   stats_ptr->title.total_virtual_memory_bytes = 0x2FFE0000;
   stats_ptr->title.reserved_virtual_memory_bytes = reserved_pages_bytes;
-  stats_ptr->title.physical_pages = 0x00001000;  // TODO(gibbed): FIXME
+  stats_ptr->title.physical_pages =
+      gv_image_pages ? std::max<uint32_t>(0x00001000, used_pages)
+                     : 0x00001000;  // TODO(gibbed): FIXME
   stats_ptr->title.pool_pages = 0x00000010;
   stats_ptr->title.stack_pages = 0x00000100;
-  stats_ptr->title.image_pages = 0x00000100;
+  stats_ptr->title.image_pages = gv_image_pages ? gv_image_pages : 0x00000100;
   stats_ptr->title.heap_pages = 0x00000100;
   stats_ptr->title.virtual_pages = 0x00000100;
   stats_ptr->title.page_table_pages = 0x00000100;
