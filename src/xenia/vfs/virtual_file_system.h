@@ -33,6 +33,9 @@ class VirtualFileSystem {
 
   bool RegisterDevice(std::unique_ptr<Device> device);
   bool UnregisterDevice(const std::string_view path);
+  // Game Vault: takes the device off its mount path but keeps it alive, for files the game still has open on it
+  // (a disc swapped out: Forza Motorsport 4 asks about a Disc 1 file after the swap to Disc 2).
+  bool RetireDevice(const std::string_view path);
   Device* GetDevice(const std::string_view path);
 
   bool RegisterSymbolicLink(const std::string_view path,
@@ -66,6 +69,7 @@ class VirtualFileSystem {
  private:
   xe::global_critical_region global_critical_region_;
   std::vector<std::unique_ptr<Device>> devices_;
+  std::vector<std::unique_ptr<Device>> retired_devices_;
   std::unordered_map<std::string, std::string> symlinks_;
 
   bool ResolveSymbolicLink(const std::string_view path, std::string& result);

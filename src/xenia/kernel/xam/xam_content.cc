@@ -771,9 +771,10 @@ dword_result_t XamSwapDisc_entry(
   // Mount to Cdrom0 so the game: symlink points to the new disc
   auto mount_path = "\\Device\\Cdrom0";
 
-  // Unmount the current disc
+  // Unmount the current disc (kept alive: the game may still have its files open, and asks about them after the
+  // swap - Forza Motorsport 4's "Install Disc 2" crashed Xenia reading a freed Disc 1 file entry)
   if (filesystem->ResolvePath(mount_path) != NULL) {
-    filesystem->UnregisterDevice(mount_path);
+    filesystem->RetireDevice(mount_path);
   }
 
   std::u16string text_message = xe::load_and_swap<std::u16string>(

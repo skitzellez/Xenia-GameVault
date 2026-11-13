@@ -54,6 +54,19 @@ bool VirtualFileSystem::UnregisterDevice(const std::string_view path) {
   return false;
 }
 
+bool VirtualFileSystem::RetireDevice(const std::string_view path) {
+  auto global_lock = global_critical_region_.Acquire();
+  for (auto it = devices_.begin(); it != devices_.end(); ++it) {
+    if ((*it)->mount_path() == path) {
+      XELOGI("Game Vault: device {} taken off, kept for files still open on it", (*it)->mount_path());
+      retired_devices_.push_back(std::move(*it));
+      devices_.erase(it);
+      return true;
+    }
+  }
+  return false;
+}
+
 Device* VirtualFileSystem::GetDevice(const std::string_view path) {
   auto global_lock = global_critical_region_.Acquire();
   for (auto it = devices_.begin(); it != devices_.end(); ++it) {
