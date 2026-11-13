@@ -764,6 +764,12 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     // WWE 2K14, 2K15 and 2K16: the same engine as WWE 2K17, so the same three settings. 2K14 checked 2026-11-09 on
     // the owner console (attract-mode match): without the shader setting the wrestlers lose legs, arms and heads,
     // with it every body is whole (a player's photo showed the same: Undertaker's hat and coat, no head or hands).
+    // Need for Speed Most Wanted (2012): after the opening cutscene the main thread waits for data its shaders
+    // export to memory; without reading it back the screen stays black for good (owner console 2026-11-13,
+    // upstream game-compatibility #1054). With the read-back (and Edge's "only write back the bytes the draw
+    // changed") it drives at ~30 fps.
+    {"45410961",
+     "[GPU]\nreadback_memexport = true\nreadback_resolve = \"fast\"\n"},
     {"545408B2",   // WWE 2K14
      "[Memory]\nignore_offset_for_ranged_allocations = true\n"
      "[GPU]\nreadback_resolve = \"fast\"\n"

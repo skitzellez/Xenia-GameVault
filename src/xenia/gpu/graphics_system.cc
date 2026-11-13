@@ -428,14 +428,38 @@ void GraphicsSystem::SetInterruptCallback(uint32_t callback,
   XELOGGPU("SetInterruptCallback({:08X}, {:08X})", callback, user_data);
 }
 
-void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
-  const InterruptCallbackScope dispatch(interrupt_callbacks_state_);
-  if (!dispatch) {
+void GraphicsSystem::GvHoldGuestCallbacks(bool hold) {
+  if (!hold) {
+    gv_callbacks_held_.store(false, std::memory_order_release);
+    gv_callbacks_held_.notify_all();
     return;
   }
-  const auto callback = interrupt_callback_.load(std::memory_order_acquire);
-  kernel_state()->EmulateCPInterruptDPC(uint32_t(callback),
-                                       uint32_t(callback >> 32), source, cpu);
+  gv_callbacks_held_.store(true, std::memory_order_seq_cst);
+  // One already inside the game's callback finishes first.
+  while (interrupt_callbacks_state_.load(std::memory_order_seq_cst) &
+         ~kInterruptCallbacksStopped) {
+    xe::threading::Sleep(std::chrono::milliseconds(1));
+  }
+}
+
+void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
+  for (;;) {
+    // (Game Vault: held during a state load: wait, then deliver it)
+    while (gv_callbacks_held_.load(std::memory_order_acquire)) {
+      gv_callbacks_held_.wait(true, std::memory_order_acquire);
+    }
+    const InterruptCallbackScope dispatch(interrupt_callbacks_state_);
+    if (!dispatch) {
+      return;
+    }
+    if (gv_callbacks_held_.load(std::memory_order_seq_cst)) {
+      continue;  // held just after the check above: leave the scope, wait
+    }
+    const auto callback = interrupt_callback_.load(std::memory_order_acquire);
+    kernel_state()->EmulateCPInterruptDPC(uint32_t(callback),
+                                         uint32_t(callback >> 32), source, cpu);
+    return;
+  }
 }
 
 void GraphicsSystem::MarkVblank() {

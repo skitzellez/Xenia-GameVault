@@ -229,6 +229,9 @@ bool IsRepeatableWait(const std::string& name) {
       "XamInputGetState",         "KeWaitForSingleObjectEx",
       // Made again with the signal left out (it was given before the wait began): see kSkipSignal.
       "NtSignalAndWaitForSingleObjectEx",
+      // A network thread waiting on its socket events (NFS Most Wanted 2012 keeps one in it all the time, so every
+      // save failed with "the game was busy"). Waiting again gives the same answer; the time-out starts over.
+      "NetDll_WSAWaitForMultipleEvents",
   };
   for (const char* candidate : kNames) {
     if (name.find(candidate) != std::string::npos) {
@@ -962,6 +965,14 @@ bool GvLoadState(Emulator* emulator, const std::filesystem::path& path,
   if (!WaitGpuIdle(emulator)) {
     XELOGW("Game Vault: load state: the graphics thread still has work queued");
   }
+  // The game's graphics interrupt callback runs game code on the graphics thread: it must not run while the
+  // memory goes back (NFS Most Wanted 2012, which keeps the graphics thread busy reading data back, crashed in it
+  // reading 0BADF00D half-way through the load). Held, not dropped, until the load is through or given up.
+  struct CallbackHold {
+    gpu::GraphicsSystem* graphics;
+    explicit CallbackHold(gpu::GraphicsSystem* g) : graphics(g) { graphics->GvHoldGuestCallbacks(true); }
+    ~CallbackHold() { graphics->GvHoldGuestCallbacks(false); }
+  } callback_hold(emulator->graphics_system());
 
   // Kernel objects, both ways. One the game closed since the save is made again after its memory is back (if its
   // kind can be: else the load is refused here, before anything is changed - Kameo crashed going on with handles

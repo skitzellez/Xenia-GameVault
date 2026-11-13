@@ -56,6 +56,9 @@ class GraphicsSystem {
   virtual void Shutdown();
   // Call before stopping guest threads that an active callback may wait for.
   void StopGuestCallbacks();
+  // Game Vault save states: while held, the game's graphics interrupt callback waits (it is not dropped) and
+  // none is running; a state load puts the game's memory back in that time.
+  void GvHoldGuestCallbacks(bool hold);
   void ShutdownGuestState();
   X_STATUS ReinitializeGuestState(cpu::Processor* processor,
                                  kernel::KernelState* kernel_state);
@@ -142,6 +145,7 @@ class GraphicsSystem {
 
   std::atomic<uint64_t> interrupt_callback_{0};
   std::atomic<uint32_t> interrupt_callbacks_state_{0};
+  std::atomic<bool> gv_callbacks_held_{false};
 
   std::atomic<bool> frame_limiter_worker_running_;
   kernel::object_ref<kernel::XHostThread> frame_limiter_worker_thread_;
