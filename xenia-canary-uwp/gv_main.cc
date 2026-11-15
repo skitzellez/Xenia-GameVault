@@ -86,6 +86,7 @@ DEFINE_int32(gv_profile_ms, 0,
 DECLARE_int32(draw_resolution_scale_x);
 DECLARE_int32(draw_resolution_scale_y);
 extern uint32_t gv_requested_title;   // App.cpp: titleid= in the start link (Game Vault), 0 = not said
+extern int gv_requested_fsr_pct;   // App.cpp: fsrs=<percent>, Game Vault's FSR strength
 extern bool gv_requested_fsr;   // App.cpp: fsr=1 in the start link (Game Vault's Sharper picture option)
 extern int gv_requested_scale;   // App.cpp: scale= in the start link (Game Vault), 0 = none
 
@@ -1495,6 +1496,11 @@ void GameVaultXeniaApp::SetupPresenter() {
     ui::Presenter::GuestOutputPaintConfig paint =
         presenter->GetGuestOutputPaintConfigFromUIThread();
     paint.SetEffect(ui::Presenter::GuestOutputPaintConfig::Effect::kFsr);
+    if (gv_requested_fsr_pct > 0 && gv_requested_fsr_pct <= 100) {
+      // strength: 100% = no sharpness reduction (sharpest), 10% = 1.8 stops (Xenia's default 0.2 = 90%)
+      paint.SetFsrSharpnessReduction((100 - gv_requested_fsr_pct) / 50.0f);
+      XELOGI("Game Vault: FSR strength {}%", gv_requested_fsr_pct);
+    }
     presenter->SetGuestOutputPaintConfigFromUIThread(paint);
     XELOGI("Game Vault: Sharper picture (FSR) on");
   }

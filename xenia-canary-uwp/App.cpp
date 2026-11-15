@@ -38,6 +38,8 @@
 int gv_requested_scale = 0;
 // Game Vault 0.16.1.7xx+: "Sharper picture (FSR)" is on (fsr=1): the picture is scaled to the screen with AMD FSR 1
 bool gv_requested_fsr = false;
+// Game Vault 0.16.1.740+: the FSR strength in percent (fsrs=10..100), 0 = Xenia's own sharpness
+int gv_requested_fsr_pct = 0;
 uint32_t gv_requested_title = 0;
 #include "xenia/base/logging.h"
 #include "xenia/config.h"
@@ -308,6 +310,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
       bool show_fps = false;
       int scale = 0;
       gv_requested_fsr = false;
+      gv_requested_fsr_pct = 0;
       gv_requested_title = 0;
       for (const auto& argument : query) {
         arguments.emplace_back(winrt::to_string(argument.Name()),
@@ -333,6 +336,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
           show_fps = argument.Value() == L"1";
         } else if (argument.Name() == L"fsr") {
           gv_requested_fsr = argument.Value() == L"1";
+        } else if (argument.Name() == L"fsrs") {
+          gv_requested_fsr_pct = _wtoi(argument.Value().c_str());
         } else if (argument.Name() == L"scale") {
           // Game Vault 0.16.1.369+: the game's "Resolution scale" (Xbox 360 game settings)
           scale = _wtoi(argument.Value().c_str());
