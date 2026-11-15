@@ -11,6 +11,7 @@
 #include <charconv>
 #include <functional>
 
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
 #include "xenia/base/utf8.h"
@@ -296,6 +297,24 @@ dword_result_t IoCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
     root_entry = root_file->entry();
   }
 
+  // Game Vault: Caladrius (533007D0) shows a white screen forever on its opening movie (rom\media\movie\cala_op.wmv):
+  // its movie player never gets a frame out of Xenia (upstream Canary too). Pressing A during the MOSS logo before
+  // it skips the movie, as on the real console, so the logo file opening queues a few A presses (the test-press file
+  // the input system plays, see hid/input_system.cc).
+  if (kernel_state()->title_id() == 0x533007D0) {
+    std::string lower = xe::utf8::lower_ascii(target_path);
+    if (lower.size() >= 11 && lower.compare(lower.size() - 11, 11, "sc_logo.mma") == 0) {
+      std::error_code ec;
+      auto press_file = xe::filesystem::GetUserFolder() / "gv_press.txt";
+      if (FILE* f = xe::filesystem::OpenFile(press_file, "wb")) {
+        static const char kPresses[] = "1500 a 300 a 300 a 300 a 300 a 300 a";
+        fwrite(kPresses, 1, sizeof(kPresses) - 1, f);
+        fclose(f);
+        XELOGI("Game Vault: Caladrius logo: pressing A to skip the opening movie (it hangs in Xenia)");
+      }
+    }
+  }
+
   // Attempt open (or create). The host open can block on a slow drive.
   vfs::File* vfs_file;
   vfs::FileAction file_action;
@@ -410,6 +429,10 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
   } else if (XSUCCEEDED(result)) {
     result = ValidateRequest(file.get(), static_cast<uint32_t>(apc_routine_ptr),
                              byte_offset_ptr, false, &byte_offset);
+    if (XFAILED(result)) {
+      XELOGW("NtReadFile({}) refused {:08X}: apc={:08X} sync={} offset_ptr={}", file->path(), result,
+             uint32_t(apc_routine_ptr), file->is_synchronous(), bool(byte_offset_ptr));
+    }
   }
 
   if (XSUCCEEDED(result)) {
@@ -457,6 +480,8 @@ dword_result_t NtReadFileScatter_entry(
   } else if (XSUCCEEDED(result) &&
              (file->is_buffered() || file->device()->name() == "STFS")) {
     // Scatter reads need an unbuffered handle. STFS takes none.
+    XELOGW("NtReadFileScatter({}) refused: buffered={} device={}", file->path(),
+           file->is_buffered(), file->device()->name());
     result = X_STATUS_INVALID_PARAMETER;
   } else if (XSUCCEEDED(result)) {
     result = ValidateRequest(file.get(), static_cast<uint32_t>(apc_routine_ptr),

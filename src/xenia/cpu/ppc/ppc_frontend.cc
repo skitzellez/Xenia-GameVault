@@ -120,10 +120,11 @@ void LogLrHandler(PPCContext* ppc_context, void* arg0, void* arg1) {
   }
   XELOGI(
       "log_lr_at_instruction: lr={:08X} r3={:X} r4={:X} r5={:X} r6={:X} "
-      "r7={:X} r8={:X} backtrace:{}",
+      "r7={:X} r8={:X} r9={:X} r10={:X} r11={:X} backtrace:{}",
       uint32_t(ppc_context->lr), ppc_context->r[3], ppc_context->r[4],
       ppc_context->r[5], ppc_context->r[6], ppc_context->r[7],
-      ppc_context->r[8], GuestBacktrace(ppc_context));
+      ppc_context->r[8], ppc_context->r[9], ppc_context->r[10],
+      ppc_context->r[11], GuestBacktrace(ppc_context));
 }
 
 void SyscallHandler(PPCContext* ppc_context, void* arg0, void* arg1) {

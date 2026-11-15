@@ -196,7 +196,8 @@ void FileLogSink::WriteLine(const char* line, size_t size) {
   constexpr uint32_t kRepeatKeep = 20;
   // only log messages ("w> 00001AB0 ..."); blocks like the settings list or the module header stay whole
   bool prefixed = size > 12 && line[1] == '>' && line[2] == ' ';
-  if (!prefixed) {
+  // log_lr_at_instruction lines are asked for on purpose: each hit is written (only the size limit applies)
+  if (!prefixed || std::string_view(line, size).find("log_lr_at_instruction: lr") != std::string_view::npos) {
     if (written_ + size <= limit_) Put(line, size);
     return;
   }

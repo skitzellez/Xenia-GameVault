@@ -289,7 +289,10 @@ void UserModule::DumpImage() {
   if (!base || !size) {
     return;
   }
-  auto dump_name = fmt::format("{}.{:08X}.bin", name_, base);
+  // The app's own storage: a packaged app (Xbox) cannot write to its current directory.
+  auto dump_name = (kernel_state()->emulator()->storage_root() /
+                    fmt::format("{}.{:08X}.bin", name_, base))
+                       .string();
   auto dump_file = xe::filesystem::OpenFile(dump_name, "wb");
   if (!dump_file) {
     XELOGE("Failed to open {} for a module image dump", dump_name);
