@@ -8,6 +8,7 @@
 // window, LaunchPath; RelaunchTitle for the next game.
 
 #include <array>
+#include <cmath>
 #include <algorithm>
 #include <atomic>
 #include <cfloat>
@@ -61,6 +62,7 @@
 #include "xenia/kernel/xam/content_manager.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "third_party/imgui/imgui.h"
+#include "third_party/imgui/imgui_internal.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/immediate_drawer.h"
@@ -1084,6 +1086,7 @@ class GameMenu final : public ui::ImGuiDialog {
     if (ImGui::Button("Resume", button_)) {
       done_ = true;
     }
+    DrawSharpness(scale);
     if (ImGui::Button("Restart game", button_)) {
       CloseThen(actions_.restart);
     }
@@ -1118,6 +1121,38 @@ class GameMenu final : public ui::ImGuiDialog {
       CloseThen(actions_.leave);
     }
     Hint("B: resume.  Clearing the shader cache restarts the game.", scale);
+  }
+
+  // Game Vault: the FSR picture's sharpness (Game Vault's "Sharper picture" strength), changed live with
+  // left/right while the paused game shows around the menu. Only while FSR is on. For this session; Game
+  // Vault's own setting gives the start value.
+  void DrawSharpness(float scale) {
+    auto* graphics = emulator_->graphics_system();
+    ui::Presenter* presenter = graphics ? graphics->presenter() : nullptr;
+    if (!presenter) return;
+    ui::Presenter::GuestOutputPaintConfig paint = presenter->GetGuestOutputPaintConfigFromUIThread();
+    if (paint.GetEffect() != ui::Presenter::GuestOutputPaintConfig::Effect::kFsr) return;
+    int pct = int(std::lround(100.0f - paint.GetFsrSharpnessReduction() * 50.0f));
+    pct = std::min(100, std::max(0, pct));
+    const std::string label = fmt::format("Sharpness (FSR):  {}%     <  >###gv_sharpness", pct);
+    ImGui::Button(label.c_str(), button_);
+    if (ImGui::IsItemFocused() && frames_ > 10) {
+      // left/right belong to this row while it is selected (ImGui's own navigation would move away)
+      for (ImGuiKey k : {ImGuiKey_GamepadDpadLeft, ImGuiKey_GamepadDpadRight, ImGuiKey_GamepadLStickLeft,
+                         ImGuiKey_GamepadLStickRight}) {
+        ImGui::SetKeyOwner(k, ImGui::GetItemID());
+      }
+      int step = 0;
+      if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft) || ImGui::IsKeyPressed(ImGuiKey_GamepadLStickLeft)) step = -5;
+      if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight) || ImGui::IsKeyPressed(ImGuiKey_GamepadLStickRight)) step = 5;
+      if (step) {
+        pct = std::min(100, std::max(0, (pct / 5) * 5 + step));
+        paint.SetFsrSharpnessReduction((100 - pct) / 50.0f);
+        presenter->SetGuestOutputPaintConfigFromUIThread(paint);
+        XELOGI("Game Vault: sharpness changed in the menu to {}%", pct);
+      }
+      Hint("Left / right: change it and watch the game around the menu.", scale);
+    }
   }
 
   void DrawScale(float scale) {
