@@ -36,6 +36,8 @@
 
 // Game Vault: the resolution scale the start link asked for (scale=1..3), 0 = Xenia's own setting (gv_main.cc)
 int gv_requested_scale = 0;
+// Game Vault 0.16.1.7xx+: "Sharper picture (FSR)" is on (fsr=1): the picture is scaled to the screen with AMD FSR 1
+bool gv_requested_fsr = false;
 uint32_t gv_requested_title = 0;
 #include "xenia/base/logging.h"
 #include "xenia/config.h"
@@ -305,6 +307,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
       int disc_number = 0;
       bool show_fps = false;
       int scale = 0;
+      gv_requested_fsr = false;
       gv_requested_title = 0;
       for (const auto& argument : query) {
         arguments.emplace_back(winrt::to_string(argument.Name()),
@@ -328,6 +331,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } else if (argument.Name() == L"fps") {
           // Game Vault: its "Show frame rate" option is on
           show_fps = argument.Value() == L"1";
+        } else if (argument.Name() == L"fsr") {
+          gv_requested_fsr = argument.Value() == L"1";
         } else if (argument.Name() == L"scale") {
           // Game Vault 0.16.1.369+: the game's "Resolution scale" (Xbox 360 game settings)
           scale = _wtoi(argument.Value().c_str());

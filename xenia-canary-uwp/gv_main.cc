@@ -86,6 +86,7 @@ DEFINE_int32(gv_profile_ms, 0,
 DECLARE_int32(draw_resolution_scale_x);
 DECLARE_int32(draw_resolution_scale_y);
 extern uint32_t gv_requested_title;   // App.cpp: titleid= in the start link (Game Vault), 0 = not said
+extern bool gv_requested_fsr;   // App.cpp: fsr=1 in the start link (Game Vault's Sharper picture option)
 extern int gv_requested_scale;   // App.cpp: scale= in the start link (Game Vault), 0 = none
 
 DEFINE_bool(gv_savestate_test, false,
@@ -1488,6 +1489,15 @@ void GameVaultXeniaApp::SetupPresenter() {
   }
   window_->SetPresenter(presenter);
   presenter_painting_ = presenter;
+  if (gv_requested_fsr) {
+    // Game Vault's "Sharper picture (FSR)": AMD FSR 1 scales the game's picture to the screen (Xenia's own
+    // postprocess_scaling_and_sharpening = "fsr", which only the desktop settings window sets)
+    ui::Presenter::GuestOutputPaintConfig paint =
+        presenter->GetGuestOutputPaintConfigFromUIThread();
+    paint.SetEffect(ui::Presenter::GuestOutputPaintConfig::Effect::kFsr);
+    presenter->SetGuestOutputPaintConfigFromUIThread(paint);
+    XELOGI("Game Vault: Sharper picture (FSR) on");
+  }
   immediate_drawer_ = graphics->provider()->CreateImmediateDrawer();
   if (immediate_drawer_) {
     immediate_drawer_->SetPresenter(presenter);
