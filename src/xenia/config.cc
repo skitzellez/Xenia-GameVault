@@ -819,7 +819,12 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     // Spider-Man 4 (Radical's 2010 prototype, Prototype engine, title ID 565507EF): the whole city covered in dark
     // diagonal stripes; its shadows compare 24-bit float depth, so the depth must be converted exactly
     // (console check 2026-11-16: stripes gone, city, Spider-Man, cars and people drawn).
-    {"565507EF", "[GPU]\ndepth_float24_convert_in_pixel_shader = true\ndepth_float24_round = true\n"},
+    // Its far city (low-detail buildings drawn at the far limit with an EQUAL depth test, vertex shaders
+    // 8600CF524724E6AA and 868447C81D52EDC2) then covered the near city as a raised "slab" (the same engine's
+    // "corrupted draw distance", xenia-project game-compatibility 472); skipping its draws leaves the near city
+    // whole (console check 2026-11-17). The far skyline is missing until the EQUAL / far-depth emulation is fixed.
+    {"565507EF", "[GPU]\ndepth_float24_convert_in_pixel_shader = true\ndepth_float24_round = true\n"
+                 "[D3D12]\nd3d12_skip_vertex_shader = \"8600CF524724E6AA,868447C81D52EDC2\"\n"},
 };
 
 void ApplyBuiltInGameConfig(const std::string_view title_id) {

@@ -62,6 +62,10 @@ DEFINE_string(d3d12_skip_vertex_shader, "",
               "D3D12");
 // Game Vault: the same for pixel shaders, and a once-per-pair draw log, to find which draws break a picture
 // (Naughty Bear's island ground, 2026-11-01). Both read from the per-game config, so one build serves a bisect.
+DEFINE_string(gv_log_draw_vs, "",
+              "Game Vault debugging: hex hashes (comma-separated) of vertex shaders whose draw state is logged "
+              "(the first 4 draws of each, then every 2000th): depth range, depth test, clip planes. Empty = off.",
+              "D3D12");
 DEFINE_string(d3d12_skip_pixel_shader, "",
               "Game Vault debugging: hex hashes (comma-separated) of pixel shaders whose draws are skipped. "
               "Empty = off.",
@@ -83,6 +87,10 @@ DEFINE_string(gv_clear_on_ps, "", "Game Vault debugging: hex pixel shader hash; 
 DEFINE_bool(gv_readback_ignore_protect, false, "Game Vault debugging: read resolves back into committed guest memory even if it is not marked writable.", "D3D12");
 DEFINE_bool(gv_skip_depth_only_draws, false, "Game Vault debugging: skip depth-only (EDRAM mode depth) draws.", "D3D12");
 DEFINE_bool(gv_probe_memory, true, "Game Vault debugging: with the gv_seq_ps trigger, also save GPU memory probes.", "D3D12");
+DEFINE_string(gv_probe_after_ps, "",
+              "Game Vault debugging: \"<hex pixel shader hash>,<n>\": snapshot the bound colour target after the n-th "
+              "and (n+1)-th draws with that pixel shader (probe_after_ps_<k>.bin in LocalState). Empty = off.",
+              "D3D12");
 DEFINE_int32(gv_probe_draw_every, 0, "Game Vault debugging: during a sequence trace, snapshot the bound color target after every N-th colour draw (0 = off).", "D3D12");
 DEFINE_int32(gv_readback_full_max_kb, 512, "Game Vault: with readback_resolve = \"full\", only copies up to this size (KB) wait for the GPU; bigger ones take the fast path. 0 = all full.", "D3D12");
 DEFINE_bool(gv_drop_superseded_readbacks, false, "Game Vault: drop pending deferred read-backs fully covered by a newer one (did not matter for Naughty Bear; off).", "D3D12");
@@ -3086,6 +3094,29 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       std::find(gv_skip_vs.begin(), gv_skip_vs.end(), vertex_shader->ucode_data_hash()) != gv_skip_vs.end()) {
     return true;
   }
+  static const std::vector<uint64_t> gv_log_vs = GvParseHashList(cvars::gv_log_draw_vs);
+  if (!gv_log_vs.empty()) {
+    auto it = std::find(gv_log_vs.begin(), gv_log_vs.end(), vertex_shader->ucode_data_hash());
+    if (it != gv_log_vs.end()) {
+      static uint32_t gv_log_counts[64] = {};
+      uint32_t& n = gv_log_counts[(it - gv_log_vs.begin()) & 63];
+      if (n < 4 || n % 2000 == 0) {
+        auto f = [&](uint32_t reg) { return xe::memory::Reinterpret<float>(regs[reg]); };
+        XELOGI(
+            "GVDRAW vs={:016X} n={} vport xs={} xo={} ys={} yo={} zs={} zo={} vte={:08X} depthctl={:08X} "
+            "clipcntl={:08X} sumode={:08X} depthinfo={:08X} surf={:08X} modectl={:08X} "
+            "scissor={:08X}/{:08X} winoff={:08X}",
+            vertex_shader->ucode_data_hash(), n, f(XE_GPU_REG_PA_CL_VPORT_XSCALE), f(XE_GPU_REG_PA_CL_VPORT_XOFFSET),
+            f(XE_GPU_REG_PA_CL_VPORT_YSCALE), f(XE_GPU_REG_PA_CL_VPORT_YOFFSET), f(XE_GPU_REG_PA_CL_VPORT_ZSCALE),
+            f(XE_GPU_REG_PA_CL_VPORT_ZOFFSET), regs[XE_GPU_REG_PA_CL_VTE_CNTL], regs[XE_GPU_REG_RB_DEPTHCONTROL],
+            regs[XE_GPU_REG_PA_CL_CLIP_CNTL], regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL], regs[XE_GPU_REG_RB_DEPTH_INFO],
+            regs[XE_GPU_REG_RB_SURFACE_INFO], regs[XE_GPU_REG_RB_MODECONTROL],
+            regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL], regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR],
+            regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET]);
+      }
+      ++n;
+    }
+  }
   pipeline_cache_->AnalyzeShaderUcode(*vertex_shader);
 
   const bool memexport_used_vertex = vertex_shader->memexport_eM_written() != 0;
@@ -3871,6 +3902,25 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     if (gv_composite_probes++ < 2) {
       render_target_cache_->GvProbeBoundColor("depth_after_composite");
       render_target_cache_->GvProbeBoundColor("color_after_composite");
+    }
+  }
+  if (!cvars::gv_probe_after_ps.empty() && pixel_shader &&
+      render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
+    static uint64_t pa_hash = 0;
+    static uint32_t pa_at = 0, pa_seen = 0;
+    static bool pa_parsed = false;
+    if (!pa_parsed) {
+      pa_parsed = true;
+      unsigned long long h = 0;
+      std::sscanf(cvars::gv_probe_after_ps.c_str(), "%llx,%u", &h, &pa_at);
+      pa_hash = h;
+    }
+    if (pixel_shader->ucode_data_hash() == pa_hash) {
+      ++pa_seen;
+      if (pa_seen == pa_at || pa_seen == pa_at + 1) {
+        render_target_cache_->GvProbeBoundColor(fmt::format("probe_after_ps_{}", pa_seen - pa_at));
+        XELOGI("Game Vault: probed the colour target after draw {} with PS {:016X}", pa_seen, pa_hash);
+      }
     }
   }
   if (gv_seq_left && cvars::gv_probe_draw_every > 0 && pixel_shader &&
