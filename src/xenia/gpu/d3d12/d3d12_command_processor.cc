@@ -3568,6 +3568,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr && cvars::gv_pipeline_look_ahead &&
         gv_in_primary_ && !pipeline_cache_->GvFoundByLookAhead(pipeline_handle)) {
       // About to wait for this one: find the ones after it first, so they are built meanwhile.
+      pipeline_cache_->GvMarkLookedAhead(pipeline_handle);
       GvLookAhead();
     }
     if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr &&

@@ -122,6 +122,9 @@ class PipelineCache {
   uint32_t GvLookAheadFound() const { return gv_lookahead_found_; }
   // The pipeline was queued by a look-ahead (the commands after its draw have been read already).
   bool GvFoundByLookAhead(void* handle) const { return reinterpret_cast<const Pipeline*>(handle)->gv_lookahead; }
+  // A draw waiting for it started a look-ahead already (once per pipeline: one that fails to build is not looked
+  // past again for every draw that uses it).
+  void GvMarkLookedAhead(void* handle) { reinterpret_cast<Pipeline*>(handle)->gv_lookahead = true; }
   ID3D12PipelineState* GetD3D12PipelineByHandle(void* handle) const {
     return reinterpret_cast<const Pipeline*>(handle)->state.load(
         std::memory_order_acquire);
