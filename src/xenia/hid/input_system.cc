@@ -31,6 +31,9 @@
 #if XE_PLATFORM_WIN32 && !XE_PLATFORM_WINRT  // (no USB portal in the Xbox app)
 #include "xenia/hid/portal/hardware_portal.h"
 #endif  // XE_PLATFORM_WIN32
+#if XE_PLATFORM_WINRT  // Game Vault: the Skylanders portal without the toy
+#include "xenia/hid/portal/virtual_portal.h"
+#endif
 
 namespace xe {
 namespace hid {
@@ -54,6 +57,9 @@ InputSystem::InputSystem(xe::ui::Window* window) : window_(window) {
 #if XE_PLATFORM_WIN32 && !XE_PLATFORM_WINRT
   portal_ = std::make_unique<HardwarePortal>();
 #endif  // XE_PLATFORM_WIN32
+#if XE_PLATFORM_WINRT
+  portal_ = std::make_unique<VirtualPortal>();
+#endif
 }
 
 InputSystem::~InputSystem() = default;
