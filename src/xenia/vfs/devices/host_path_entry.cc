@@ -47,11 +47,40 @@ void HostPathEntry::ReleaseFile() {
   }
 }
 
+// Game Vault: where a file of a write-layer device lives in the layer (empty: no layer)
+static std::filesystem::path LayerPathOf(Device* device,
+                                         const std::string& guest_path) {
+  auto* host = dynamic_cast<HostPathDevice*>(device);
+  if (!host || host->write_layer().empty()) return {};
+  return host->write_layer() /
+         xe::to_path(xe::utf8::fix_path_separators(guest_path));
+}
+
 HostPathEntry* HostPathEntry::Create(Device* device, Entry* parent,
                                      const std::filesystem::path& full_path,
                                      xe::filesystem::FileInfo file_info) {
   auto path = xe::utf8::join_guest_paths(parent->path(),
                                          xe::path_to_utf8(file_info.name));
+  // (a file the game wrote before is taken from the write layer)
+  std::filesystem::path layer = LayerPathOf(device, path);
+  std::error_code layer_ec;
+  if (!layer.empty() &&
+      file_info.type == xe::filesystem::FileInfo::Type::kFile &&
+      std::filesystem::is_regular_file(layer, layer_ec)) {
+    if (auto info = xe::filesystem::GetInfo(layer)) {
+      file_info.total_size = info->total_size;
+      file_info.write_timestamp = info->write_timestamp;
+      auto entry = new HostPathEntry(device, parent, path, layer);
+      entry->create_timestamp_ = file_info.create_timestamp;
+      entry->access_timestamp_ = file_info.access_timestamp;
+      entry->write_timestamp_ = file_info.write_timestamp;
+      entry->attributes_ = kFileAttributeNormal;
+      entry->size_ = file_info.total_size;
+      entry->allocation_size_ =
+          xe::round_up(file_info.total_size, device->bytes_per_sector());
+      return entry;
+    }
+  }
   auto entry = new HostPathEntry(device, parent, path, full_path);
 
   entry->create_timestamp_ = file_info.create_timestamp;
@@ -77,6 +106,25 @@ X_STATUS HostPathEntry::Open(uint32_t desired_access, File** out_file) {
     XELOGE("Attempting to open file for write access on read-only device");
     return X_STATUS_ACCESS_DENIED;
   }
+  // Game Vault: a write to a game file not in the write layer yet: copy it there first, write the copy
+  if (desired_access & (FileAccess::kFileWriteData | FileAccess::kFileAppendData)) {
+    std::filesystem::path layer = LayerPathOf(device_, path());
+    if (!layer.empty() && host_path_ != layer) {
+      std::error_code ec;
+      std::filesystem::create_directories(layer.parent_path(), ec);
+      std::filesystem::copy_file(host_path_, layer,
+                                 std::filesystem::copy_options::overwrite_existing,
+                                 ec);
+      if (ec) {
+        XELOGE("Game Vault: write layer: could not copy {}: {}", path(),
+               ec.message());
+        return X_STATUS_ACCESS_DENIED;
+      }
+      XELOGI("Game Vault: write layer: {} is written in the console's copy",
+             path());
+      host_path_ = layer;
+    }
+  }
   auto file_handle =
       xe::filesystem::FileHandle::OpenExisting(host_path_, desired_access);
   if (!file_handle) {
@@ -96,6 +144,15 @@ std::unique_ptr<MappedMemory> HostPathEntry::OpenMapped(MappedMemory::Mode mode,
 std::unique_ptr<Entry> HostPathEntry::CreateEntryInternal(
     const std::string_view name, uint32_t attributes) {
   auto full_path = host_path_ / xe::to_path(name);
+  // Game Vault: a write-layer device makes new files and folders in the layer
+  std::filesystem::path layer =
+      LayerPathOf(device_, xe::utf8::join_guest_paths(path(), name));
+  if (!layer.empty()) {
+    std::error_code ec;
+    std::filesystem::create_directories(
+        (attributes & kFileAttributeDirectory) ? layer : layer.parent_path(), ec);
+    full_path = layer;
+  }
   if (attributes & kFileAttributeDirectory) {
     if (!std::filesystem::create_directories(full_path)) {
       return nullptr;
@@ -116,6 +173,19 @@ std::unique_ptr<Entry> HostPathEntry::CreateEntryInternal(
 }
 
 bool HostPathEntry::DeleteEntryInternal(Entry* entry) {
+  // Game Vault: a write-layer device never deletes the game's own files: only the layer's copy (an overwrite
+  // is delete + create, and the new file goes to the layer)
+  std::filesystem::path layer = LayerPathOf(
+      device_, xe::utf8::join_guest_paths(path(), entry->name()));
+  if (!layer.empty()) {
+    std::error_code ec;
+    if (entry->attributes() & kFileAttributeDirectory) {
+      std::filesystem::remove_all(layer, ec);
+    } else {
+      std::filesystem::remove(layer, ec);
+    }
+    return true;
+  }
   auto full_path = host_path_ / xe::to_path(entry->name());
   std::error_code ec;  // avoid exception on remove/remove_all failure
   if (entry->attributes() & kFileAttributeDirectory) {

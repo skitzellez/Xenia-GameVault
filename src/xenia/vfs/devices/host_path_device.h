@@ -40,6 +40,12 @@ class HostPathDevice : public Device {
 
   bool is_read_only() const override { return read_only_; }
 
+  // Game Vault: the write layer. A prototype played from a network share (or any read-only folder) writes into
+  // its own folder, as on a dev kit (Spider-Man 4 rewrites spiderman.rch at start): those files are copied here
+  // first and written here, the game's own files are never changed. Empty = none.
+  void set_write_layer(const std::filesystem::path& layer) { write_layer_ = layer; }
+  const std::filesystem::path& write_layer() const { return write_layer_; }
+
   bool supports_concurrent_io() const override { return true; }
 
   bool queues_all_requests() const override { return name_ == "STFS"; }
@@ -68,6 +74,7 @@ class HostPathDevice : public Device {
   std::unique_ptr<Entry> root_entry_;
   bool read_only_;
   bool collapse_content_packages_;
+  std::filesystem::path write_layer_;
 };
 
 }  // namespace vfs
