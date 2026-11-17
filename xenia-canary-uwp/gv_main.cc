@@ -1690,6 +1690,13 @@ void GameVaultXeniaApp::EmulatorThread() {
   xe::threading::set_name("Emulator");
   Profiler::ThreadEnter("Emulator");
 
+  // Game Vault: the game's own settings (its file in Game Vault's folder, else the built-in ones) are loaded
+  // again when its program loads, but some are read only once, while the graphics start (the depth settings
+  // Spider-Man 4's shadows need, 2026-11-16): Game Vault names the game in the link, so they are loaded now too.
+  if (gv_requested_title) {
+    config::LoadGameConfig(fmt::format("{:08X}", gv_requested_title), false);
+    XELOGI("Game Vault: settings for {:08X} loaded before the graphics start", gv_requested_title);
+  }
   GvApplyGameScale();
   X_STATUS result =
       emulator_->Setup(window_.get(), imgui_drawer_.get(), true,
