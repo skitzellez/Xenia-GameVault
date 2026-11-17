@@ -316,6 +316,11 @@ class D3D12CommandProcessor final : public CommandProcessor {
                      const uint32_t* host_address,
                      uint32_t dword_count) override;
 
+  // Game Vault: a draw waits for a pipeline that has to be built. Before it waits, the commands the game has queued
+  // after it are read through without drawing (GvDryDraw), so the pipelines the next draws need are known and get
+  // built at the same time on the other processors, instead of one after another as each draw comes up.
+  void GvLookAhead();
+  bool GvDryDraw(xenos::PrimitiveType primitive_type, uint32_t index_count);
   bool IssueDraw(xenos::PrimitiveType primitive_type, uint32_t index_count,
                  IndexBufferInfo* index_buffer_info,
                  bool major_mode_explicit) override;
@@ -859,6 +864,11 @@ class D3D12CommandProcessor final : public CommandProcessor {
     D3D12_GPU_VIRTUAL_ADDRESS address;
     bool up_to_date;
   };
+  // Game Vault look-ahead state (GvLookAhead).
+  uint32_t gv_dry_draws_ = 0;
+  std::chrono::steady_clock::time_point gv_dry_deadline_;
+  uint32_t gv_lookahead_runs_ = 0;
+  uint64_t gv_lookahead_total_ = 0;
   ConstantBufferBinding cbuffer_binding_system_;
   ConstantBufferBinding cbuffer_binding_float_vertex_;
   ConstantBufferBinding cbuffer_binding_float_pixel_;

@@ -569,6 +569,9 @@ void CommandProcessor::LogRegisterSets(uint32_t base_register_index,
 
 void CommandProcessor::HandleSpecialRegisterWrite(uint32_t index,
                                                   uint32_t value) {
+  if (gv_dry_) {
+    return;  // Game Vault look-ahead: only the register value is kept (and put back afterwards)
+  }
   RegisterFile& regs = *register_file_;
   // Scratch register writeback.
   if (index >= XE_GPU_REG_SCRATCH_REG0 && index <= XE_GPU_REG_SCRATCH_REG7) {

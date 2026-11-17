@@ -1059,6 +1059,154 @@ uint32_t RenderTargetCache::GetLastUpdateBoundRenderTargets(
   return rts_used;
 }
 
+void RenderTargetCache::GvDryBegin() {
+  gv_dry_acc_bits_ = 0;
+  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+    const RenderTarget* render_target = last_update_accumulated_render_targets_[i];
+    gv_dry_acc_keys_[i] = render_target ? render_target->key().key : 0;
+    if (render_target) {
+      gv_dry_acc_bits_ |= uint32_t(1) << i;
+    }
+  }
+  gv_dry_acc_valid_ = are_accumulated_render_targets_valid_;
+}
+
+uint32_t RenderTargetCache::GvDryPredict(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
+                                         uint32_t normalized_color_mask, uint32_t* depth_and_color_formats_out) {
+  // The same choices as Update (the parts that decide which render targets get bound and their keys).
+  std::memset(depth_and_color_formats_out, 0, sizeof(uint32_t) * (1 + xenos::kMaxColorRenderTargets));
+  if (GetPath() != Path::kHostRenderTargets) {
+    return 0;
+  }
+  const RegisterFile& regs = register_file();
+  auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+  xenos::MsaaSamples msaa_samples = rb_surface_info.msaa_samples;
+  if (msaa_samples > xenos::MsaaSamples::k4X) {
+    return 0;
+  }
+  uint32_t msaa_samples_x_log2 = uint32_t(msaa_samples >= xenos::MsaaSamples::k4X);
+  uint32_t pitch_pixels = rb_surface_info.surface_pitch;
+  if (!pitch_pixels) {
+    is_rasterization_done = false;
+  }
+  uint32_t pitch_tiles_at_32bpp =
+      ((pitch_pixels << msaa_samples_x_log2) + (xenos::kEdramTileWidthSamples - 1)) / xenos::kEdramTileWidthSamples;
+  bool scale_native = IsScaleNativeForPitch(pitch_tiles_at_32bpp, msaa_samples);
+
+  uint32_t used_bits = 0;
+  uint32_t edram_bases[1 + xenos::kMaxColorRenderTargets] = {};
+  uint32_t resource_formats[1 + xenos::kMaxColorRenderTargets] = {};
+  if (is_rasterization_done) {
+    if (normalized_depth_control.z_enable || normalized_depth_control.stencil_enable) {
+      used_bits |= 1;
+      auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+      edram_bases[0] = rb_depth_info.depth_base;
+      resource_formats[0] = uint32_t(rb_depth_info.depth_format);
+    }
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      if (!(normalized_color_mask & (uint32_t(0b1111) << (4 * i)))) {
+        continue;
+      }
+      auto color_info = regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[i]);
+      used_bits |= uint32_t(1) << (1 + i);
+      edram_bases[1 + i] = color_info.color_base;
+      resource_formats[1 + i] =
+          uint32_t(GetColorResourceFormat(xenos::GetStorageColorFormat(color_info.color_format)));
+    }
+  }
+  // Colliding EDRAM bases: the same render targets are dropped as in Update.
+  uint32_t rts_remaining = used_bits & ~uint32_t(1);
+  uint32_t rt_index;
+  while (xe::bit_scan_forward(rts_remaining, &rt_index)) {
+    rts_remaining &= ~(uint32_t(1) << rt_index);
+    uint32_t rts_other_remaining = used_bits & (~((uint32_t(1) << (rt_index + 1)) - 1) | uint32_t(1));
+    uint32_t rt_other_index;
+    while (xe::bit_scan_forward(rts_other_remaining, &rt_other_index)) {
+      rts_other_remaining &= ~(uint32_t(1) << rt_other_index);
+      if (edram_bases[rt_other_index] == edram_bases[rt_index]) {
+        used_bits &= ~(uint32_t(1) << rt_other_index);
+      }
+    }
+  }
+  uint32_t used_keys[1 + xenos::kMaxColorRenderTargets] = {};
+  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+    if (!(used_bits & (uint32_t(1) << i))) {
+      continue;
+    }
+    RenderTargetKey key;
+    key.base_tiles = edram_bases[i];
+    key.pitch_tiles_at_32bpp = pitch_tiles_at_32bpp;
+    key.msaa_samples = msaa_samples;
+    key.is_depth = i == 0;
+    key.resource_format = resource_formats[i];
+    key.scale_native = uint32_t(scale_native);
+    used_keys[i] = key.key;
+  }
+
+  auto compatible = [&](uint32_t key_value) {
+    RenderTargetKey key;
+    key.key = key_value;
+    return key.pitch_tiles_at_32bpp == pitch_tiles_at_32bpp && key.msaa_samples == msaa_samples;
+  };
+  if (!used_bits) {
+    // Nothing bound by this draw: the earlier bindings stay if they still fit the surface.
+    if (gv_dry_acc_valid_) {
+      for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+        if ((gv_dry_acc_bits_ & (uint32_t(1) << i)) && !compatible(gv_dry_acc_keys_[i])) {
+          gv_dry_acc_valid_ = false;
+          break;
+        }
+      }
+    }
+    if (!gv_dry_acc_valid_) {
+      gv_dry_acc_bits_ = 0;
+    }
+  } else {
+    if (gv_dry_acc_valid_) {
+      for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+        bool cur = (used_bits >> i) & 1, acc = (gv_dry_acc_bits_ >> i) & 1;
+        if (!acc) {
+          if (cur) {
+            gv_dry_acc_valid_ = false;
+            break;
+          }
+          continue;
+        }
+        if (cur ? used_keys[i] != gv_dry_acc_keys_[i] : !compatible(gv_dry_acc_keys_[i])) {
+          gv_dry_acc_valid_ = false;
+          break;
+        }
+      }
+      if (gv_dry_acc_valid_) {
+        for (uint32_t i = 1; i < 1 + xenos::kMaxColorRenderTargets && gv_dry_acc_valid_; ++i) {
+          if (!((gv_dry_acc_bits_ >> i) & 1)) {
+            continue;
+          }
+          for (uint32_t j = 0; j < i; ++j) {
+            if (((gv_dry_acc_bits_ >> j) & 1) && gv_dry_acc_keys_[j] == gv_dry_acc_keys_[i]) {
+              gv_dry_acc_valid_ = false;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (!gv_dry_acc_valid_) {
+      std::memcpy(gv_dry_acc_keys_, used_keys, sizeof(gv_dry_acc_keys_));
+      gv_dry_acc_bits_ = used_bits;
+      gv_dry_acc_valid_ = true;
+    }
+  }
+  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+    if ((gv_dry_acc_bits_ >> i) & 1) {
+      RenderTargetKey key;
+      key.key = gv_dry_acc_keys_[i];
+      depth_and_color_formats_out[i] = key.resource_format;
+    }
+  }
+  return gv_dry_acc_bits_;
+}
+
 uint32_t RenderTargetCache::GetRenderTargetHeight(
     uint32_t pitch_tiles_at_32bpp, xenos::MsaaSamples msaa_samples) const {
   if (!pitch_tiles_at_32bpp) {

@@ -22,7 +22,11 @@ void COMMAND_PROCESSOR::ExecuteIndirectBuffer(uint32_t ptr,
     // chiplets l3
     reader_.BeginPrefetchedRead<swcache::PrefetchTag::Level2>(
         COMMAND_PROCESSOR::GetCurrentRingReadCount());
+    gv_reader_stack_.push_back(&old_reader);
     do {
+      if (gv_dry_stop_) {
+        break;  // Game Vault look-ahead has read far enough
+      }
       if (COMMAND_PROCESSOR::ExecutePacket()) {
         continue;
       } else {
@@ -32,6 +36,7 @@ void COMMAND_PROCESSOR::ExecuteIndirectBuffer(uint32_t ptr,
         break;
       }
     } while (reader_.read_count());
+    gv_reader_stack_.pop_back();
 
     trace_writer_.WriteIndirectBufferEnd();
     reader_ = old_reader;
@@ -418,6 +423,29 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
     }
 
     bool result = false;
+    if (gv_dry_) {
+      // Game Vault look-ahead: packets that act outside the registers are passed over.
+      switch (opcode) {
+        case PM4_XE_SWAP:
+          gv_dry_stop_ = true;  // the end of the frame is far enough
+          [[fallthrough]];
+        case PM4_ME_INIT:
+        case PM4_INTERRUPT:
+        case PM4_WAIT_REG_MEM:
+        case PM4_REG_TO_MEM:
+        case PM4_MEM_WRITE:
+        case PM4_COND_WRITE:
+        case PM4_EVENT_WRITE:
+        case PM4_EVENT_WRITE_SHD:
+        case PM4_EVENT_WRITE_EXT:
+        case PM4_EVENT_WRITE_ZPD:
+        case PM4_VIZ_QUERY:
+          reader_.AdvanceRead(count * sizeof(uint32_t));
+          return true;
+        default:
+          break;
+      }
+    }
     switch (opcode) {
       case PM4_ME_INIT:
         result = COMMAND_PROCESSOR::ExecutePacketType3_ME_INIT(packet, count);
@@ -1453,6 +1481,8 @@ uint32_t COMMAND_PROCESSOR::ExecutePrimaryBuffer(uint32_t read_index,
   // chiplets l3
   reader_.BeginPrefetchedRead<swcache::PrefetchTag::Level2>(
       GetCurrentRingReadCount());
+  gv_in_primary_ = true;
+  gv_reader_stack_.clear();
   do {
     if (!COMMAND_PROCESSOR::ExecutePacket()) {
       // This probably should be fatal - but we're going to continue anyways.
@@ -1471,6 +1501,7 @@ uint32_t COMMAND_PROCESSOR::ExecutePrimaryBuffer(uint32_t read_index,
     }
   } while (reader_.read_count());
 
+  gv_in_primary_ = false;
   COMMAND_PROCESSOR::OnPrimaryBufferEnd();
 
   trace_writer_.WritePrimaryBufferEnd();

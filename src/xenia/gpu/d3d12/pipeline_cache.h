@@ -114,6 +114,14 @@ class PipelineCache {
   // Game Vault: a draw needs this pipeline now. Builds it on this thread (the GPU thread), or waits for the creation
   // thread already building it. False if there is still no pipeline (failed, or the option is off).
   bool GvBuildPipelineNow(void* handle);
+  // Look-ahead (D3D12CommandProcessor::GvLookAhead): while on, ConfigurePipeline only queues new pipelines (at the
+  // front, every creation thread working on them) and changes nothing else. End returns how many it queued.
+  void GvLookAheadBegin();
+  uint32_t GvLookAheadEnd();
+  bool GvLookAheadOn() const { return gv_lookahead_on_; }
+  uint32_t GvLookAheadFound() const { return gv_lookahead_found_; }
+  // The pipeline was queued by a look-ahead (the commands after its draw have been read already).
+  bool GvFoundByLookAhead(void* handle) const { return reinterpret_cast<const Pipeline*>(handle)->gv_lookahead; }
   ID3D12PipelineState* GetD3D12PipelineByHandle(void* handle) const {
     return reinterpret_cast<const Pipeline*>(handle)->state.load(
         std::memory_order_acquire);
@@ -405,6 +413,10 @@ class PipelineCache {
     // Game Vault: the game has drawn with it, now or in an earlier session (the title's .gvhot list). Those are built
     // first at a title's start.
     bool gv_hot{false};
+    // Game Vault look-ahead: queued for a coming draw; written to the title's storage only once a draw really uses
+    // it (a guess that never comes true is not built again at the next start).
+    bool gv_lookahead{false};
+    bool gv_store_pending{false};
     bool gv_used{false};
   };
 
@@ -496,6 +508,10 @@ class PipelineCache {
   std::vector<Pipeline*> gv_hot_by_order_;
   // Pipelines the game is likely to want next (under creation_request_lock_); they are in the queue as well.
   std::deque<Pipeline*> gv_next_up_;
+  bool gv_lookahead_on_ = false;
+  uint32_t gv_lookahead_found_ = 0;
+  // Look-ahead pipelines are waiting in gv_next_up_ (every creation thread takes part; under creation_request_lock_).
+  bool gv_lookahead_waiting_ = false;
   // Until this time (ms) all creation threads work: the game is waiting for pipelines anyway.
   std::atomic<int64_t> gv_boost_until_ms_{0};
   void GvHelpWithStall(Pipeline* pipeline);
