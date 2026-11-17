@@ -324,6 +324,13 @@ void PipelineCache::InitializeShaderStorage(
 
   // Game Vault: the pipelines this title has really drawn with, in the order it first did.
   gv_hot_path_ = cache_root / fmt::format("{:08X}.gvhot", title_id);
+  gv_pso_dir_.clear();
+  if (std::filesystem::exists(cache_root / "gv_pso_on.txt")) {
+    gv_pso_dir_ = cache_root / "gv_pso";
+    std::error_code gv_pso_ec;
+    std::filesystem::create_directories(gv_pso_dir_, gv_pso_ec);
+    XELOGI("Game Vault: pipeline timing probe on, {}", xe::path_to_utf8(gv_pso_dir_));
+  }
   std::unordered_map<uint64_t, uint32_t> gv_hot_list;
   {
     std::ifstream hot_file(gv_hot_path_);
@@ -2980,6 +2987,49 @@ void PipelineCache::EnsurePipelineShadersTranslated(
   }
 }
 
+void PipelineCache::GvPsoLog(
+    const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc,
+    const PipelineRuntimeDescription& runtime_description, double ms,
+    HRESULT result) {
+  static std::mutex gv_pso_mutex;
+  static std::unordered_set<uint64_t> gv_pso_saved;
+  auto save = [&](const char* kind, const D3D12_SHADER_BYTECODE& code) -> uint64_t {
+    if (!code.pShaderBytecode || !code.BytecodeLength) {
+      return 0;
+    }
+    uint64_t hash = XXH3_64bits(code.pShaderBytecode, code.BytecodeLength);
+    if (gv_pso_saved.insert(hash).second) {
+      std::ofstream out(gv_pso_dir_ / fmt::format("{:016X}.{}.dxbc", hash, kind),
+                        std::ios::binary);
+      out.write(static_cast<const char*>(code.pShaderBytecode),
+                std::streamsize(code.BytecodeLength));
+    }
+    return hash;
+  };
+  std::lock_guard<std::mutex> lock(gv_pso_mutex);
+  uint64_t vs = save("vs", desc.VS), ps = save("ps", desc.PS),
+           gs = save("gs", desc.GS), hs = save("hs", desc.HS),
+           ds = save("ds", desc.DS);
+  std::ofstream log(gv_pso_dir_ / "pso.log", std::ios::app);
+  // ms result | vs ps gs hs ds hashes | sizes | guest VS/PS ucode | topology rts samples
+  log << fmt::format(
+      "{:.1f} {:08X} vs={:016X} ps={:016X} gs={:016X} hs={:016X} ds={:016X} "
+      "vsb={} psb={} gsb={} hsb={} dsb={} gvs={:016X} gps={:016X} topo={} "
+      "rt={} msaa={} thread={}\n",
+      ms, uint32_t(result), vs, ps, gs, hs, ds, desc.VS.BytecodeLength,
+      desc.PS.BytecodeLength, desc.GS.BytecodeLength, desc.HS.BytecodeLength,
+      desc.DS.BytecodeLength,
+      runtime_description.vertex_shader
+          ? runtime_description.vertex_shader->shader().ucode_data_hash()
+          : 0,
+      runtime_description.pixel_shader
+          ? runtime_description.pixel_shader->shader().ucode_data_hash()
+          : 0,
+      uint32_t(desc.PrimitiveTopologyType), desc.NumRenderTargets,
+      desc.SampleDesc.Count,
+      std::hash<std::thread::id>()(std::this_thread::get_id()) % 1000);
+}
+
 ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
     const PipelineRuntimeDescription& runtime_description) {
   const PipelineDescription& description = runtime_description.description;
@@ -3438,8 +3488,15 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   // Create the D3D12 pipeline state object.
   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
   ID3D12PipelineState* state;
+  uint64_t gv_pso_start = xe::Clock::QueryHostTickCount();
   HRESULT create_result =
       device->CreateGraphicsPipelineState(&state_desc, IID_PPV_ARGS(&state));
+  if (!gv_pso_dir_.empty()) {
+    GvPsoLog(state_desc, runtime_description,
+             double(xe::Clock::QueryHostTickCount() - gv_pso_start) * 1000.0 /
+                 double(xe::Clock::QueryHostTickFrequency()),
+             create_result);
+  }
   if (FAILED(create_result)) {
     // Game Vault: why (GTA IV on the Xbox failed the same 3 pipelines on every
     // console, then lost the device): the result, whether the device was

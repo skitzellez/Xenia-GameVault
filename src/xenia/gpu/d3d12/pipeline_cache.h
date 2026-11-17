@@ -500,6 +500,12 @@ class PipelineCache {
   std::atomic<int64_t> gv_boost_until_ms_{0};
   void GvHelpWithStall(Pipeline* pipeline);
   std::filesystem::path gv_hot_path_;
+  // Game Vault test probe (only with gv_pso_on.txt in the cache folder): how long the driver takes for each
+  // pipeline, with sizes, written to gv_pso\pso.log, and every translated shader saved once in gv_pso\.
+  std::filesystem::path gv_pso_dir_;
+  void GvPsoLog(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc,
+                const PipelineRuntimeDescription& runtime_description,
+                double ms, HRESULT result);
   void GvNoteUsed(Pipeline* pipeline, uint64_t hash);
 };
 inline bool PipelineCache::PipelineDescription::operator==(
