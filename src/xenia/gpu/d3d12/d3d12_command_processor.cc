@@ -62,6 +62,10 @@ DEFINE_string(d3d12_skip_vertex_shader, "",
               "D3D12");
 // Game Vault: the same for pixel shaders, and a once-per-pair draw log, to find which draws break a picture
 // (Naughty Bear's island ground, 2026-11-01). Both read from the per-game config, so one build serves a bisect.
+DEFINE_string(gv_log_draw_vs, "",
+              "Game Vault debugging: hex hashes (comma-separated) of vertex shaders whose draw state is logged "
+              "(the first 4 draws of each, then every 2000th): depth range, depth test, clip planes. Empty = off.",
+              "D3D12");
 DEFINE_string(d3d12_skip_pixel_shader, "",
               "Game Vault debugging: hex hashes (comma-separated) of pixel shaders whose draws are skipped. "
               "Empty = off.",
@@ -83,6 +87,10 @@ DEFINE_string(gv_clear_on_ps, "", "Game Vault debugging: hex pixel shader hash; 
 DEFINE_bool(gv_readback_ignore_protect, false, "Game Vault debugging: read resolves back into committed guest memory even if it is not marked writable.", "D3D12");
 DEFINE_bool(gv_skip_depth_only_draws, false, "Game Vault debugging: skip depth-only (EDRAM mode depth) draws.", "D3D12");
 DEFINE_bool(gv_probe_memory, true, "Game Vault debugging: with the gv_seq_ps trigger, also save GPU memory probes.", "D3D12");
+DEFINE_string(gv_probe_after_ps, "",
+              "Game Vault debugging: \"<hex pixel shader hash>,<n>\": snapshot the bound colour target after the n-th "
+              "and (n+1)-th draws with that pixel shader (probe_after_ps_<k>.bin in LocalState). Empty = off.",
+              "D3D12");
 DEFINE_int32(gv_probe_draw_every, 0, "Game Vault debugging: during a sequence trace, snapshot the bound color target after every N-th colour draw (0 = off).", "D3D12");
 DEFINE_int32(gv_readback_full_max_kb, 512, "Game Vault: with readback_resolve = \"full\", only copies up to this size (KB) wait for the GPU; bigger ones take the fast path. 0 = all full.", "D3D12");
 DEFINE_bool(gv_drop_superseded_readbacks, false, "Game Vault: drop pending deferred read-backs fully covered by a newer one (did not matter for Naughty Bear; off).", "D3D12");
@@ -100,6 +108,11 @@ DEFINE_bool(d3d12_submit_on_primary_buffer_end, !XE_PLATFORM_WINRT,
             "Off by default on UWP, where each submission is costly.",
             "D3D12");
 UPDATE_from_bool(d3d12_submit_on_primary_buffer_end, 2026, 10, 27, 15, true);
+DEFINE_bool(gv_pipeline_look_ahead, true,
+            "Game Vault: when a draw has to wait for a new pipeline, read ahead in the game's queued commands and "
+            "build the pipelines the coming draws need at the same time on the other processors (shorter loads and "
+            "fewer stalls the first time a game shows something).",
+            "D3D12");
 
 DEFINE_bool(gv_gpu_timing, false,
             "Game Vault testing: time every draw and copy on the GPU, and log "
@@ -3044,10 +3057,179 @@ void D3D12CommandProcessor::GvProbeQueue(const std::string& name, uint32_t base,
   gv_probes.push_back({buffer, size, GetCurrentSubmission(), name});
 }
 
+bool D3D12CommandProcessor::GvDryDraw(xenos::PrimitiveType primitive_type, uint32_t index_count) {
+  // The parts of IssueDraw that decide the pipeline, and nothing else: no render target update (no transfers), no
+  // binding, no drawing. Ends with ConfigurePipeline in look-ahead mode, which only queues a new pipeline.
+  const RegisterFile& regs = *register_file_;
+  if (++gv_dry_draws_ > 20000 || std::chrono::steady_clock::now() > gv_dry_deadline_ ||
+      pipeline_cache_->GvLookAheadFound() >= 96) {
+    gv_dry_stop_ = true;
+    return true;
+  }
+  xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+  if (edram_mode == xenos::EdramMode::kCopy) {
+    return true;
+  }
+  if (cvars::gv_skip_depth_only_draws && edram_mode == xenos::EdramMode::kDepthOnly) {
+    return true;
+  }
+  if (regs.Get<reg::RB_SURFACE_INFO>().surface_pitch == 0) {
+    return true;
+  }
+  auto vertex_shader = static_cast<D3D12Shader*>(active_vertex_shader());
+  if (!vertex_shader) {
+    return true;
+  }
+  static const std::vector<uint64_t> gv_skip_vs = GvParseHashList(cvars::d3d12_skip_vertex_shader);
+  static const std::vector<uint64_t> gv_skip_ps = GvParseHashList(cvars::d3d12_skip_pixel_shader);
+  if (!gv_skip_vs.empty() &&
+      std::find(gv_skip_vs.begin(), gv_skip_vs.end(), vertex_shader->ucode_data_hash()) != gv_skip_vs.end()) {
+    return true;
+  }
+  pipeline_cache_->AnalyzeShaderUcode(*vertex_shader);
+  const bool memexport_used_vertex = vertex_shader->memexport_eM_written() != 0;
+  bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
+  bool is_rasterization_done = draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal);
+  D3D12Shader* pixel_shader = nullptr;
+  if (is_rasterization_done) {
+    if (edram_mode == xenos::EdramMode::kColorDepth) {
+      pixel_shader = static_cast<D3D12Shader*>(active_pixel_shader());
+      if (pixel_shader) {
+        pipeline_cache_->AnalyzeShaderUcode(*pixel_shader);
+        if (!draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs)) {
+          pixel_shader = nullptr;
+        }
+      }
+    }
+  } else if (!memexport_used_vertex) {
+    return true;
+  }
+  if (pixel_shader && !gv_skip_ps.empty() &&
+      std::find(gv_skip_ps.begin(), gv_skip_ps.end(), pixel_shader->ucode_data_hash()) != gv_skip_ps.end()) {
+    return true;
+  }
+  PrimitiveProcessor::ProcessingResult primitive_processing_result;
+  if (!primitive_processor_->Process(primitive_processing_result) ||
+      !primitive_processing_result.host_draw_vertex_count) {
+    return true;
+  }
+  reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
+  uint32_t normalized_color_mask =
+      pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets()) : 0;
+  draw_util::HostDepthPolygonOffset host_depth_polygon_offset;
+  bool apply_host_depth_polygon_offset =
+      pixel_shader && !pixel_shader->writes_depth() &&
+      render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets &&
+      draw_util::GetHostDepthPolygonOffsetIfNeeded(regs, primitive_polygonal, normalized_depth_control,
+                                                   normalized_color_mask, host_depth_polygon_offset);
+  uint32_t ps_param_gen_pos = UINT32_MAX;
+  uint32_t interpolator_mask =
+      pixel_shader ? (vertex_shader->writes_interpolators() &
+                      pixel_shader->GetInterpolatorInputMask(regs.Get<reg::SQ_PROGRAM_CNTL>(),
+                                                             regs.Get<reg::SQ_CONTEXT_MISC>(), ps_param_gen_pos))
+                   : 0;
+  DxbcShaderTranslator::Modification vertex_shader_modification =
+      pipeline_cache_->GetCurrentVertexShaderModification(
+          *vertex_shader, primitive_processing_result.host_vertex_shader_type, interpolator_mask);
+  DxbcShaderTranslator::Modification pixel_shader_modification =
+      pixel_shader ? pipeline_cache_->GetCurrentPixelShaderModification(*pixel_shader, interpolator_mask,
+                                                                         ps_param_gen_pos, normalized_depth_control,
+                                                                         apply_host_depth_polygon_offset)
+                   : DxbcShaderTranslator::Modification(0);
+  uint32_t formats[1 + xenos::kMaxColorRenderTargets];
+  uint32_t bits = render_target_cache_->GvDryPredict(is_rasterization_done, normalized_depth_control,
+                                                     normalized_color_mask, formats);
+  auto* vertex_shader_translation = static_cast<D3D12Shader::D3D12Translation*>(
+      vertex_shader->GetOrCreateTranslation(vertex_shader_modification.value));
+  auto* pixel_shader_translation =
+      pixel_shader ? static_cast<D3D12Shader::D3D12Translation*>(
+                         pixel_shader->GetOrCreateTranslation(pixel_shader_modification.value))
+                   : nullptr;
+  void* pipeline_handle;
+  ID3D12RootSignature* root_signature;
+  pipeline_cache_->ConfigurePipeline(vertex_shader_translation, pixel_shader_translation, primitive_processing_result,
+                                     normalized_depth_control, normalized_color_mask,
+                                     apply_host_depth_polygon_offset, bits, formats, &pipeline_handle,
+                                     &root_signature);
+  return true;
+}
+
+void D3D12CommandProcessor::GvLookAhead() {
+  const auto t0 = std::chrono::steady_clock::now();
+  // What the look-ahead changes, put back after it.
+  static std::vector<uint32_t> saved_registers;
+  saved_registers.assign(std::begin(register_file_->values), std::end(register_file_->values));
+  const RingBuffer saved_reader = reader_;
+  Shader* const saved_vertex_shader = active_vertex_shader_;
+  Shader* const saved_pixel_shader = active_pixel_shader_;
+  const uint64_t saved_bin_select = bin_select_, saved_bin_mask = bin_mask_;
+  // This buffer first, then the ones it was called from, down to the main ring (as far as the game has written).
+  std::vector<RingBuffer> levels;
+  levels.push_back(reader_);
+  for (size_t i = gv_reader_stack_.size(); i-- > 0;) {
+    levels.push_back(*gv_reader_stack_[i]);
+  }
+  const uint32_t write_index = write_ptr_index_.load();
+  if (write_index != 0xBAADF00D && write_index * sizeof(uint32_t) < levels.back().capacity()) {
+    levels.back().set_write_offset(write_index * sizeof(uint32_t));
+  }
+  const size_t stack_size = gv_reader_stack_.size();
+
+  render_target_cache_->GvDryBegin();
+  pipeline_cache_->GvLookAheadBegin();
+  gv_dry_ = true;
+  gv_dry_stop_ = false;
+  gv_dry_draws_ = 0;
+  gv_dry_deadline_ = t0 + std::chrono::milliseconds(25);
+  uint32_t packets = 0;
+  for (RingBuffer& level : levels) {
+    reader_ = level;
+    while (!gv_dry_stop_ && reader_.read_count()) {
+      if (!ExecutePacket() || ++packets > 400000) {
+        gv_dry_stop_ = true;
+      }
+    }
+    if (gv_dry_stop_) {
+      break;
+    }
+  }
+  gv_dry_ = false;
+  gv_dry_stop_ = false;
+  const uint32_t found = pipeline_cache_->GvLookAheadEnd();
+
+  gv_reader_stack_.resize(stack_size);
+  reader_ = saved_reader;
+  std::memcpy(register_file_->values, saved_registers.data(), sizeof(register_file_->values));
+  active_vertex_shader_ = saved_vertex_shader;
+  active_pixel_shader_ = saved_pixel_shader;
+  bin_select_ = saved_bin_select;
+  bin_mask_ = saved_bin_mask;
+  // Everything taken from the registers is looked at again.
+  cbuffer_binding_system_.up_to_date = false;
+  cbuffer_binding_float_vertex_.up_to_date = false;
+  cbuffer_binding_float_pixel_.up_to_date = false;
+  cbuffer_binding_bool_loop_.up_to_date = false;
+  cbuffer_binding_fetch_.up_to_date = false;
+  texture_cache_->TextureFetchConstantsWritten(0, 31);
+
+  gv_lookahead_runs_++;
+  gv_lookahead_total_ += found;
+  static uint32_t logged = 0;
+  if (logged < 300) {
+    ++logged;
+    XELOGI("Game Vault: look-ahead {}: {} new pipelines for the coming draws ({} draws, {} packets read, {} us)",
+           gv_lookahead_runs_, found, gv_dry_draws_, packets,
+           std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+  }
+}
+
 bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
+  if (gv_dry_) {
+    return GvDryDraw(primitive_type, index_count);
+  }
   uint64_t gv_t = __rdtsc();
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
@@ -3085,6 +3267,29 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   if (!gv_skip_vs.empty() &&
       std::find(gv_skip_vs.begin(), gv_skip_vs.end(), vertex_shader->ucode_data_hash()) != gv_skip_vs.end()) {
     return true;
+  }
+  static const std::vector<uint64_t> gv_log_vs = GvParseHashList(cvars::gv_log_draw_vs);
+  if (!gv_log_vs.empty()) {
+    auto it = std::find(gv_log_vs.begin(), gv_log_vs.end(), vertex_shader->ucode_data_hash());
+    if (it != gv_log_vs.end()) {
+      static uint32_t gv_log_counts[64] = {};
+      uint32_t& n = gv_log_counts[(it - gv_log_vs.begin()) & 63];
+      if (n < 4 || n % 2000 == 0) {
+        auto f = [&](uint32_t reg) { return xe::memory::Reinterpret<float>(regs[reg]); };
+        XELOGI(
+            "GVDRAW vs={:016X} n={} vport xs={} xo={} ys={} yo={} zs={} zo={} vte={:08X} depthctl={:08X} "
+            "clipcntl={:08X} sumode={:08X} depthinfo={:08X} surf={:08X} modectl={:08X} "
+            "scissor={:08X}/{:08X} winoff={:08X}",
+            vertex_shader->ucode_data_hash(), n, f(XE_GPU_REG_PA_CL_VPORT_XSCALE), f(XE_GPU_REG_PA_CL_VPORT_XOFFSET),
+            f(XE_GPU_REG_PA_CL_VPORT_YSCALE), f(XE_GPU_REG_PA_CL_VPORT_YOFFSET), f(XE_GPU_REG_PA_CL_VPORT_ZSCALE),
+            f(XE_GPU_REG_PA_CL_VPORT_ZOFFSET), regs[XE_GPU_REG_PA_CL_VTE_CNTL], regs[XE_GPU_REG_RB_DEPTHCONTROL],
+            regs[XE_GPU_REG_PA_CL_CLIP_CNTL], regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL], regs[XE_GPU_REG_RB_DEPTH_INFO],
+            regs[XE_GPU_REG_RB_SURFACE_INFO], regs[XE_GPU_REG_RB_MODECONTROL],
+            regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL], regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR],
+            regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET]);
+      }
+      ++n;
+    }
   }
   pipeline_cache_->AnalyzeShaderUcode(*vertex_shader);
 
@@ -3360,6 +3565,12 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
 
   xe::gv_perf::draws.fetch_add(1, std::memory_order_relaxed);
   if (cvars::async_shader_compilation) {
+    if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr && cvars::gv_pipeline_look_ahead &&
+        gv_in_primary_ && !pipeline_cache_->GvFoundByLookAhead(pipeline_handle)) {
+      // About to wait for this one: find the ones after it first, so they are built meanwhile.
+      pipeline_cache_->GvMarkLookedAhead(pipeline_handle);
+      GvLookAhead();
+    }
     if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr &&
         !pipeline_cache_->GvBuildPipelineNow(pipeline_handle)) {
       xe::gv_perf::draws_skipped.fetch_add(1, std::memory_order_relaxed);
@@ -3871,6 +4082,25 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     if (gv_composite_probes++ < 2) {
       render_target_cache_->GvProbeBoundColor("depth_after_composite");
       render_target_cache_->GvProbeBoundColor("color_after_composite");
+    }
+  }
+  if (!cvars::gv_probe_after_ps.empty() && pixel_shader &&
+      render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
+    static uint64_t pa_hash = 0;
+    static uint32_t pa_at = 0, pa_seen = 0;
+    static bool pa_parsed = false;
+    if (!pa_parsed) {
+      pa_parsed = true;
+      unsigned long long h = 0;
+      std::sscanf(cvars::gv_probe_after_ps.c_str(), "%llx,%u", &h, &pa_at);
+      pa_hash = h;
+    }
+    if (pixel_shader->ucode_data_hash() == pa_hash) {
+      ++pa_seen;
+      if (pa_seen == pa_at || pa_seen == pa_at + 1) {
+        render_target_cache_->GvProbeBoundColor(fmt::format("probe_after_ps_{}", pa_seen - pa_at));
+        XELOGI("Game Vault: probed the colour target after draw {} with PS {:016X}", pa_seen, pa_hash);
+      }
     }
   }
   if (gv_seq_left && cvars::gv_probe_draw_every > 0 && pixel_shader &&

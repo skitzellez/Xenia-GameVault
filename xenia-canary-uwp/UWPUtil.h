@@ -75,6 +75,7 @@ std::string GetLocalState();
 std::string GetPackageVersion();
 // Game Vault: the "games" folder the publisher's apps share (Game Vault reads its "logs"); "" when missing
 std::string GetPublisherGames();
+std::string GetInstallFolder();
 // Game Vault: the profiles and their saves (content\<xuid>) are copied to the shared folder ("xbox 360 saves"),
 // which outlives an uninstall of Xenia and which Game Vault copies to the USB drive. A fresh install (no profile)
 // gets them back. Called once at start, before the profiles are read.

@@ -1,0 +1,481 @@
+# Game Vault: Skylanders characters for "Make a new figure": character id, variant (hex), name
+0	0000	Whirlwind
+0	1801	Series 2 Whirlwind
+0	1C02	Polar Whirlwind
+0	2805	Horn Blast Whirlwind
+0	3810	Eon's Elite Whirlwind
+1	0000	Sonic Boom
+1	1801	Series 2 Sonic Boom
+2	0000	Warnado
+2	2206	LightCore Warnado
+3	0000	Lightning Rod
+3	1801	Series 2 Lightning Rod
+4	0000	Bash
+4	1801	Series 2 Bash
+5	0000	Terrafin
+5	1801	Series 2 Terrafin
+5	2805	Knockout Terrafin
+5	3810	Eon's Elite Terrafin
+6	0000	Dino Rang
+6	4810	Eon's Elite Dino Rang
+7	0000	Prism Break
+7	1801	Series 2 Prism Break
+7	2805	Hyper Beam Prism Break
+7	1206	LightCore Prism Break
+8	0000	Sunburn
+9	0000	Eruptor
+9	1801	Series 2 Eruptor
+9	2C02	Volcanic Eruptor
+9	2805	Lava Barf Eruptor
+9	1206	LightCore Eruptor
+9	3810	Eon's Elite Eruptor
+10	0000	Ignitor
+10	1801	Series 2 Ignitor
+10	1C03	Legendary Ignitor
+11	0000	Flameslinger
+11	1801	Series 2 Flameslinger
+12	0000	Zap
+12	1801	Series 2 Zap
+13	0000	Wham Shell
+13	2206	LightCore Wham Shell
+14	0000	Gill Grunt
+14	1801	Series 2 Gill Grunt
+14	2805	Anchors Away Gill Grunt
+14	3805	Tidal Wave Gill Grunt
+14	3810	Eon's Elite Gill Grunt
+15	0000	Slam Bam
+15	1801	Series 2 Slam Bam
+15	1C03	Legendary Slam Bam
+15	4810	Eon's Elite Slam Bam
+16	0000	Spyro
+16	1801	Series 2 Spyro
+16	2C02	Dark Mega Ram Spyro
+16	2805	Mega Ram Spyro
+16	3810	Eon's Elite Spyro
+17	0000	Voodood
+17	4810	Eon's Elite Voodood
+18	0000	Double Trouble
+18	1801	Series 2 Double Trouble
+18	1C02	Royal Double Trouble
+19	0000	Trigger Happy
+19	1801	Series 2 Trigger Happy
+19	2C02	Springtime Trigger Happy
+19	2805	Big Bang Trigger Happy
+19	3810	Eon's Elite Trigger Happy
+20	0000	Drobot
+20	1801	Series 2 Drobot
+20	1206	LightCore Drobot
+21	0000	Drill Sergeant
+21	1801	Series 2 Drill Sergeant
+22	0000	Boomer
+22	4810	Eon's Elite Boomer
+23	0000	Wrecking Ball
+23	1801	Series 2 Wrecking Ball
+24	0000	Camo
+24	2805	Thorn Horn Camo
+25	0000	Zook
+25	1801	Series 2 Zook
+25	4810	Eon's Elite Zook
+26	0000	Stealth Elf
+26	1801	Series 2 Stealth Elf
+26	2C02	Dark Stealth Elf
+26	1C03	Legendary Stealth Elf
+26	2805	Ninja Stealth Elf
+26	3810	Eon's Elite Stealth Elf
+27	0000	Stump Smash
+27	1801	Series 2 Stump Smash
+28	0000	Dark Spyro
+29	0000	Hex
+29	1801	Series 2 Hex
+29	1206	LightCore Hex
+30	0000	Chop Chop
+30	1801	Series 2 Chop Chop
+30	2805	Twin Blade Chop Chop
+30	3810	Eon's Elite Chop Chop
+31	0000	Ghost Roaster
+31	4810	Eon's Elite Ghost Roaster
+32	0000	Cynder
+32	1801	Series 2 Cynder
+32	2805	Phantom Cynder
+100	0000	Jet Vac
+100	1403	Legendary Jet Vac
+100	2805	Turbo Jet Vac
+100	3805	Full Blast Jet Vac
+100	1206	LightCore Jet Vac
+101	0000	Swarm
+102	0000	Crusher
+102	1602	Granite Crusher
+103	0000	Flashwing
+103	1402	Jade Flash Wing
+103	2206	LightCore Flashwing
+104	0000	Hot Head
+105	0000	Hot Dog
+105	1402	Molten Hot Dog
+105	2805	Fire Bone Hot Dog
+106	0000	Chill
+106	1603	Legendary Chill
+106	2805	Blizzard Chill
+106	1206	LightCore Chill
+107	0000	Thumpback
+108	0000	Pop Fizz
+108	1402	Punch Pop Fizz
+108	3C02	Love Potion Pop Fizz
+108	2805	Super Gulp Pop Fizz
+108	3805	Fizzy Frenzy Pop Fizz
+108	1206	LightCore Pop Fizz
+109	0000	Ninjini
+109	1602	Scarlet Ninjini
+110	0000	Bouncer
+110	1603	Legendary Bouncer
+111	0000	Sprocket
+111	2805	Heavy Duty Sprocket
+112	0000	Tree Rex
+112	1602	Gnarly Tree Rex
+113	0000	Shroomboom
+113	3805	Sure Shot Shroomboom
+113	1206	LightCore Shroomboom
+114	0000	Eye Brawl
+115	0000	Fright Rider
+200	0000	Anvil Rain
+201	0000	Hidden Treasure
+201	2000	Platinum Hidden Treasure
+202	0000	Healing Elixir
+203	0000	Ghost Pirate Swords
+204	0000	Time Twist Hourglass
+205	0000	Sky Iron Shield
+206	0000	Winged Boots
+207	0000	Sparx the Dragonfly
+208	1206	Dragonfire Cannon
+208	1602	Golden Dragonfire Cannon
+209	1206	Scorpion Striker
+210	3002	Biter's Bane
+210	3008	Sorcerous Skull
+210	300B	Axe of Illusion
+210	300E	Arcane Hourglass
+210	3012	Spell Slapper
+210	3014	Rune Rocket
+211	3001	Tidal Tiki
+211	3002	Wet Walter
+211	3006	Flood Flask
+211	3406	Legendary Flood Flask
+211	3007	Soaking Staff
+211	300B	Aqua Axe
+211	3016	Frost Helm
+212	3003	Breezy Bird
+212	3006	Drafty Decanter
+212	300D	Tempest Timer
+212	3010	Cloudy Cobra
+212	3011	Storm Warning
+212	3018	Cyclone Saber
+213	3004	Spirit Sphere
+213	3404	Legendary Spirit Sphere
+213	3008	Spectral Skull
+213	3408	Legendary Spectral Skull
+213	300B	Haunted Hatchet
+213	300C	Grim Gripper
+213	3010	Spooky Snake
+213	3017	Dream Piercer
+214	3000	Tech Totem
+214	3007	Automatic Angel
+214	3009	Factory Flower
+214	300C	Grabbing Gadget
+214	3016	Makers Mana
+214	301A	Topsy Techy
+215	3005	Eternal Flame
+215	3009	Fire Flower
+215	3011	Scorching Stopper
+215	3012	Searing Spinner
+215	3017	Spark Spear
+215	301B	Blazing Belch
+216	3000	Banded Boulder
+216	3003	Rock Hawk
+216	300A	Slag Hammer
+216	300E	Dust Of Time
+216	3013	Spinning Sandstorm
+216	301A	Rubble Trouble
+217	3003	Oak Eagle
+217	3005	Emerald Energy
+217	300A	Weed Whacker
+217	3010	Seed Serpent
+217	3018	Jade Blade
+217	301B	Shrub Shrieker
+218	3000	Dark Dagger
+218	3014	Shadow Spider
+218	301A	Ghastly Grimace
+219	3000	Shining Ship
+219	300F	Heavenly Hawk
+219	301B	Beam Scream
+220	301E	Kaos Trap
+220	351F	Ultimate Kaos Trap
+230	0000	Hand of Fate
+230	3403	Legendary Hand of Fate
+231	0000	Piggy Bank
+232	0000	Rocket Ram
+233	0000	Tiki Speaky
+300	0000	Dragon’s Peak
+301	0000	Empire of Ice
+302	0000	Pirate Seas
+303	0000	Darklight Crypt
+304	0000	Volcanic Vault
+305	0000	Mirror of Mystery
+306	0000	Nightmare Express
+307	0000	Sunscraper Spire
+308	0000	Midnight Museum
+404	0000	Legendary Bash
+416	0000	Legendary Spyro
+419	0000	Legendary Trigger Happy
+430	0000	Legendary Chop Chop
+450	0000	Gusto
+451	0000	Thunderbolt
+452	0000	Fling Kong
+453	0000	Blades
+453	3403	Legendary Blades
+454	0000	Wallop
+455	0000	Head Rush
+455	3402	Nitro Head Rush
+456	0000	Fist Bump
+457	0000	Rocky Roll
+458	0000	Wildfire
+458	3402	Dark Wildfire
+459	0000	Ka Boom
+460	0000	Trail Blazer
+461	0000	Torch
+462	0000	Snap Shot
+462	3402	Dark Snap Shot
+463	0000	Lob Star
+463	3402	Winterfest Lob-Star
+464	0000	Flip Wreck
+465	0000	Echo
+466	0000	Blastermind
+467	0000	Enigma
+468	0000	Deja Vu
+468	3403	Legendary Deja Vu
+469	0000	Cobra Candabra
+469	3402	King Cobra Cadabra
+470	0000	Jawbreaker
+470	3403	Legendary Jawbreaker
+471	0000	Gearshift
+472	0000	Chopper
+473	0000	Tread Head
+474	0000	Bushwack
+474	3403	Legendary Bushwack
+475	0000	Tuff Luck
+476	0000	Food Fight
+476	3402	Dark Food Fight
+477	0000	High Five
+478	0000	Krypt King
+478	3402	Nitro Krypt King
+479	0000	Short Cut
+480	0000	Bat Spin
+481	0000	Funny Bone
+482	0000	Knight Light
+483	0000	Spotlight
+484	0000	Knight Mare
+485	0000	Blackout
+502	0000	Bop
+505	0000	Terrabite
+506	0000	Breeze
+508	0000	Pet Vac
+508	3402	Power Punch Pet Vac
+507	0000	Weeruptor
+507	3402	Eggcellent Weeruptor
+509	0000	Small Fry
+510	0000	Drobit
+519	0000	Trigger Snappy
+526	3000	Whisper Elf
+540	3000	Barkley
+540	3402	Gnarly Barkley
+541	3000	Thumpling
+514	0000	Gill Runt
+542	3000	Mini-Jini
+503	0000	Spry
+504	0000	Hijinx
+543	1000	Eye Small
+601	0000	King Pen
+602	0000	Tri-Tip
+603	0000	Chopscotch
+604	0000	Boom Bloom
+605	0000	Pit Boss
+606	0000	Barbella
+607	0000	Air Strike
+608	0000	Ember
+609	0000	Ambush
+610	0000	Dr. Krankcase
+611	0000	Hood Sickle
+612	0000	Tae Kwon Crow
+613	0000	Golden Queen
+614	0000	Wolfgang
+615	0000	Pain-Yatta
+616	0000	Mysticat
+617	0000	Starcast
+618	0000	Buckshot
+619	0000	Aurora
+620	0000	Flare Wolf
+621	0000	Chompy Mage
+622	0000	Bad Juju
+623	0000	Grave Clobber
+624	0000	Blaster-Tron
+625	0000	Ro-Bow
+626	0000	Chain Reaction
+627	0000	Kaos
+628	0000	Wild Storm
+629	0000	Tidepool
+630	0000	Crash Bandicoot
+631	0000	Dr. Neo Cortex
+1000	0000	Boom Jet (Bottom)
+1001	0000	Free Ranger (Bottom)
+1001	2403	Legendary Free Ranger (Bottom)
+1002	0000	Rubble Rouser (Bottom)
+1003	0000	Doom Stone (Bottom)
+1004	0000	Blast Zone (Bottom)
+1004	2402	Dark Blast Zone (Bottom)
+1005	0000	Fire Kraken (Bottom)
+1005	2402	Jade Fire Kraken (Bottom)
+1006	0000	Stink Bomb (Bottom)
+1007	0000	Grilla Drilla (Bottom)
+1008	0000	Hoot Loop (Bottom)
+1008	2402	Enchanted Hoot Loop (Bottom)
+1009	0000	Trap Shadow (Bottom)
+1010	0000	Magna Charge (Bottom)
+1010	2402	Nitro Magna Charge (Bottom)
+1011	0000	Spy Rise (Bottom)
+1012	0000	Night Shift (Bottom)
+1012	2403	Legendary Night Shift (Bottom)
+1013	0000	Rattle Shake (Bottom)
+1013	2402	Quick Draw Rattle Shake (Bottom)
+1014	0000	Freeze Blade (Bottom)
+1014	2402	Nitro Freeze Blade (Bottom)
+1015	0000	Wash Buckler (Bottom)
+1015	2402	Dark Wash Buckler (Bottom)
+2000	0000	Boom Jet (Top)
+2001	0000	Free Ranger (Top)
+2001	2403	Legendary Free Ranger (Top)
+2002	0000	Rubble Rouser (Top)
+2003	0000	Doom Stone (Top)
+2004	0000	Blast Zone (Top)
+2004	2402	Dark Blast Zone (Top)
+2005	0000	Fire Kraken (Top)
+2005	2402	Jade Fire Kraken (Top)
+2006	0000	Stink Bomb (Top)
+2007	0000	Grilla Drilla (Top)
+2008	0000	Hoot Loop (Top)
+2008	2402	Enchanted Hoot Loop (Top)
+2009	0000	Trap Shadow (Top)
+2010	0000	Magna Charge (Top)
+2010	2402	Nitro Magna Charge (Top)
+2011	0000	Spy Rise (Top)
+2012	0000	Night Shift (Top)
+2012	2403	Legendary Night Shift (Top)
+2013	0000	Rattle Shake (Top)
+2013	2402	Quick Draw Rattle Shake (Top)
+2014	0000	Freeze Blade (Top)
+2014	2402	Nitro Freeze Blade (Top)
+2015	0000	Wash Buckler (Top)
+2015	2402	Dark Wash Buckler (Top)
+3000	0000	Scratch
+3001	0000	Pop Thorn
+3002	0000	Slobber Tooth
+3002	2402	Dark Slobber Tooth
+3003	0000	Scorp
+3004	0000	Fryno
+3004	3805	Hog Wild Fryno
+3005	0000	Smolderdash
+3005	2206	LightCore Smolderdash
+3006	0000	Bumble Blast
+3006	2402	Jolly Bumble Blast
+3006	2206	LightCore Bumble Blast
+3007	0000	Zoo Lou
+3007	2403	Legendary Zoo Lou
+3008	0000	Dune Bug
+3009	0000	Star Strike
+3009	2602	Enchanted Star Strike
+3009	2206	LightCore Star Strike
+3010	0000	Countdown
+3010	2402	Kickoff Countdown
+3010	2206	LightCore Countdown
+3011	0000	Wind Up
+3012	0000	Roller Brawl
+3013	0000	Grim Creeper
+3013	2603	Legendary Grim Creeper
+3013	2206	LightCore Grim Creeper
+3014	0000	Rip Tide
+3015	0000	Punk Shock
+3200	2000	Battle Hammer
+3201	2000	Sky Diamond
+3202	2000	Platinum Sheep
+3203	2000	Groove Machine
+3204	0000	UFO Hat
+3300	2000	Sheep Wreck Island
+3301	2000	Tower of Time
+3302	2206	Fiery Forge
+3303	2206	Arkeyan Crossbow
+3220	0000	Jet Stream
+3221	0000	Tomb Buggy
+3222	0000	Reef Ripper
+3223	0000	Burn Cycle
+3224	0000	Hot Streak
+3224	4402	Dark Hot Streak
+3224	4004	E3 Hot Streak
+3224	441E	Golden Hot Streak
+3225	0000	Shark Tank
+3226	0000	Thump Truck
+3227	0000	Crypt Crusher
+3228	0000	Stealth Stinger
+3228	4402	Nitro Stealth Stinger
+3231	0000	Dive Bomber
+3231	4402	Spring Ahead Dive Bomber
+3232	0000	Sky Slicer
+3233	0000	Clown Cruiser (Nintendo Only)
+3233	4402	Dark Clown Cruiser (Nintendo Only)
+3234	0000	Gold Rusher
+3234	4402	Power Blue Gold Rusher
+3235	0000	Shield Striker
+3236	0000	Sun Runner
+3236	4403	Legendary Sun Runner
+3237	0000	Sea Shadow
+3237	4402	Dark Sea Shadow
+3238	0000	Splatter Splasher
+3238	4402	Power Blue Splatter Splasher
+3239	0000	Soda Skimmer
+3239	4402	Nitro Soda Skimmer
+3240	0000	Barrel Blaster (Nintendo Only)
+3240	4402	Dark Barrel Blaster (Nintendo Only)
+3241	0000	Buzz Wing
+3400	0000	Fiesta
+3400	4515	Frightful Fiesta
+3401	0000	High Volt
+3402	0000	Splat
+3402	4502	Power Blue Splat
+3406	0000	Stormblade
+3411	0000	Smash Hit
+3411	4502	Steel Plated Smash Hit
+3412	0000	Spitfire
+3412	4502	Dark Spitfire
+3413	0000	Hurricane Jet Vac
+3413	4503	Legendary Hurricane Jet Vac
+3414	0000	Double Dare Trigger Happy
+3414	4502	Power Blue Double Dare Trigger Happy
+3415	0000	Super Shot Stealth Elf
+3415	4502	Dark Super Shot Stealth Elf
+3416	0000	Shark Shooter Terrafin
+3417	0000	Bone Bash Roller Brawl
+3417	4503	Legendary Bone Bash Roller Brawl
+3420	0000	Big Bubble Pop Fizz
+3420	450E	Birthday Bash Big Bubble Pop Fizz
+3421	0000	Lava Lance Eruptor
+3422	0000	Deep Dive Gill Grunt
+3423	0000	Turbo Charge Donkey Kong (Nintendo Only)
+3423	4502	Dark Turbo Charge Donkey Kong (Nintendo Only)
+3424	0000	Hammer Slam Bowser (Nintendo Only)
+3424	4502	Dark Hammer Slam Bowser (Nintendo Only)
+3425	0000	Dive-Clops
+3425	450E	Missile-Tow Dive-Clops
+3426	0000	Astroblast
+3426	4503	Legendary Astroblast
+3427	0000	Nightfall
+3428	0000	Thrillipede
+3428	450D	Eggcited Thrillipede
+3500	0000	Sky Trophy
+3501	0000	Land Trophy
+3502	0000	Sea Trophy
+3503	0000	Kaos Trophy

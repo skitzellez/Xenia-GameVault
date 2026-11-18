@@ -324,6 +324,13 @@ void PipelineCache::InitializeShaderStorage(
 
   // Game Vault: the pipelines this title has really drawn with, in the order it first did.
   gv_hot_path_ = cache_root / fmt::format("{:08X}.gvhot", title_id);
+  gv_pso_dir_.clear();
+  if (std::filesystem::exists(cache_root / "gv_pso_on.txt")) {
+    gv_pso_dir_ = cache_root / "gv_pso";
+    std::error_code gv_pso_ec;
+    std::filesystem::create_directories(gv_pso_dir_, gv_pso_ec);
+    XELOGI("Game Vault: pipeline timing probe on, {}", xe::path_to_utf8(gv_pso_dir_));
+  }
   std::unordered_map<uint64_t, uint32_t> gv_hot_list;
   {
     std::ifstream hot_file(gv_hot_path_);
@@ -911,6 +918,16 @@ bool PipelineCache::ConfigurePipeline(
   // to compile and don't benefit from async (vertex shaders are small).
   bool use_async = cvars::async_shader_compilation &&
                    !creation_threads_.empty() && pixel_shader != nullptr;
+  // Game Vault look-ahead: never builds here, a pipeline without a pixel shader is queued too (its vertex shader is
+  // translated here first - well under a millisecond - so its root signature is right).
+  const bool gv_dry = gv_lookahead_on_;
+  const bool gv_translate_vs_now = !use_async || (gv_dry && pixel_shader == nullptr);
+  if (gv_dry) {
+    if (creation_threads_.empty()) {
+      return false;
+    }
+    use_async = true;
+  }
 
   // Ensure VS ucode is analyzed (needed for description hash).
   if (!vertex_shader->shader().is_ucode_analyzed()) {
@@ -919,7 +936,7 @@ bool PipelineCache::ConfigurePipeline(
 
   // For async mode, defer VS translation to background thread.
   // For sync mode, translate VS now on main thread.
-  if (!vertex_shader->is_translated() && !use_async) {
+  if (!vertex_shader->is_translated() && gv_translate_vs_now) {
     if (!TranslateAnalyzedShader(*shader_translator_, *vertex_shader,
                                  dxbc_converter_, dxc_utils_, dxc_compiler_)) {
       XELOGE("Failed to translate the vertex shader!");
@@ -932,7 +949,7 @@ bool PipelineCache::ConfigurePipeline(
       storage_writer_.QueueShaderWrite(&vertex_shader->shader());
     }
   }
-  if (!use_async && !vertex_shader->is_valid()) {
+  if (gv_translate_vs_now && !vertex_shader->is_valid()) {
     // Translation attempted previously, but not valid (sync mode only).
     return false;
   }
@@ -976,7 +993,7 @@ bool PipelineCache::ConfigurePipeline(
   }
   PipelineDescription& description = runtime_description.description;
 
-  if (current_pipeline_ != nullptr &&
+  if (current_pipeline_ != nullptr && !current_pipeline_->gv_store_pending &&
       current_pipeline_->description.description == description) {
     *pipeline_handle_out = current_pipeline_;
     *root_signature_out = current_pipeline_->description.root_signature;
@@ -989,6 +1006,22 @@ bool PipelineCache::ConfigurePipeline(
   for (auto it = found_range.first; it != found_range.second; ++it) {
     Pipeline* found_pipeline = it->second;
     if (found_pipeline->description.description == description) {
+      if (gv_dry) {
+        *pipeline_handle_out = found_pipeline;
+        *root_signature_out = found_pipeline->description.root_signature;
+        return true;
+      }
+      if (found_pipeline->gv_store_pending) {
+        // Queued by a look-ahead, now really used: kept for the next start too.
+        found_pipeline->gv_store_pending = false;
+        if (storage_writer_.is_active()) {
+          pipeline_storage_file_flush_needed_ = true;
+          PipelineStoredDescription stored_description;
+          stored_description.description_hash = hash;
+          std::memcpy(&stored_description.description, &description, sizeof(description));
+          storage_writer_.QueuePipelineWrite(stored_description);
+        }
+      }
       GvNoteUsed(found_pipeline, hash);
       current_pipeline_ = found_pipeline;
       *pipeline_handle_out = found_pipeline;
@@ -1002,6 +1035,23 @@ bool PipelineCache::ConfigurePipeline(
               sizeof(runtime_description));
   pipelines_.emplace(hash, new_pipeline);
   COUNT_profile_set("gpu/pipeline_cache/pipelines", pipelines_.size());
+  if (gv_dry) {
+    new_pipeline->gv_lookahead = true;
+    new_pipeline->gv_store_pending = true;
+    new_pipeline->pending_vertex_shader = vertex_shader->is_translated() ? nullptr : vertex_shader;
+    new_pipeline->pending_pixel_shader = pixel_shader;
+    {
+      std::lock_guard<xe_mutex> lock(creation_request_lock_);
+      creation_queue_.push(new_pipeline);
+      // Wanted by a draw that comes soon: before everything else, in the order the draws come.
+      gv_next_up_.push_back(new_pipeline);
+      ++gv_lookahead_found_;
+    }
+    xe::gv_perf::pipelines_queued.fetch_add(1, std::memory_order_relaxed);
+    *pipeline_handle_out = new_pipeline;
+    *root_signature_out = runtime_description.root_signature;
+    return true;
+  }
   GvNoteUsed(new_pipeline, hash);
 
   if (use_async) {
@@ -2980,6 +3030,49 @@ void PipelineCache::EnsurePipelineShadersTranslated(
   }
 }
 
+void PipelineCache::GvPsoLog(
+    const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc,
+    const PipelineRuntimeDescription& runtime_description, double ms,
+    HRESULT result) {
+  static std::mutex gv_pso_mutex;
+  static std::unordered_set<uint64_t> gv_pso_saved;
+  auto save = [&](const char* kind, const D3D12_SHADER_BYTECODE& code) -> uint64_t {
+    if (!code.pShaderBytecode || !code.BytecodeLength) {
+      return 0;
+    }
+    uint64_t hash = XXH3_64bits(code.pShaderBytecode, code.BytecodeLength);
+    if (gv_pso_saved.insert(hash).second) {
+      std::ofstream out(gv_pso_dir_ / fmt::format("{:016X}.{}.dxbc", hash, kind),
+                        std::ios::binary);
+      out.write(static_cast<const char*>(code.pShaderBytecode),
+                std::streamsize(code.BytecodeLength));
+    }
+    return hash;
+  };
+  std::lock_guard<std::mutex> lock(gv_pso_mutex);
+  uint64_t vs = save("vs", desc.VS), ps = save("ps", desc.PS),
+           gs = save("gs", desc.GS), hs = save("hs", desc.HS),
+           ds = save("ds", desc.DS);
+  std::ofstream log(gv_pso_dir_ / "pso.log", std::ios::app);
+  // ms result | vs ps gs hs ds hashes | sizes | guest VS/PS ucode | topology rts samples
+  log << fmt::format(
+      "{:.1f} {:08X} vs={:016X} ps={:016X} gs={:016X} hs={:016X} ds={:016X} "
+      "vsb={} psb={} gsb={} hsb={} dsb={} gvs={:016X} gps={:016X} topo={} "
+      "rt={} msaa={} thread={}\n",
+      ms, uint32_t(result), vs, ps, gs, hs, ds, desc.VS.BytecodeLength,
+      desc.PS.BytecodeLength, desc.GS.BytecodeLength, desc.HS.BytecodeLength,
+      desc.DS.BytecodeLength,
+      runtime_description.vertex_shader
+          ? runtime_description.vertex_shader->shader().ucode_data_hash()
+          : 0,
+      runtime_description.pixel_shader
+          ? runtime_description.pixel_shader->shader().ucode_data_hash()
+          : 0,
+      uint32_t(desc.PrimitiveTopologyType), desc.NumRenderTargets,
+      desc.SampleDesc.Count,
+      std::hash<std::thread::id>()(std::this_thread::get_id()) % 1000);
+}
+
 ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
     const PipelineRuntimeDescription& runtime_description) {
   const PipelineDescription& description = runtime_description.description;
@@ -3438,8 +3531,15 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   // Create the D3D12 pipeline state object.
   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
   ID3D12PipelineState* state;
+  uint64_t gv_pso_start = xe::Clock::QueryHostTickCount();
   HRESULT create_result =
       device->CreateGraphicsPipelineState(&state_desc, IID_PPV_ARGS(&state));
+  if (!gv_pso_dir_.empty()) {
+    GvPsoLog(state_desc, runtime_description,
+             double(xe::Clock::QueryHostTickCount() - gv_pso_start) * 1000.0 /
+                 double(xe::Clock::QueryHostTickFrequency()),
+             create_result);
+  }
   if (FAILED(create_result)) {
     // Game Vault: why (GTA IV on the Xbox failed the same 3 pipelines on every
     // console, then lost the device): the result, whether the device was
@@ -3533,7 +3633,7 @@ void PipelineCache::CreationThread(size_t thread_index) {
             !creation_queue_.top()->gv_hot) {
           limit = 1;
         }
-        if (GvNowMs() < gv_boost_until_ms_.load(std::memory_order_relaxed)) {
+        if (GvNowMs() < gv_boost_until_ms_.load(std::memory_order_relaxed) || gv_lookahead_waiting_) {
           limit = SIZE_MAX;
         }
         if (thread_index >= limit) {
@@ -3592,6 +3692,9 @@ void PipelineCache::CreationThread(size_t thread_index) {
         // Still in the queue too: whoever pops it later finds it claimed and goes on.
         pipeline_to_create = gv_next_up_.front();
         gv_next_up_.pop_front();
+        if (gv_next_up_.empty()) {
+          gv_lookahead_waiting_ = false;
+        }
       } else {
         pipeline_to_create = creation_queue_.top();
         creation_queue_.pop();
@@ -3689,6 +3792,26 @@ void PipelineCache::GvNoteUsed(Pipeline* pipeline, uint64_t hash) {
   if (!gv_hot_path_.empty()) {
     std::ofstream(gv_hot_path_, std::ios::app) << fmt::format("{:016X}\n", hash);
   }
+}
+
+void PipelineCache::GvLookAheadBegin() {
+  std::lock_guard<xe_mutex> lock(creation_request_lock_);
+  gv_lookahead_on_ = true;
+  gv_lookahead_found_ = 0;
+}
+
+uint32_t PipelineCache::GvLookAheadEnd() {
+  uint32_t found;
+  {
+    std::lock_guard<xe_mutex> lock(creation_request_lock_);
+    gv_lookahead_on_ = false;
+    found = gv_lookahead_found_;
+    if (found) {
+      gv_lookahead_waiting_ = true;
+    }
+  }
+  creation_request_cond_.notify_all();
+  return found;
 }
 
 void PipelineCache::GvHelpWithStall(Pipeline* pipeline) {

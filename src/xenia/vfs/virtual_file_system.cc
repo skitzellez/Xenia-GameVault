@@ -329,7 +329,9 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
         // (Game Vault: PathExistsAny also knows the network folder game,
         // whose files never exist on the console's own disks: every file of
         // it was "not found" - Ice Age 3 black screen, Call of Duty NX1)
-        if (!xe::filesystem::PathExistsAny(file_path)) {
+        const auto* own = dynamic_cast<const xe::vfs::HostPathEntry*>(entry);
+        if (!xe::filesystem::PathExistsAny(file_path) &&
+            !(own && xe::filesystem::PathExistsAny(own->host_path()))) {
           // Remove cached entry
           entry->Delete();
           entry = nullptr;

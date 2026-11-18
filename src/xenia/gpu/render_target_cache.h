@@ -226,6 +226,13 @@ class RenderTargetCache {
   uint32_t GetLastUpdateBoundRenderTargets(
       uint32_t* depth_and_color_formats_out = nullptr) const;
 
+  // Game Vault look-ahead: what GetLastUpdateBoundRenderTargets would return after an Update with the current
+  // registers, worked out without creating, binding or copying anything. GvDryBegin starts from the real bindings;
+  // each GvDryPredict then moves only the look-ahead's own copy of them on.
+  void GvDryBegin();
+  uint32_t GvDryPredict(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
+                        uint32_t normalized_color_mask, uint32_t* depth_and_color_formats_out);
+
  protected:
   RenderTargetCache(const RegisterFile& register_file, const Memory& memory,
                     TraceWriter* trace_writer, uint32_t draw_resolution_scale_x,
@@ -780,6 +787,10 @@ class RenderTargetCache {
   // last_update_accumulated_render_targets_ - it's not beneficial or even
   // incorrect to keep the previously bound render targets.
   bool are_accumulated_render_targets_valid_ = false;
+  // Game Vault look-ahead copy of the accumulated bindings (keys only).
+  uint32_t gv_dry_acc_keys_[1 + xenos::kMaxColorRenderTargets] = {};
+  uint32_t gv_dry_acc_bits_ = 0;
+  bool gv_dry_acc_valid_ = false;
   // After an update (for simplicity, even an unsuccessful update invalidates
   // this), contains needed ownership transfer sources for each of the current
   // render targets. They are reordered so for one source, all transfers are

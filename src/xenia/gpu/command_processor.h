@@ -553,6 +553,15 @@ class CommandProcessor {
   uint64_t bin_select_ = 0xFFFFFFFFull;
   uint64_t bin_mask_ = 0xFFFFFFFFull;
 
+  // Game Vault look-ahead (D3D12CommandProcessor::GvLookAhead): while gv_dry_ is set, the queued command stream is
+  // only read to learn which pipelines the coming draws need. Nothing is drawn, copied or written to game memory, no
+  // interrupt is raised, and the registers are put back afterwards.
+  bool gv_dry_ = false;
+  bool gv_dry_stop_ = false;
+  bool gv_in_primary_ = false;
+  // The readers of the buffers the current one was called from (each stands right after its call packet).
+  std::vector<RingBuffer*> gv_reader_stack_;
+
   Shader* active_vertex_shader_ = nullptr;
   Shader* active_pixel_shader_ = nullptr;
 

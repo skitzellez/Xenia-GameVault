@@ -17,6 +17,7 @@
 #include <cstring>
 #include "config.h"
 #include "third_party/fmt/include/fmt/format.h"
+#include "xenia/base/xxhash.h"
 #include "xenia/apu/audio_system.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_stream.h"
@@ -114,6 +115,11 @@ DEFINE_string(media_type, "auto",
               "need to run as ODD to force those installs.",
               "Content");
 
+DEFINE_bool(gv_prototype_write_layer, true,
+            "Game Vault: a prototype / dev-kit build (program not "
+            "default.xex) may write into its own folder; the writes go to a "
+            "copy on the console, the game's files are not changed.",
+            "General");
 DEFINE_bool(allow_game_relative_writes, false,
             "Not useful to non-developers. Allows code to write to paths "
             "relative to game://. Used for "
@@ -538,9 +544,27 @@ const std::unique_ptr<vfs::Device> Emulator::CreateVfsDevice(
       // An unpacked package's executable says where it came from, wherever
       // the files now are.
       auto xex = vfs::ExtractXexMetadata(path);
-      device = std::make_unique<vfs::HostPathDevice>(
-          mount_path, path.parent_path(), !cvars::allow_game_relative_writes,
-          false, xex && xex->RunsFromPackageOnly() ? "STFS" : "GDFX");
+      // Game Vault: a prototype / dev-kit build (its program is not default.xex) ran from a dev kit's writable
+      // disk and may write into its own folder (Radical's Spider-Man 4 rewrites spiderman.rch at start, then
+      // quit on "access denied"): writes go to a write layer on the console, the game's files stay as they are
+      std::string program = xe::path_to_utf8(path.filename());
+      bool prototype = !xe::utf8::equal_case(program, "default.xex") &&
+                       cvars::gv_prototype_write_layer;
+      auto host_device = std::make_unique<vfs::HostPathDevice>(
+          mount_path, path.parent_path(),
+          !cvars::allow_game_relative_writes && !prototype, false,
+          xex && xex->RunsFromPackageOnly() ? "STFS" : "GDFX");
+      if (prototype && !cvars::allow_game_relative_writes) {
+        std::string where = xe::path_to_utf8(path.parent_path());
+        auto layer = cache_root_ / "game_writes" /
+                     fmt::format("{}_{:016X}", xe::path_to_utf8(
+                                                   path.parent_path().filename()),
+                                 XXH3_64bits(where.data(), where.size()));
+        host_device->set_write_layer(layer);
+        XELOGI("Game Vault: prototype {}: its writes go to {}", program,
+               xe::path_to_utf8(layer));
+      }
+      device = std::move(host_device);
     } break;
     case FileSignatureType::LIVE:
     case FileSignatureType::CON:

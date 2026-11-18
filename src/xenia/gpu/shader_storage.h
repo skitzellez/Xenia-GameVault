@@ -93,6 +93,10 @@ inline std::atomic<uint32_t>& ShaderStorageClearRequest() {
   static std::atomic<uint32_t> title_id{0};
   return title_id;
 }
+inline std::atomic<uint32_t>& ShaderStorageClearedTitle() {
+  static std::atomic<uint32_t> title_id{0};
+  return title_id;
+}
 inline void RequestShaderStorageClear(uint32_t title_id) {
   ShaderStorageClearRequest().store(title_id);
 }
@@ -118,6 +122,30 @@ inline void ClearShaderStorageIfRequested(
   }
   XELOGI("Game Vault: shader cache of {:08X} cleared ({} files)", title_id,
          removed);
+  ShaderStorageClearedTitle().store(title_id);   // (not refilled from the package)
+}
+
+// Game Vault: a game's FIRST start stalled on every new shader (WWE 2K17 at 0-3 fps
+// for 50 s at its first match, 17 fps later; 44-53 fps on the next start). The
+// package carries the stored shaders and pipelines of the games played in testing
+// (shader_seed: guest shaders and draw settings only, nothing of the machine, so they
+// fit every console): a title with no storage yet starts from those, and its pipelines
+// are built in the background at the start as on any later start.
+inline void SeedShaderStorageFile(const std::filesystem::path& file,
+                                  uint32_t title_id) {
+  if (title_id && ShaderStorageClearedTitle().load() == title_id) return;
+  std::error_code ec;
+  if (std::filesystem::exists(file, ec) && std::filesystem::file_size(file, ec) > 0)
+    return;
+  std::filesystem::path seed =
+      xe::filesystem::GetExecutablePath().parent_path() / "shader_seed" /
+      file.filename();   // (the package's folder: GetExecutableFolder is LocalState on Xbox)
+  if (!std::filesystem::exists(seed, ec)) return;
+  std::filesystem::copy_file(seed, file,
+                             std::filesystem::copy_options::overwrite_existing,
+                             ec);
+  XELOGI("Game Vault: shader storage {} {} from the package",
+         xe::path_to_utf8(file.filename()), ec ? "NOT taken" : "taken");
 }
 
 // Ensures shader storage directories exist. Returns true on success.
@@ -265,6 +293,9 @@ class ShaderStorageWriter {
     auto pipeline_storage_file_path =
         shader_storage_shareable_root /
         fmt::format("{:08X}{}", title_id, pipeline_config.file_suffix);
+    SeedShaderStorageFile(pipeline_storage_file_path, title_id);
+    SeedShaderStorageFile(GetShaderStorageFilePath(cache_root, title_id),
+                          title_id);
     pipeline_storage_file_ =
         xe::filesystem::OpenFile(pipeline_storage_file_path, "a+b");
     if (!pipeline_storage_file_) {

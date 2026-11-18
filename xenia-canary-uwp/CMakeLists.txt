@@ -60,6 +60,13 @@ endforeach()
 target_sources(xenia-uwp PRIVATE ${_uwp_assets})
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${_uwp_assets})
 
+# Game Vault: stored shaders + pipelines of tested games, taken on a title's first start (shader_storage.h)
+file(GLOB _gv_shader_seed CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shader_seed/*")
+set_source_files_properties(${_gv_shader_seed} PROPERTIES
+  VS_DEPLOYMENT_CONTENT 1
+  VS_DEPLOYMENT_LOCATION "shader_seed")
+target_sources(xenia-uwp PRIVATE ${_gv_shader_seed})
+
 # Game Vault: libsmb2 (LGPL-2.1, loaded at run time by NetGame.cpp for games on a PC's shared folder or a NAS)
 # and its licence go in the package root.
 # dxil.dll (DirectX Shader Compiler, from the Windows SDK redistributables, as xemu ships it) signs the shaders

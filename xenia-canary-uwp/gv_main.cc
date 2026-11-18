@@ -53,6 +53,7 @@
 #include "xenia/gpu/shader_storage.h"
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
 #include "xenia/hid/input_system.h"
+#include "xenia/hid/portal/virtual_portal.h"
 #include "xenia/hid/xinput/xinput_hid.h"
 #include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
@@ -946,6 +947,43 @@ static bool GvStateAction(Emulator* emulator, bool save, const char* from) {
 // controller then only moves through the menu; B goes back a page or resumes.
 static int GvDrawingScale();
 
+// Game Vault: the Xbox app's Skylanders portal (always the virtual one here).
+static hid::VirtualPortal* GvPortal(Emulator* emulator) {
+  auto* input = emulator ? emulator->input_system() : nullptr;
+  return input ? static_cast<hid::VirtualPortal*>(input->GetPortal()) : nullptr;
+}
+
+// The characters "Make a new figure" offers: Assets\skylanders-figures.txt, lines of "<id> TAB <variant hex> TAB
+// <name>", shown sorted by name.
+struct GvFigureEntry {
+  uint16_t id;
+  uint16_t variant;
+  std::string name;
+};
+static const std::vector<GvFigureEntry>& GvFigureList() {
+  static const std::vector<GvFigureEntry> list = []() {
+    std::vector<GvFigureEntry> out;
+    std::ifstream file(xe::to_path(UWP::GetInstallFolder()) / "Assets" / "skylanders-figures.txt");
+    std::string line;
+    while (std::getline(file, line)) {
+      if (line.empty() || line[0] == '#') continue;
+      const size_t a = line.find('\t');
+      const size_t b = a == std::string::npos ? a : line.find('\t', a + 1);
+      if (b == std::string::npos) continue;
+      GvFigureEntry e;
+      e.id = uint16_t(std::strtoul(line.substr(0, a).c_str(), nullptr, 10));
+      e.variant = uint16_t(std::strtoul(line.substr(a + 1, b - a - 1).c_str(), nullptr, 16));
+      e.name = line.substr(b + 1);
+      while (!e.name.empty() && (e.name.back() == '\r' || e.name.back() == ' ')) e.name.pop_back();
+      out.push_back(std::move(e));
+    }
+    std::sort(out.begin(), out.end(), [](const auto& x, const auto& y) { return x.name < y.name; });
+    XELOGI("Game Vault portal: {} figures in the new-figure list", out.size());
+    return out;
+  }();
+  return list;
+}
+
 struct GameMenuActions {
   std::function<void()> fps_changed;    // the counter was turned on or off
   std::function<void()> restart;        // the game starts again
@@ -999,7 +1037,7 @@ class GameMenu final : public ui::ImGuiDialog {
   }
 
  protected:
-  enum class Page { kMain, kScale, kScaleApply, kControllers };
+  enum class Page { kMain, kScale, kScaleApply, kControllers, kPortal, kPortalPlace, kPortalCreate };
 
   void OnDraw(ImGuiIO& io) override {
     ++frames_;
@@ -1038,6 +1076,15 @@ class GameMenu final : public ui::ImGuiDialog {
       case Page::kControllers:
         DrawControllers(scale);
         break;
+      case Page::kPortal:
+        DrawPortal(scale);
+        break;
+      case Page::kPortalPlace:
+        DrawPortalPlace(scale);
+        break;
+      case Page::kPortalCreate:
+        DrawPortalCreate(scale);
+        break;
     }
     ImGui::End();
     ImGui::PopStyleColor(5);
@@ -1048,6 +1095,8 @@ class GameMenu final : public ui::ImGuiDialog {
         ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight)) {
       if (page_ == Page::kMain) {
         done_ = true;
+      } else if (page_ == Page::kPortalPlace || page_ == Page::kPortalCreate) {
+        Show(Page::kPortal);
       } else {
         Show(Page::kMain);
       }
@@ -1107,6 +1156,15 @@ class GameMenu final : public ui::ImGuiDialog {
     }
     if (ImGui::Button("Controllers", button_)) {
       Show(Page::kControllers);
+    }
+    if (hid::VirtualPortal* portal = GvPortal(emulator_); portal && portal->enabled()) {
+      int on = 0;
+      for (int i = 0; i < hid::VirtualPortal::kSlots; ++i) on += portal->GetSlot(i).present ? 1 : 0;
+      const std::string label = on ? fmt::format("Portal of Power  ({} on it)", on) : std::string("Portal of Power");
+      if (ImGui::Button(label.c_str(), button_)) {
+        portal_message_.clear();
+        Show(Page::kPortal);
+      }
     }
     const bool fps = UWP::GetShowFps();
     if (ImGui::Button(fps ? "Show frame rate: On" : "Show frame rate: Off",
@@ -1223,12 +1281,142 @@ class GameMenu final : public ui::ImGuiDialog {
     Hint("Hold a button on a controller to see which player it is.", scale);
   }
 
+  // Game Vault: the Skylanders portal without the toy. Figures are files in the shared figures folder; the game
+  // sees them arrive when the menu closes.
+  void DrawPortal(float scale) {
+    Title("Portal of Power", scale);
+    hid::VirtualPortal* portal = GvPortal(emulator_);
+    if (!portal) {
+      Show(Page::kMain);
+      return;
+    }
+    bool any = false;
+    for (int i = 0; i < hid::VirtualPortal::kSlots; ++i) {
+      const auto slot = portal->GetSlot(i);
+      if (!slot.present) continue;
+      any = true;
+      const std::string label = fmt::format("Take off:  {}###gv_portal_slot{}", slot.name, i);
+      if (ImGui::Button(label.c_str(), button_)) {
+        portal->Remove(i);
+        portal_message_ = fmt::format("{} is off the portal.", slot.name);
+      }
+    }
+    if (!any) {
+      ImGui::TextDisabled("No figures on the portal.");
+    }
+    ImGui::Spacing();
+    if (ImGui::Button("Put a figure on the portal", button_)) {
+      portal_files_ = portal->ListFigureFiles();
+      list_page_ = 0;
+      portal_message_.clear();
+      Show(Page::kPortalPlace);
+    }
+    if (ImGui::Button("Make a new figure", button_)) {
+      list_page_ = 0;
+      portal_message_.clear();
+      Show(Page::kPortalCreate);
+    }
+    if (ImGui::Button("Back", button_)) {
+      Show(Page::kMain);
+    }
+    if (!portal_message_.empty()) {
+      ImGui::TextColored(ImVec4(0.45f, 0.75f, 1.0f, 1.0f), "%s", portal_message_.c_str());
+    }
+    Hint("Up to 8 figures at once. B: back.", scale);
+  }
+
+  // A page of a long list: LB / RB turn the page. Returns the first index on the page.
+  size_t ListPage(size_t count, size_t per_page) {
+    const size_t pages = std::max<size_t>(1, (count + per_page - 1) / per_page);
+    if (frames_ > page_frame_ + 2) {
+      if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1)) {
+        list_page_ = (list_page_ + 1) % pages;
+        page_frame_ = frames_ + 1;  // focus the page's first row
+      } else if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1)) {
+        list_page_ = (list_page_ + pages - 1) % pages;
+        page_frame_ = frames_ + 1;
+      }
+    }
+    list_page_ = std::min(list_page_, pages - 1);
+    return list_page_ * per_page;
+  }
+
+  void DrawPortalPlace(float scale) {
+    Title("Put a figure on", scale);
+    hid::VirtualPortal* portal = GvPortal(emulator_);
+    if (!portal) {
+      Show(Page::kMain);
+      return;
+    }
+    constexpr size_t kPerPage = 10;
+    if (portal_files_.empty()) {
+      ImGui::TextWrapped("No figure files yet. Use \"Make a new figure\", or copy your figure files "
+                         "(.sky, .bin or .dmp) into the Skylanders folder.");
+    } else {
+      const size_t first = ListPage(portal_files_.size(), kPerPage);
+      for (size_t i = first; i < std::min(first + kPerPage, portal_files_.size()); ++i) {
+        const auto& file = portal_files_[i];
+        const bool placed = portal->IsPlaced(file);
+        const std::string label = fmt::format("{}{}###gv_portal_file{}", xe::path_to_utf8(file.stem()),
+                                              placed ? "   (on the portal)" : "", i);
+        if (ImGui::Button(label.c_str(), button_) && !placed) {
+          std::string error;
+          if (portal->Place(file, error) >= 0) {
+            portal_message_ = fmt::format("{} is on the portal.", xe::path_to_utf8(file.stem()));
+          } else {
+            portal_message_ = error;
+          }
+          Show(Page::kPortal);
+        }
+      }
+      if (portal_files_.size() > kPerPage) {
+        ImGui::TextDisabled("Page %d of %d", int(list_page_ + 1),
+                            int((portal_files_.size() + kPerPage - 1) / kPerPage));
+      }
+    }
+    Hint("LB / RB: page.  B: back.", scale);
+  }
+
+  void DrawPortalCreate(float scale) {
+    Title("Make a new figure", scale);
+    hid::VirtualPortal* portal = GvPortal(emulator_);
+    const auto& list = GvFigureList();
+    if (!portal || list.empty()) {
+      ImGui::TextDisabled("The list of figures is missing.");
+      Hint("B: back.", scale);
+      return;
+    }
+    constexpr size_t kPerPage = 10;
+    const size_t first = ListPage(list.size(), kPerPage);
+    for (size_t i = first; i < std::min(first + kPerPage, list.size()); ++i) {
+      const auto& entry = list[i];
+      const std::string label = fmt::format("{}###gv_portal_new{}", entry.name, i);
+      if (ImGui::Button(label.c_str(), button_)) {
+        std::string error;
+        const auto file = portal->CreateFigure(entry.id, entry.variant, entry.name, error);
+        if (file.empty()) {
+          portal_message_ = error;
+        } else if (portal->Place(file, error) >= 0) {
+          portal_message_ = fmt::format("{} is made and on the portal.", xe::path_to_utf8(file.stem()));
+        } else {
+          portal_message_ = fmt::format("{} is made. {}", xe::path_to_utf8(file.stem()), error);
+        }
+        Show(Page::kPortal);
+      }
+    }
+    ImGui::TextDisabled("Page %d of %d", int(list_page_ + 1), int((list.size() + kPerPage - 1) / kPerPage));
+    Hint("A new figure starts at level 1, like a new toy.  LB / RB: page.  B: back.", scale);
+  }
+
   Emulator* emulator_;
   GameMenuActions actions_;
   GameMenu** open_menu_;
   kernel::GuestScheduler* scheduler_ = nullptr;
   Page page_ = Page::kMain;
   int scale_pick_ = 1;
+  std::vector<std::filesystem::path> portal_files_;
+  std::string portal_message_;
+  size_t list_page_ = 0;
   uint64_t frames_ = 0;
   uint64_t page_frame_ = 1;
   ImVec2 button_;
@@ -1690,6 +1878,13 @@ void GameVaultXeniaApp::EmulatorThread() {
   xe::threading::set_name("Emulator");
   Profiler::ThreadEnter("Emulator");
 
+  // Game Vault: the game's own settings (its file in Game Vault's folder, else the built-in ones) are loaded
+  // again when its program loads, but some are read only once, while the graphics start (the depth settings
+  // Spider-Man 4's shadows need, 2026-11-16): Game Vault names the game in the link, so they are loaded now too.
+  if (gv_requested_title) {
+    config::LoadGameConfig(fmt::format("{:08X}", gv_requested_title), false);
+    XELOGI("Game Vault: settings for {:08X} loaded before the graphics start", gv_requested_title);
+  }
   GvApplyGameScale();
   X_STATUS result =
       emulator_->Setup(window_.get(), imgui_drawer_.get(), true,
@@ -1727,7 +1922,22 @@ void GameVaultXeniaApp::EmulatorThread() {
              input->GetSlotBindings(slot).size(), r);
     }
   }
-  emulator_->on_launch.AddListener([this](auto, const auto&) {
+  // Game Vault: the toy-free Skylanders portal, only while a Skylanders game runs. Figures live in the shared
+  // folder all Game Vault apps can reach (games\skylanders), else in this app's LocalState.
+  if (hid::VirtualPortal* portal = GvPortal(emulator_.get())) {
+    const std::string shared = UWP::GetPublisherGames();
+    portal->SetFigureFolder(!shared.empty() ? xe::to_path(shared) / "skylanders"
+                                            : xe::to_path(UWP::GetLocalState()) / "skylanders");
+    portal->SetLogFile(xe::to_path(UWP::GetLocalState()) / "gv_portal.log");
+  }
+  emulator_->on_launch.AddListener([this](auto, const std::string_view title_name) {
+    if (hid::VirtualPortal* portal = GvPortal(emulator_.get())) {
+      std::string name(title_name);
+      std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+      const bool skylanders = name.find("skylander") != std::string::npos;
+      if (!skylanders) portal->RemoveAll();
+      portal->SetEnabled(skylanders);
+    }
     app_context().CallInUIThread([this]() { SetupPresenter(); });
     emulator_->input_system()->NotifyDevicesChanged();
   });

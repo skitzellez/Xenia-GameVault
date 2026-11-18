@@ -76,12 +76,49 @@ void PatchDB::LoadPatches() {
   // player's own for that game (patches folder) replaces these.
   // Gears of War: 60 FPS; Black Shading Fix (no predicated tiling - the
   // characters were see-through).
-  static const struct {
+  struct DefaultOn {
     uint32_t title_id;
     std::vector<std::string> names;
-  } kGameVaultDefaultOn[] = {
+  };
+  std::vector<DefaultOn> kGameVaultDefaultOn = {
       {0x4D5307D5, {"60 FPS", "Black Shading Fix"}},
   };
+  // Game Vault 2026-11-16 (a player: "Is there a way to apply patches to 360
+  // games? Like 60fps"): the patches the player picked in Game Vault's 360
+  // game settings, "<title id>.patches.txt" in its xenia-config folder, one
+  // patch name per line. The file replaces the built-in choice for that game
+  // (an empty file: none, Gears of War too).
+  if (!config::gamevault_settings_folder.empty()) {
+    static const std::regex kPicked("^([A-Fa-f0-9]{8})\\.patches\\.txt$");
+    for (const auto& fi :
+         xe::filesystem::ListFiles(config::gamevault_settings_folder)) {
+      std::string filename = xe::path_to_utf8(fi.name);
+      std::smatch m;
+      if (!std::regex_match(filename, m, kPicked)) {
+        continue;
+      }
+      uint32_t title_id =
+          static_cast<uint32_t>(std::stoul(m[1].str(), nullptr, 16));
+      DefaultOn picked{title_id, {}};
+      std::string text = xe::filesystem::ReadAllText(fi.path / fi.name);
+      size_t pos = 0;
+      while (pos < text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string name = text.substr(pos, end - pos);
+        pos = end + 1;
+        while (!name.empty() && (name.back() == '\r' || name.back() == ' '))
+          name.pop_back();
+        if (!name.empty()) picked.names.push_back(std::move(name));
+      }
+      std::erase_if(kGameVaultDefaultOn, [&](const DefaultOn& d) {
+        return d.title_id == title_id;
+      });
+      XELOGI("PatchDB: {:08X}: {} patch(es) picked in Game Vault", title_id,
+             picked.names.size());
+      kGameVaultDefaultOn.push_back(std::move(picked));
+    }
+  }
   for (const auto& defaults : kGameVaultDefaultOn) {
     if (std::any_of(loaded_patches_.cbegin(), loaded_patches_.cend(),
                     [&](const PatchFileEntry& e) {
