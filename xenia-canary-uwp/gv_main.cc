@@ -88,6 +88,7 @@ DEFINE_int32(gv_profile_ms, 0,
 // (the in-game menu's resolution scale; Xenia's own settings)
 DECLARE_int32(draw_resolution_scale_x);
 DECLARE_int32(draw_resolution_scale_y);
+extern std::string gv_requested_home;   // App.cpp: home= in the start link, Game Vault's folder on the games drive
 extern uint32_t gv_requested_title;   // App.cpp: titleid= in the start link (Game Vault), 0 = not said
 extern int gv_requested_fsr_pct;   // App.cpp: fsrs=<percent>, Game Vault's FSR strength
 extern bool gv_requested_fsr;   // App.cpp: fsr=1 in the start link (Game Vault's Sharper picture option)
@@ -542,7 +543,7 @@ class FpsOverlay final : public ui::ImGuiDialog {
 static void RemoveOlderTitleUpdates(Emulator* emulator, const Emulator::ContentInstallEntry& entry,
                                     std::ofstream& trace) {
   using xe::kernel::xam::ContentManager;
-  const auto folder = emulator->content_root() / entry.data_installation_path_;
+  const auto folder = emulator->content_root_for(entry.content_type_) / entry.data_installation_path_;
   std::error_code ec;
   // the game's patch: default.xexp, or one per disc of a multi-disc game
   auto patch_of = [&](const std::filesystem::path& dir, uint32_t& media, uint32_t& version) {
@@ -625,6 +626,138 @@ class AddOnProgress final : public ui::ImGuiDialog {
 // the result on file while a package installs; a second stop on the same package keeps it failed for good
 static const char kAddOnStopped[] = "failed (Xenia stopped while installing it)";
 static const char kAddOnStoppedTwice[] = "failed (Xenia stopped while installing it, twice)";
+
+// Game Vault (Pitfall3D, 11-18): title updates and DLC fill the console's fixed 30 GB fast (one Forza add-on is
+// 1.9 GB), while the player's games drive has room. With Game Vault's folder on that drive (home=), they are kept in
+// "<home>\xbox 360 content" (same layout as Xenia's content folder: <profile>\<title>\<type>, Headers\<type>); saves
+// and profiles stay in the app's own storage. The ones installed on the console before are moved over once, with the
+// progress showing. Anything that goes wrong (drive not writable or not answering, no room, a copy failing) keeps
+// everything on the console as before, so nothing a game had disappears.
+static void GvUseDrivePackages(Emulator* emulator) {
+  emulator->set_package_root({});
+  if (gv_requested_home.empty()) {
+    XELOGI("Game Vault: no games drive in the link, title updates and DLC stay on the console");
+    return;
+  }
+  const auto root = std::filesystem::u8path(gv_requested_home) / "xbox 360 content";
+  // can this app write there? A drive's file opened by path can wait on a consent the console never shows: given 10 s
+  auto ok = std::make_shared<std::atomic<int>>(0);   // 0 waiting, 1 yes, 2 no
+  std::thread([root, ok] {
+    std::error_code ec;
+    std::filesystem::create_directories(root, ec);
+    const auto probe = root / "xenia-write-test.tmp";
+    bool good = false;
+    {
+      std::ofstream f(probe, std::ios::binary | std::ios::trunc);
+      if (f) {
+        f << "ok";
+        f.flush();
+        good = f.good();
+      }
+    }
+    good = good && std::filesystem::exists(probe, ec);
+    std::filesystem::remove(probe, ec);
+    *ok = good ? 1 : 2;
+  }).detach();
+  for (int i = 0; i < 100 && *ok == 0; i++) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  if (*ok != 1) {
+    XELOGW("Game Vault: the games drive's folder {} {}, title updates and DLC stay on the console",
+           xe::path_to_utf8(root), *ok == 0 ? "did not answer" : "cannot be written");
+    return;
+  }
+  // what is still on the console: <content>\<16 hex>\<8 hex>\{00000002,000B0000} and the Headers of those
+  const auto local = emulator->content_root();
+  const char* kTypes[] = {"00000002", "000B0000"};
+  auto is_hex = [](const std::string& s, size_t n) {
+    return s.size() == n && s.find_first_not_of("0123456789ABCDEFabcdef") == std::string::npos;
+  };
+  std::vector<std::filesystem::path> moves;   // relative to the content folder
+  uint64_t bytes = 0;
+  std::error_code ec;
+  for (const auto& profile : std::filesystem::directory_iterator(local, ec)) {
+    if (!profile.is_directory(ec) || !is_hex(xe::path_to_utf8(profile.path().filename()), 16)) continue;
+    for (const auto& title : std::filesystem::directory_iterator(profile.path(), ec)) {
+      if (!title.is_directory(ec) || !is_hex(xe::path_to_utf8(title.path().filename()), 8)) continue;
+      for (const char* type : kTypes) {
+        for (const auto& dir : {title.path() / type, title.path() / "Headers" / type}) {
+          if (!std::filesystem::is_directory(dir, ec)) continue;
+          moves.push_back(std::filesystem::relative(dir, local, ec));
+          for (const auto& f : std::filesystem::recursive_directory_iterator(dir, ec))
+            if (f.is_regular_file(ec)) bytes += f.file_size(ec);
+        }
+      }
+    }
+  }
+  if (!moves.empty()) {
+    const auto space = std::filesystem::space(root, ec);
+    if (ec || space.available < bytes + (256ull << 20)) {
+      XELOGW("Game Vault: no room on the games drive for the {} MB of title updates and DLC on the console; they stay there",
+             bytes >> 20);
+      return;
+    }
+    XELOGI("Game Vault: moving {} MB of title updates and DLC from the console to {}", bytes >> 20,
+           xe::path_to_utf8(root));
+    const uint64_t mb = 1 << 20;
+    {
+      std::lock_guard<std::mutex> lock(gv_addons_name_lock);
+      gv_addons_title = "Moving Xbox 360 updates and DLC to your games drive";
+    }
+    gv_addons_total = int(bytes / mb) + 1;
+    gv_addons_done = 0;
+    uint64_t copied = 0;
+    bool failed = false;
+    // copy everything first; the console's copies go only when all of it is on the drive
+    for (const auto& rel : moves) {
+      const auto from = local / rel;
+      for (auto it = std::filesystem::recursive_directory_iterator(from, ec);
+           it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        if (ec) {
+          failed = true;
+          break;
+        }
+        const auto to = root / rel / std::filesystem::relative(it->path(), from, ec);
+        if (it->is_directory(ec)) {
+          std::filesystem::create_directories(to, ec);
+          continue;
+        }
+        std::filesystem::create_directories(to.parent_path(), ec);
+        const uint64_t size = it->file_size(ec);
+        std::error_code have_ec;
+        if (!(std::filesystem::exists(to, have_ec) && std::filesystem::file_size(to, have_ec) == size)) {
+          {
+            std::lock_guard<std::mutex> lock(gv_addons_name_lock);
+            gv_addons_name = fmt::format("{:.1f} of {:.1f} GB", copied / 1073741824.0, bytes / 1073741824.0);
+          }
+          std::error_code cec;
+          if (!std::filesystem::copy_file(it->path(), to, std::filesystem::copy_options::overwrite_existing, cec) ||
+              std::filesystem::file_size(to, cec) != size) {
+            XELOGE("Game Vault: could not copy {} to the games drive ({})", xe::path_to_utf8(it->path()),
+                   cec.message());
+            failed = true;
+            break;
+          }
+        }
+        copied += size;
+        gv_addons_done = int(copied / mb);
+      }
+      if (failed) break;
+    }
+    gv_addons_total = 0;
+    {
+      std::lock_guard<std::mutex> lock(gv_addons_name_lock);
+      gv_addons_title.clear();
+      gv_addons_name.clear();
+    }
+    if (failed) {
+      XELOGW("Game Vault: moving title updates and DLC failed part-way; they stay on the console");
+      return;
+    }
+    for (const auto& rel : moves) std::filesystem::remove_all(local / rel, ec);
+    XELOGI("Game Vault: {} MB of title updates and DLC moved to the games drive, console space freed", bytes >> 20);
+  }
+  emulator->set_package_root(root);
+  XELOGI("Game Vault: title updates and DLC kept in {}", xe::path_to_utf8(root));
+}
 
 static void InstallGameVaultAddOns(Emulator* emulator) {
   // what happened, also in Xenia's own LocalState (Device Portal can read that one; the shared folder's log it cannot)
@@ -2022,7 +2155,10 @@ void GameVaultXeniaApp::EmulatorThread() {
   app_context().CallInUIThread([this]() { new AddOnProgress(imgui_drawer_.get()); });
   // Opened with no game (a new install has to be opened once from Dev Home before Game Vault can see it): nothing is
   // installed now, or the player waits for every game's add-ons on a screen meant to say "open it once".
-  if (!cvars::target.empty() || UWP::HasGamePath()) InstallGameVaultAddOns(emulator_.get());
+  if (!cvars::target.empty() || UWP::HasGamePath()) {
+    GvUseDrivePackages(emulator_.get());
+    InstallGameVaultAddOns(emulator_.get());
+  }
   std::filesystem::path game_vault_start;
   bool disc_data_ok = true;
   if (cvars::target.empty() && UWP::HasGamePath()) {

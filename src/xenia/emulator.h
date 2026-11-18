@@ -129,6 +129,18 @@ class Emulator {
   // Folder guest content is stored in.
   const std::filesystem::path& content_root() const { return content_root_; }
 
+  // Game Vault: title updates (000B0000) and DLC (00000002) live on the player's drive ("Game Vault\xbox 360
+  // content"), not in the app's own storage on the console's fixed 30 GB. Empty: everything in content_root.
+  static bool IsDrivePackageType(XContentType type) {
+    return type == XContentType::kMarketplaceContent || type == XContentType::kInstaller;
+  }
+  const std::filesystem::path& package_root() const { return package_root_; }
+  void set_package_root(const std::filesystem::path& root) { package_root_ = root; }
+  // Where content of this type is kept: the drive's folder for title updates and DLC when there is one.
+  const std::filesystem::path& content_root_for(XContentType type) const {
+    return !package_root_.empty() && IsDrivePackageType(type) ? package_root_ : content_root_;
+  }
+
   // Folder files safe to remove without significant side effects are stored in.
   const std::filesystem::path& cache_root() const { return cache_root_; }
 
@@ -528,6 +540,7 @@ class Emulator {
   DiscRecorder disc_recorder_;
   std::filesystem::path storage_root_;
   std::filesystem::path content_root_;
+  std::filesystem::path package_root_;
   std::filesystem::path cache_root_;
 
   std::string title_name_;

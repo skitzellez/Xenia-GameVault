@@ -120,7 +120,12 @@ std::filesystem::path ContentManager::ResolvePackageRoot(
 
   // Package root path:
   // content_root/title_id/content_type/
-  return root_path_ / xuid_str / title_id_str / content_type_str;
+  // Game Vault: title updates and DLC on the player's drive when there is one (Emulator::content_root_for)
+  const std::filesystem::path root =
+      kernel_state_ && kernel_state_->emulator()
+          ? kernel_state_->emulator()->content_root_for(content_type)
+          : root_path_;
+  return root / xuid_str / title_id_str / content_type_str;
 }
 
 // FATX is case-insensitive, so on a case-sensitive host filesystem (Linux)

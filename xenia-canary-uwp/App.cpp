@@ -41,6 +41,8 @@ bool gv_requested_fsr = false;
 // Game Vault 0.16.1.740+: the FSR strength in percent (fsrs=10..100), 0 = Xenia's own sharpness
 int gv_requested_fsr_pct = 0;
 uint32_t gv_requested_title = 0;
+// Game Vault: home= in the start link, its folder on the games drive (gv_main.cc keeps title updates and DLC there)
+std::string gv_requested_home;
 #include "xenia/base/logging.h"
 #include "xenia/config.h"
 #include "xenia/ui/imgui_dialog.h"
@@ -312,6 +314,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
       gv_requested_fsr = false;
       gv_requested_fsr_pct = 0;
       gv_requested_title = 0;
+      gv_requested_home.clear();
       for (const auto& argument : query) {
         arguments.emplace_back(winrt::to_string(argument.Name()),
                                winrt::to_string(argument.Value()));
@@ -341,6 +344,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } else if (argument.Name() == L"scale") {
           // Game Vault 0.16.1.369+: the game's "Resolution scale" (Xbox 360 game settings)
           scale = _wtoi(argument.Value().c_str());
+        } else if (argument.Name() == L"home") {
+          // Game Vault: its folder on the games drive (USB drive or Dev storage)
+          gv_requested_home = winrt::to_string(argument.Value());
         } else if (argument.Name() == L"titleid") {
           // Game Vault 0.16.1.412+: the game starting, so only its own add-ons are installed now (gv_main.cc)
           gv_requested_title = uint32_t(wcstoul(argument.Value().c_str(), nullptr, 16));
