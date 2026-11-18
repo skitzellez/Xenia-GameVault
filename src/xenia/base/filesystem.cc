@@ -57,6 +57,9 @@ std::string ReadAllText(const std::filesystem::path& path) {
 bool CreateParentFolder(const std::filesystem::path& path) {
   if (path.has_parent_path()) {
     auto parent_path = path.parent_path();
+#if XE_PLATFORM_WIN32
+    return !MakeFoldersFromApp(parent_path);
+#endif
     if (!std::filesystem::exists(parent_path)) {
       return std::filesystem::create_directories(parent_path);
     }
@@ -65,6 +68,9 @@ bool CreateParentFolder(const std::filesystem::path& path) {
 }
 
 std::error_code CreateFolder(const std::filesystem::path& path) {
+#if XE_PLATFORM_WIN32
+  return MakeFoldersFromApp(path);
+#endif
   if (std::filesystem::exists(path)) {
     return {};
   }

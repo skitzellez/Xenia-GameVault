@@ -46,6 +46,33 @@ std::filesystem::path to_path(const std::u16string_view source) {
 
 namespace filesystem {
 
+std::error_code MakeFoldersFromApp(const std::filesystem::path& path) {
+  std::wstring p = path.wstring();
+  for (auto& c : p) {
+    if (c == L'/') c = L'\\';
+  }
+  while (p.size() > 3 && p.back() == L'\\') p.pop_back();
+  // the drive root ("D:\\") is never made; folders above that already exist may refuse (access denied)
+  const size_t start = p.size() > 2 && p[1] == L':' ? 3 : 0;
+  for (size_t i = start; i <= p.size(); ++i) {
+    if (i != p.size() && p[i] != L'\\') continue;
+    const std::wstring part = p.substr(0, i);
+    if (part.size() <= 3) continue;
+    if (!CreateDirectoryFromAppW(part.c_str(), nullptr)) {
+      const DWORD e = GetLastError();
+      if (e != ERROR_ALREADY_EXISTS && e != ERROR_ACCESS_DENIED && i == p.size()) {
+        return std::error_code(int(e), std::system_category());
+      }
+    }
+  }
+  WIN32_FILE_ATTRIBUTE_DATA data{};
+  if (!GetFileAttributesExFromAppW(p.c_str(), GetFileExInfoStandard, &data) ||
+      !(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+    return std::error_code(int(ERROR_PATH_NOT_FOUND), std::system_category());
+  }
+  return {};
+}
+
 std::filesystem::path GetExecutablePath() {
   wchar_t buffer[MAX_PATH];
   DWORD len = GetModuleFileNameW(nullptr, buffer, MAX_PATH);

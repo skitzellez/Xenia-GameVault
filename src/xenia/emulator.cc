@@ -1302,7 +1302,7 @@ X_STATUS Emulator::InstallContentPackage(
     // Do you want to overwrite already existing data?
   } else {
     std::error_code error_code;
-    std::filesystem::create_directories(installation_path, error_code);
+    error_code = xe::filesystem::CreateFolder(installation_path);   // Game Vault: also on the games drive
     if (error_code) {
       std::lock_guard<std::mutex> lock(*installation_info.mutex_);
       installation_info.installation_state_ = InstallState::failed;

@@ -648,8 +648,7 @@ static void GvUseDrivePackages(Emulator* emulator) {
   // can this app write there? A drive's file opened by path can wait on a consent the console never shows: given 10 s
   auto ok = std::make_shared<std::atomic<int>>(0);   // 0 waiting, 1 yes, 2 no
   std::thread([root, ok] {
-    std::error_code ec;
-    std::filesystem::create_directories(root, ec);
+    std::error_code ec = xe::filesystem::CreateFolder(root);
     const auto probe = root / "xenia-write-test.tmp";
     bool good = false;
     {
@@ -677,6 +676,14 @@ static void GvUseDrivePackages(Emulator* emulator) {
   auto is_hex = [](const std::string& s, size_t n) {
     return s.size() == n && s.find_first_not_of("0123456789ABCDEFabcdef") == std::string::npos;
   };
+  // the part of a path under a folder of it (std::filesystem::relative reads the drive root, which an app on the Xbox
+  // may not: it gave an empty path on the console)
+  auto under = [](const std::filesystem::path& p, const std::filesystem::path& base) {
+    const std::wstring a = p.wstring(), b = base.wstring();
+    size_t cut = b.size();
+    while (cut < a.size() && (a[cut] == L'\\' || a[cut] == L'/')) ++cut;
+    return std::filesystem::path(a.size() > b.size() && !_wcsnicmp(a.c_str(), b.c_str(), b.size()) ? a.substr(cut) : L"");
+  };
   std::vector<std::filesystem::path> moves;   // relative to the content folder
   uint64_t bytes = 0;
   std::error_code ec;
@@ -687,7 +694,7 @@ static void GvUseDrivePackages(Emulator* emulator) {
       for (const char* type : kTypes) {
         for (const auto& dir : {title.path() / type, title.path() / "Headers" / type}) {
           if (!std::filesystem::is_directory(dir, ec)) continue;
-          moves.push_back(std::filesystem::relative(dir, local, ec));
+          moves.push_back(under(dir, local));
           for (const auto& f : std::filesystem::recursive_directory_iterator(dir, ec))
             if (f.is_regular_file(ec)) bytes += f.file_size(ec);
         }
@@ -721,12 +728,19 @@ static void GvUseDrivePackages(Emulator* emulator) {
           failed = true;
           break;
         }
-        const auto to = root / rel / std::filesystem::relative(it->path(), from, ec);
+        const auto part = under(it->path(), from);
+        if (rel.empty() || part.empty()) {
+          XELOGE("Game Vault: could not work out where {} goes", xe::path_to_utf8(it->path()));
+          failed = true;
+          break;
+        }
+        const auto to = root / rel / part;
         if (it->is_directory(ec)) {
-          std::filesystem::create_directories(to, ec);
+          xe::filesystem::CreateFolder(to);
           continue;
         }
-        std::filesystem::create_directories(to.parent_path(), ec);
+        if (const auto made = xe::filesystem::CreateFolder(to.parent_path()))
+          XELOGW("Game Vault: folder {} could not be made ({})", xe::path_to_utf8(to.parent_path()), made.message());
         const uint64_t size = it->file_size(ec);
         std::error_code have_ec;
         if (!(std::filesystem::exists(to, have_ec) && std::filesystem::file_size(to, have_ec) == size)) {
@@ -734,11 +748,26 @@ static void GvUseDrivePackages(Emulator* emulator) {
             std::lock_guard<std::mutex> lock(gv_addons_name_lock);
             gv_addons_name = fmt::format("{:.1f} of {:.1f} GB", copied / 1073741824.0, bytes / 1073741824.0);
           }
+          // read and written in pieces, with the same file calls Xenia installs with: std::filesystem::copy_file
+          // (CopyFile2) cannot reach the games drive from the app ("cannot find the path", console 11-18)
           std::error_code cec;
-          if (!std::filesystem::copy_file(it->path(), to, std::filesystem::copy_options::overwrite_existing, cec) ||
-              std::filesystem::file_size(to, cec) != size) {
-            XELOGE("Game Vault: could not copy {} to the games drive ({})", xe::path_to_utf8(it->path()),
-                   cec.message());
+          bool copied_ok = false;
+          if (FILE* in = xe::filesystem::OpenFile(it->path(), "rb")) {
+            if (FILE* out = xe::filesystem::OpenFile(to, "wb")) {
+              std::vector<uint8_t> buf(4 << 20);
+              copied_ok = true;
+              for (size_t n; (n = fread(buf.data(), 1, buf.size(), in)) > 0;)
+                if (fwrite(buf.data(), 1, n, out) != n) {
+                  copied_ok = false;
+                  break;
+                }
+              copied_ok = fclose(out) == 0 && copied_ok;
+            }
+            fclose(in);
+          }
+          if (!copied_ok || std::filesystem::file_size(to, cec) != size) {
+            XELOGE("Game Vault: could not copy {} to the games drive (error {}, {})", xe::path_to_utf8(it->path()),
+                   errno, xe::path_to_utf8(to));
             failed = true;
             break;
           }

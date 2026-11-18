@@ -344,6 +344,17 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(
       result.emplace_back(std::move(content_data));
     }
   }
+  // Game Vault: say once per title and kind when a game finds its title updates / DLC on the games drive
+  if (!result.empty() && kernel_state_ && kernel_state_->emulator() &&
+      !kernel_state_->emulator()->package_root().empty() &&
+      Emulator::IsDrivePackageType(content_type)) {
+    static std::mutex said_lock;
+    static std::unordered_set<uint64_t> said;
+    std::lock_guard<std::mutex> lock(said_lock);
+    if (said.insert(uint64_t(title_id) << 32 | uint32_t(content_type)).second)
+      XELOGI("Game Vault: {} {} package(s) of {:08X} found on the games drive", result.size(),
+             content_type == XContentType::kInstaller ? "title update" : "DLC", title_id);
+  }
   return result;
 }
 

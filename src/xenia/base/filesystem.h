@@ -56,6 +56,13 @@ bool CreateParentFolder(const std::filesystem::path& path);
 // If folder already exists it returns success (no error).
 std::error_code CreateFolder(const std::filesystem::path& path);
 
+#if XE_PLATFORM_WIN32
+// Game Vault: every missing folder of the path made with CreateDirectoryFromAppW. On the Xbox an app reaches the
+// games drive (USB drive, Dev storage) only through the FromApp calls; std::filesystem::create_directories fails
+// there ("cannot find the path", console 2026-11-18).
+std::error_code MakeFoldersFromApp(const std::filesystem::path& path);
+#endif
+
 // Creates an empty file at the given path, overwriting if it exists.
 bool CreateEmptyFile(const std::filesystem::path& path);
 

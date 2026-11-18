@@ -446,8 +446,8 @@ X_STATUS VirtualFileSystem::ExtractContentFile(Entry* entry,
   }
 
   if (entry->attributes() & kFileAttributeDirectory) {
-    std::error_code error_code;
-    std::filesystem::create_directories(dest_name, error_code);
+    // Game Vault: xe::filesystem::CreateFolder reaches the games drive too (FromApp)
+    std::error_code error_code = xe::filesystem::CreateFolder(dest_name);
     if (error_code) {
       return error_code.value();
     }
@@ -550,7 +550,7 @@ void VirtualFileSystem::ExtractContentHeader(Device* device,
       ((XContentContainerDevice*)device);
 
   if (!std::filesystem::exists(base_path.parent_path())) {
-    if (!std::filesystem::create_directories(base_path.parent_path())) {
+    if (xe::filesystem::CreateFolder(base_path.parent_path())) {
       return;
     }
   }
