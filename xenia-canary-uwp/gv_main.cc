@@ -633,8 +633,13 @@ static const char kAddOnStoppedTwice[] = "failed (Xenia stopped while installing
 // and profiles stay in the app's own storage. The ones installed on the console before are moved over once, with the
 // progress showing. Anything that goes wrong (drive not writable or not answering, no room, a copy failing) keeps
 // everything on the console as before, so nothing a game had disappears.
+// the games drive answered and can be written (GvUseDrivePackages): add-ons listed by their place on the drive are
+// read from there; when it did not, they are reported "unreadable" and Game Vault copies them into the shared folder
+static bool gv_drive_ok = false;
+
 static void GvUseDrivePackages(Emulator* emulator) {
   emulator->set_package_root({});
+  gv_drive_ok = false;
   if (gv_requested_home.empty()) {
     XELOGI("Game Vault: no games drive in the link, title updates and DLC stay on the console");
     return;
@@ -665,6 +670,7 @@ static void GvUseDrivePackages(Emulator* emulator) {
            xe::path_to_utf8(root), *ok == 0 ? "did not answer" : "cannot be written");
     return;
   }
+  gv_drive_ok = true;
   // what is still on the console: <content>\<16 hex>\<8 hex>\{00000002,000B0000} and the Headers of those
   const auto local = emulator->content_root();
   const char* kTypes[] = {"00000002", "000B0000"};
@@ -864,6 +870,7 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
       const size_t t1 = l.find('\t'), t2 = t1 == std::string::npos ? t1 : l.find('\t', t1 + 1);
       if (t2 == std::string::npos) continue;
       auto was = before.find(l.substr(t1 + 1, t2 - t1 - 1));
+      if (l.substr(0, t1) == l.substr(t1 + 1, t2 - t1 - 1) && !gv_drive_ok) continue;   // on a drive that did not answer
       std::error_code ec;
       const auto package = std::filesystem::path(xe::to_path(l.substr(0, t1)));
       if ((was == before.end() || was->second.first != std::strtoull(l.substr(t2 + 1).c_str(), nullptr, 10)) &&
@@ -885,13 +892,21 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
     const std::string copy = line.substr(0, t1), original = line.substr(t1 + 1, t2 - t1 - 1);
     const uint64_t size = std::strtoull(line.substr(t2 + 1).c_str(), nullptr, 10);
     const auto path = std::filesystem::path(xe::to_path(copy));
+    // Game Vault 0.16.1.801+ with Xenia 1.1.8.461+: a package on the games drive is listed by its own place there
+    // (no copy on the console's 30 GB). That file is the player's: never removed.
+    const bool on_drive = copy == original;
     std::error_code ec;
     auto was = before.find(original);
     trace << "line [" << line << "]\n";
-    if (was != before.end() && was->second.first == size) {
+    if (was != before.end() && was->second.first == size && was->second.second != "unreadable") {
       trace << "  done before: " << was->second.second << "\n";
       after[original] = was->second;   // installed before, or failed with this very file
-      std::filesystem::remove(path, ec);
+      if (!on_drive) std::filesystem::remove(path, ec);
+      continue;
+    }
+    if (on_drive && !gv_drive_ok) {   // the drive did not answer: Game Vault copies it in for the next start
+      trace << "  on the drive, which did not answer: unreadable\n";
+      after[original] = {size, "unreadable"};
       continue;
     }
     trace << "package " << original << " (copy " << copy << ", " << size << " bytes)\n";
@@ -943,7 +958,7 @@ static void InstallGameVaultAddOns(Emulator* emulator) {
     gv_addons_done++;
     trace << "  " << result << "\n";
     after[original] = {size, result};
-    std::filesystem::remove(path, ec);   // the copy has done its job (the installed content is in Xenia now)
+    if (!on_drive) std::filesystem::remove(path, ec);   // the copy has done its job (the installed content is in Xenia now)
   }
   write_done(nullptr, 0);
   if (installed || failed) XELOGI("Game Vault: add-ons: {} installed, {} failed", installed, failed);
