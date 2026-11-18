@@ -154,6 +154,15 @@ std::string GetPackageVersion() {
                      version.Build, version.Revision);
 }
 
+// Game Vault: the folder the package is installed in (its Assets live there).
+std::string GetInstallFolder() {
+  try {
+    return winrt::to_string(winrt::Windows::ApplicationModel::Package::Current().InstalledLocation().Path());
+  } catch (...) {
+    return "";
+  }
+}
+
 std::string GetPublisherGames() {
   try {
     return winrt::to_string(winrt::Windows::Storage::ApplicationData::Current()

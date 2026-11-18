@@ -963,7 +963,7 @@ struct GvFigureEntry {
 static const std::vector<GvFigureEntry>& GvFigureList() {
   static const std::vector<GvFigureEntry> list = []() {
     std::vector<GvFigureEntry> out;
-    std::ifstream file(xe::filesystem::GetExecutableFolder() / "Assets" / "skylanders-figures.txt");
+    std::ifstream file(xe::to_path(UWP::GetInstallFolder()) / "Assets" / "skylanders-figures.txt");
     std::string line;
     while (std::getline(file, line)) {
       if (line.empty() || line[0] == '#') continue;
@@ -1928,6 +1928,7 @@ void GameVaultXeniaApp::EmulatorThread() {
     const std::string shared = UWP::GetPublisherGames();
     portal->SetFigureFolder(!shared.empty() ? xe::to_path(shared) / "skylanders"
                                             : xe::to_path(UWP::GetLocalState()) / "skylanders");
+    portal->SetLogFile(xe::to_path(UWP::GetLocalState()) / "gv_portal.log");
   }
   emulator_->on_launch.AddListener([this](auto, const std::string_view title_name) {
     if (hid::VirtualPortal* portal = GvPortal(emulator_.get())) {

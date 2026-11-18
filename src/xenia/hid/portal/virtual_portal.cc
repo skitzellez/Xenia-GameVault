@@ -88,11 +88,28 @@ std::string SafeFileName(const std::string& name) {
 }  // namespace
 
 VirtualPortal::VirtualPortal() : Portal() {}
-VirtualPortal::~VirtualPortal() = default;
+VirtualPortal::~VirtualPortal() {
+  if (log_) std::fclose(log_);
+}
+
+void VirtualPortal::SetLogFile(const std::filesystem::path& file) {
+  std::lock_guard<std::mutex> lock(log_mutex_);
+  if (log_) std::fclose(log_);
+  log_ = xe::filesystem::OpenFile(file, "wt");
+}
+
+void VirtualPortal::Note(const std::string& line) {
+  XELOGI("Game Vault portal: {}", line);
+  std::lock_guard<std::mutex> lock(log_mutex_);
+  if (log_) {
+    std::fprintf(log_, "%s\n", line.c_str());
+    std::fflush(log_);
+  }
+}
 
 void VirtualPortal::SetEnabled(bool enabled) {
   if (enabled_ != enabled) {
-    XELOGI("Game Vault portal: {} (figures folder {})", enabled ? "on" : "off", xe::path_to_utf8(folder_));
+    Note(fmt::format("{} (figures folder {})", enabled ? "on" : "off", xe::path_to_utf8(folder_)));
   }
   enabled_ = enabled;
   if (!enabled) {
@@ -165,8 +182,8 @@ int VirtualPortal::Place(const std::filesystem::path& file, std::string& error) 
   f.pending.push_back(3);  // "arrived" ...
   f.pending.push_back(1);  // ... then "on the portal"
   f.last_serial = serial;
-  XELOGI("Game Vault portal: {} placed in slot {} (character {}, variant {:04X})", xe::path_to_utf8(file.filename()),
-         slot, ReadLe16(data.data() + 0x10), ReadLe16(data.data() + 0x1C));
+  Note(fmt::format("{} placed in slot {} (character {}, variant {:04X})", xe::path_to_utf8(file.filename()),
+         slot, ReadLe16(data.data() + 0x10), ReadLe16(data.data() + 0x1C)));
   return slot;
 }
 
@@ -175,7 +192,7 @@ bool VirtualPortal::Remove(int slot) {
   std::lock_guard<std::mutex> lock(mutex_);
   Figure& f = figures_[slot];
   if (!(f.status & 1)) return false;
-  XELOGI("Game Vault portal: {} taken off slot {}", xe::path_to_utf8(f.file.filename()), slot);
+  Note(fmt::format("{} taken off slot {}", xe::path_to_utf8(f.file.filename()), slot));
   f.status = 2;
   f.pending.clear();
   f.pending.push_back(2);  // "left" ...
@@ -241,8 +258,8 @@ std::filesystem::path VirtualPortal::CreateFigure(uint16_t id, uint16_t variant,
     error = "The figure file couldn't be written.";
     return {};
   }
-  XELOGI("Game Vault portal: new figure {} (character {}, variant {:04X})", xe::path_to_utf8(file.filename()), id,
-         variant);
+  Note(fmt::format("new figure {} (character {}, variant {:04X})", xe::path_to_utf8(file.filename()), id,
+         variant));
   return file;
 }
 
@@ -288,7 +305,7 @@ void VirtualPortal::SaveFigure(const Figure& f) {
   if (f.file.empty()) return;
   std::ofstream out(f.file, std::ios::binary | std::ios::in | std::ios::out);
   if (!out || !out.write(reinterpret_cast<const char*>(f.data.data()), f.data.size())) {
-    XELOGW("Game Vault portal: couldn't save {}", xe::path_to_utf8(f.file.filename()));
+    Note(fmt::format("couldn't save {}", xe::path_to_utf8(f.file.filename())));
   }
 }
 
@@ -356,7 +373,7 @@ void VirtualPortal::HandleCommand(const uint8_t* cmd, size_t size) {
     case 'V':
       break;
     default:
-      XELOGW("Game Vault portal: unknown command {:02X}", cmd[0]);
+      Note(fmt::format("unknown command {:02X}", cmd[0]));
       break;
   }
 }
@@ -370,9 +387,10 @@ X_STATUS VirtualPortal::WriteInternal(std::span<uint8_t> data) {
     cmd += 2;
     size -= 2;
   }
-  if (commands_logged_ < kLogLimit) {
+  // (the portal colour fades come many times a second: left out so the log keeps room for reads and writes)
+  if (commands_logged_ < kLogLimit && !(size && cmd[0] == 'C')) {
     ++commands_logged_;
-    XELOGI("Game Vault portal: game sent {}", Hex(data.data(), std::min<size_t>(data.size(), 24)));
+    Note(fmt::format("game sent {}", Hex(data.data(), std::min<size_t>(data.size(), 24))));
   }
   HandleCommand(cmd, size);
   return X_ERROR_SUCCESS;
@@ -407,7 +425,7 @@ X_STATUS VirtualPortal::ReadInternal(std::span<uint8_t> data, int32_t& read_coun
   const bool figure_news = status && (r[ReplyHeader() ? 3 : 1] || r[ReplyHeader() ? 4 : 2]);
   if (reads_logged_ < kLogLimit && (!status || figure_news || reads_logged_ < 8)) {
     ++reads_logged_;
-    XELOGI("Game Vault portal: reply {}", Hex(r.data(), std::min<size_t>(n, 24)));
+    Note(fmt::format("reply {}", Hex(r.data(), std::min<size_t>(n, 24))));
   }
   return X_ERROR_SUCCESS;
 }

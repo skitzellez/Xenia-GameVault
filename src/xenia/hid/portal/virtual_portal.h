@@ -11,6 +11,7 @@
 #define XENIA_HID_PORTAL_VIRTUAL_PORTAL_H_
 
 #include <array>
+#include <cstdio>
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -43,6 +44,8 @@ class VirtualPortal final : public Portal {
   void SetEnabled(bool enabled);
   bool enabled() const { return enabled_; }
   void SetFigureFolder(const std::filesystem::path& folder);
+  // The portal's messages also go to this file (readable over Device Portal while a game runs).
+  void SetLogFile(const std::filesystem::path& file);
   const std::filesystem::path& figure_folder() const { return folder_; }
 
   // Figure files in the folder, sorted by name.
@@ -81,9 +84,12 @@ class VirtualPortal final : public Portal {
   void MakeStatus(uint8_t* out);
   void SaveFigure(const Figure& figure);
   bool ReplyHeader() const;
+  void Note(const std::string& line);
 
   std::atomic<bool> enabled_{false};
   std::filesystem::path folder_;
+  std::mutex log_mutex_;
+  FILE* log_ = nullptr;
   std::mutex mutex_;
   std::array<Figure, kSlots> figures_;
   std::deque<Reply> replies_;
