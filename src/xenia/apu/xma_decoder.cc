@@ -423,6 +423,11 @@ void XmaDecoder::Pause() {
   }
   paused_ = true;
 
+  if (!cvars::use_dedicated_xma_thread) {
+    return;
+  }
+
+  work_event_->Set();
   pause_fence_.Wait();
 }
 
