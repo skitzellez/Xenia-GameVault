@@ -11,6 +11,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/gv_perf.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 #include "xenia/ui/window.h"
@@ -431,9 +432,22 @@ bool Presenter::RefreshGuestOutput(
   // Count this frame so the UI thread can tell the guest output is driving the
   // paint cadence and UI drawers don't request extra repaints on top of it.
   guest_output_refresh_count_.fetch_add(1, std::memory_order_relaxed);
-  guest_output_last_refresh_ticks_.store(
-      std::chrono::steady_clock::now().time_since_epoch().count(),
-      std::memory_order_relaxed);
+  {
+    // Game Vault 1.1.8.482: frame times for gv_dips.log (a 60 fps second can still hold one long frame = a hitch)
+    const int64_t now_ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+    const int64_t prev_ticks = guest_output_last_refresh_ticks_.exchange(now_ticks, std::memory_order_relaxed);
+    if (prev_ticks) {
+      const uint64_t us = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::duration(now_ticks - prev_ticks))
+                                       .count());
+      uint64_t seen = xe::gv_perf::frame_max_us.load(std::memory_order_relaxed);
+      while (us > seen &&
+             !xe::gv_perf::frame_max_us.compare_exchange_weak(seen, us, std::memory_order_relaxed)) {
+      }
+      if (us > 25000) xe::gv_perf::frames_over_25.fetch_add(1, std::memory_order_relaxed);
+      if (us > 50000) xe::gv_perf::frames_over_50.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
 
   // Trigger the presentation on the host.
   PaintResult paint_result = PaintResult::kNotPresented;
