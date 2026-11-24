@@ -15,6 +15,8 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/math.h"
 
+DEFINE_bool(gv_pso_fake_ieee_mul, false, "Game Vault test only (may draw wrong): plain multiplies without the Xbox 360 zero rule, to measure the driver build time.", "D3D12");
+
 namespace xe {
 namespace gpu {
 using namespace ucode;
@@ -98,7 +100,7 @@ void DxbcShaderTranslator::ProcessVectorAluOperation(
           used_result_components &
           ~instr.vector_operands[0].GetIdenticalComponents(
               instr.vector_operands[1]);
-      if (multiplicands_different) {
+      if (multiplicands_different && !cvars::gv_pso_fake_ieee_mul) {
         // Shader Model 3: +-0 or denormal * anything = +0.
         uint32_t is_zero_temp = PushSystemTemp();
         a_.OpMin(dxbc::Dest::R(is_zero_temp, multiplicands_different),
@@ -210,7 +212,7 @@ void DxbcShaderTranslator::ProcessVectorAluOperation(
         a_.OpMul(dxbc::Dest::R(system_temp_result_, i ? 0b0010 : 0b0001),
                  operands[0].SelectFromSwizzled(i),
                  operands[1].SelectFromSwizzled(i));
-        if ((different & (1 << i)) != 0) {
+        if ((different & (1 << i)) != 0 && !cvars::gv_pso_fake_ieee_mul) {
           // Shader Model 3: +-0 or denormal * anything = +0 (also not replacing
           // true `0 + term` with movc of the term because +0 + -0 should result
           // in +0, not -0).
@@ -735,7 +737,7 @@ void DxbcShaderTranslator::ProcessScalarAluOperation(
     case AluScalarOpcode::kMuls:
       a_.OpMul(ps_dest, operand_0_a, operand_0_b);
       if (instr.scalar_operands[0].components[0] !=
-          instr.scalar_operands[0].components[1]) {
+          instr.scalar_operands[0].components[1] && !cvars::gv_pso_fake_ieee_mul) {
         // Shader Model 3: +-0 or denormal * anything = +0.
         uint32_t is_zero_temp = PushSystemTemp();
         a_.OpMin(dxbc::Dest::R(is_zero_temp, 0b0001), operand_0_a.Abs(),
@@ -1054,7 +1056,7 @@ void DxbcShaderTranslator::ProcessScalarAluOperation(
       a_.OpMul(ps_dest, operand_0_a, operand_1);
       if (!(instr.scalar_operands[0].GetIdenticalComponents(
                 instr.scalar_operands[1]) &
-            0b0001)) {
+            0b0001) && !cvars::gv_pso_fake_ieee_mul) {
         // Shader Model 3: +-0 or denormal * anything = +0.
         uint32_t is_zero_temp = PushSystemTemp();
         a_.OpMin(dxbc::Dest::R(is_zero_temp, 0b0001), operand_0_a.Abs(),

@@ -368,12 +368,16 @@ void PipelineCache::InitializeShaderStorage(
   {
     const uint64_t bits = GvTextureSetupBits();
     std::unordered_set<uint64_t> generic_of_hot_specialised;
+    gv_generic_of_specialised_.clear();
     for (const PipelineStoredDescription& stored : pipeline_stored_descriptions) {
-      if ((stored.description.pixel_shader_modification & bits) &&
-          gv_hot_list.count(stored.description_hash)) {
+      if (stored.description.pixel_shader_modification & bits) {
         PipelineDescription generic = stored.description;
         generic.pixel_shader_modification &= ~bits;
-        generic_of_hot_specialised.insert(XXH3_64bits(&generic, sizeof(generic)));
+        uint64_t generic_hash = XXH3_64bits(&generic, sizeof(generic));
+        gv_generic_of_specialised_.insert(generic_hash);
+        if (gv_hot_list.count(stored.description_hash)) {
+          generic_of_hot_specialised.insert(generic_hash);
+        }
       }
     }
     for (uint64_t hash : generic_of_hot_specialised) {
@@ -442,6 +446,7 @@ void PipelineCache::InitializeShaderStorage(
     }
 
     size_t pipelines_created = 0;
+    size_t gv_generic_skipped = 0;
     size_t pipelines_already_exist = 0;
     size_t pipelines_vs_not_found = 0;
     size_t pipelines_vs_translation_missing = 0;
@@ -468,6 +473,13 @@ void PipelineCache::InitializeShaderStorage(
       }
       if (pipeline_found) {
         ++pipelines_already_exist;
+        continue;
+      }
+      // Game Vault: a stored generic pipeline that is also stored built for a texture setup is not built ahead
+      // (only a fallback; made when a draw really asks for it).
+      if (!gv_hot_list.count(pipeline_stored_description.description_hash) &&
+          gv_generic_of_specialised_.count(pipeline_stored_description.description_hash)) {
+        ++gv_generic_skipped;
         continue;
       }
 
@@ -663,6 +675,8 @@ void PipelineCache::InitializeShaderStorage(
       xe::gv_perf::hot_built.store(0, std::memory_order_relaxed);
       xe::gv_perf::hot_total.store(hot, std::memory_order_relaxed);
     }
+    XELOGI("Game Vault: {} stored generic pipelines not built ahead (stored for their texture setup too)",
+           gv_generic_skipped);
     XELOGI(
         "Pipeline cache loaded: {} created, {} already exist, {} total stored",
         pipelines_created, pipelines_already_exist,

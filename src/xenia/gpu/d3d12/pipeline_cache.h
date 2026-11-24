@@ -17,6 +17,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <unordered_set>
 #include <mutex>
 #include <queue>
 #include <set>
@@ -533,6 +534,8 @@ class PipelineCache {
   uint64_t gv_quiet_at_ms_ = 0, gv_quiet_draws_ = 0;
   bool gv_quiet_ = false;
   std::filesystem::path gv_hot_path_;
+  // Hashes of generic pipeline descriptions whose texture-setup version is stored (start-up only).
+  std::unordered_set<uint64_t> gv_generic_of_specialised_;
   // Game Vault test probe (only with gv_pso_on.txt in the cache folder): how long the driver takes for each
   // pipeline, with sizes, written to gv_pso\pso.log, and every translated shader saved once in gv_pso\.
   std::filesystem::path gv_pso_dir_;
