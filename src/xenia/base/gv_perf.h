@@ -27,6 +27,9 @@ inline std::atomic<uint64_t> net_ahead{0}, net_ahead_used{0}, net_ahead_waits{0}
 // 1.1.8.485: draws_total never reset (creation threads read it to see a quiet game); pipelines built in the
 // background this second and how many are still waiting in the queue.
 inline std::atomic<uint64_t> draws_total{0}, pipelines_built{0}, pipelines_left{0};
+// 1.1.8.488: the pipelines on the title's used list (gvhot) and how many are built: the "getting graphics ready"
+// counter on screen (emulator_window.cc)
+inline std::atomic<uint64_t> hot_total{0}, hot_built{0};
 inline std::atomic<uint64_t> upload_bytes{0}, draws{0}, draws_skipped{0}, pipelines_queued{0}, pipelines_not_waited{0};
 // Texture cache: made and destroyed since the last look, how many it holds and their host memory (MB) now.
 // Shared memory: writes by the game caught on watched pages, and requests that had to take the lock.

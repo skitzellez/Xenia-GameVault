@@ -619,6 +619,14 @@ void PipelineCache::InitializeShaderStorage(
       }
     }
 
+    {   // 1.1.8.488: the on-screen counter's total (the used-list pipelines that were stored)
+      uint64_t hot = 0;
+      for (Pipeline* p : gv_hot_by_order_) {
+        hot += p != nullptr;
+      }
+      xe::gv_perf::hot_built.store(0, std::memory_order_relaxed);
+      xe::gv_perf::hot_total.store(hot, std::memory_order_relaxed);
+    }
     XELOGI(
         "Pipeline cache loaded: {} created, {} already exist, {} total stored",
         pipelines_created, pipelines_already_exist,
@@ -3758,6 +3766,9 @@ void PipelineCache::CreationThread(size_t thread_index) {
                        .ucode_data_hash()
                  : 0);
     }
+    if (pipeline_to_create->gv_hot) {
+      xe::gv_perf::hot_built.fetch_add(1, std::memory_order_relaxed);
+    }
     pipeline_to_create->gv_done.store(true, std::memory_order_release);
     xe::gv_perf::pipelines_built.fetch_add(1, std::memory_order_relaxed);
 
@@ -3804,6 +3815,9 @@ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
       pipeline_to_create->state.store(new_state, std::memory_order_release);
     } else {
       XELOGW("ProcessorThread: Pipeline creation failed");
+    }
+    if (pipeline_to_create->gv_hot) {
+      xe::gv_perf::hot_built.fetch_add(1, std::memory_order_relaxed);
     }
     pipeline_to_create->gv_done.store(true, std::memory_order_release);
   }
@@ -3948,6 +3962,9 @@ bool PipelineCache::GvBuildPipelineNow(void* handle) {
     ID3D12PipelineState* new_state = CreateD3D12Pipeline(pipeline->description);
     if (new_state != nullptr) {
       pipeline->state.store(new_state, std::memory_order_release);
+    }
+    if (pipeline->gv_hot) {
+      xe::gv_perf::hot_built.fetch_add(1, std::memory_order_relaxed);
     }
     pipeline->gv_done.store(true, std::memory_order_release);
   } else {

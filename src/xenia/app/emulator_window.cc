@@ -137,6 +137,7 @@
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/graphics_provider.h"
 #include "xenia/ui/imgui_dialog.h"
+#include "xenia/base/gv_perf.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/imgui_host_notification.h"
 #include "xenia/ui/immediate_drawer.h"
@@ -299,6 +300,78 @@ DEFINE_bool(disable_game_window_mouse, false,
 
 namespace xe {
 namespace app {
+
+// Game Vault 1.1.8.488: "Getting graphics ready 412 / 1,295" at the top right after a game starts. The Xbox driver
+// builds ~6 pipelines a second and keeps none between runs; a draw that needs one not built yet either waits (the
+// game stutters) or is skipped (MW3: gun, enemies and walls missing, owner 11-24). The counter shows how far the
+// pipelines the game really uses (its gvhot list) are, so the player can wait in the menu until it is done. It goes
+// away a few seconds after "Graphics ready". Draws only: no input of its own.
+class GvGraphicsReadyDialog : public ui::ImGuiDialog {
+ public:
+  static void ShowFor(ui::ImGuiDrawer* drawer) {
+    if (!drawer || current_) {
+      return;
+    }
+    current_ = new GvGraphicsReadyDialog(drawer);
+  }
+
+ protected:
+  explicit GvGraphicsReadyDialog(ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {
+    started_ms_ = Clock::QueryHostUptimeMillis();
+  }
+  ~GvGraphicsReadyDialog() override {
+    if (current_ == this) {
+      current_ = nullptr;
+    }
+  }
+  void OnDraw(ImGuiIO& io) override {
+    const uint64_t now = Clock::QueryHostUptimeMillis();
+    const uint64_t total = xe::gv_perf::hot_total.load(std::memory_order_relaxed);
+    const uint64_t built = std::min(xe::gv_perf::hot_built.load(std::memory_order_relaxed), total);
+    if (total == 0) {
+      // the list comes with the pipeline cache a moment after the start; a game with none shows nothing
+      if (now - started_ms_ > 120000) {
+        Close();
+      }
+      return;
+    }
+    if (built >= total) {
+      if (!done_ms_) {
+        done_ms_ = now;
+      }
+      if (now - done_ms_ > 4000) {
+        Close();
+        return;
+      }
+    }
+    const float scale = std::max(io.DisplaySize.y / 1080.0f, 0.5f);
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 40 * scale, 40 * scale), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.72f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12 * scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18 * scale, 12 * scale));
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                   ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoFocusOnAppearing |
+                                   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings;
+    if (ImGui::Begin("##gv_graphics_ready", nullptr, flags)) {
+      ImGui::SetWindowFontScale(1.15f * scale);
+      if (built < total) {
+        ImGui::TextUnformatted("Getting Graphics Ready");
+        ImGui::SetWindowFontScale(0.9f * scale);
+        ImGui::Text("%llu / %llu", (unsigned long long)built, (unsigned long long)total);
+        ImGui::ProgressBar(float(built) / float(total), ImVec2(320 * scale, 8 * scale), "");
+        ImGui::TextUnformatted("Wait in the menu for the smoothest game");
+      } else {
+        ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.5f, 1.0f), "Graphics Ready");
+      }
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+  }
+
+ private:
+  static inline GvGraphicsReadyDialog* current_ = nullptr;
+  uint64_t started_ms_ = 0, done_ms_ = 0;
+};
 
 struct WxToolbarState {
   ::wxAuiToolBar* toolbar = nullptr;
@@ -776,6 +849,7 @@ void EmulatorWindow::OnEmulatorInitialized() {
               AddLaunchedTitleToLibrary(title_id, name);
               UpdateTitle();
               ApplyContentVisibility();
+              GvGraphicsReadyDialog::ShowFor(imgui_drawer());   // Game Vault 1.1.8.488
             });
       });
   emulator_->on_relaunch_failed.AddListener([this]() {
