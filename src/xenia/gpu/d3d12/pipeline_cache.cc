@@ -46,6 +46,7 @@
 #include "third_party/fmt/include/fmt/xchar.h"
 
 DEFINE_bool(gv_depth_no_alpha_kill, true, "Game Vault: depth-writing pixel shaders drawn without alpha test / alpha to coverage get no discard and no SV_Coverage (the Xbox driver ignores their depth otherwise).", "D3D12");
+DEFINE_bool(gv_pso_dxil, false, "Game Vault test: give the driver DXIL (converted from the DXBC with dxilconv, once per shader) instead of DXBC.", "D3D12");
 DEFINE_bool(gv_color_pass_depth_always, false, "Game Vault debugging: colour draws with greater-or-equal depth test pass always.", "D3D12");
 DEFINE_int32(gv_color_pass_depth_bias, 0, "Game Vault: integer host depth bias added to colour draws testing depth with greater/less-or-equal (0 = off).", "D3D12");
 DEFINE_bool(d3d12_dxbc_disasm, false,
@@ -3057,7 +3058,7 @@ void PipelineCache::EnsurePipelineShadersTranslated(
 void PipelineCache::GvPsoLog(
     const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc,
     const PipelineRuntimeDescription& runtime_description, double ms,
-    HRESULT result) {
+    HRESULT result, const std::string& extra) {
   static std::mutex gv_pso_mutex;
   static std::unordered_set<uint64_t> gv_pso_saved;
   auto save = [&](const char* kind, const D3D12_SHADER_BYTECODE& code) -> uint64_t {
@@ -3082,7 +3083,7 @@ void PipelineCache::GvPsoLog(
   log << fmt::format(
       "{:.1f} {:08X} vs={:016X} ps={:016X} gs={:016X} hs={:016X} ds={:016X} "
       "vsb={} psb={} gsb={} hsb={} dsb={} gvs={:016X} gps={:016X} topo={} "
-      "rt={} msaa={} thread={}\n",
+      "rt={} msaa={} thread={} {}\n",
       ms, uint32_t(result), vs, ps, gs, hs, ds, desc.VS.BytecodeLength,
       desc.PS.BytecodeLength, desc.GS.BytecodeLength, desc.HS.BytecodeLength,
       desc.DS.BytecodeLength,
@@ -3094,7 +3095,66 @@ void PipelineCache::GvPsoLog(
           : 0,
       uint32_t(desc.PrimitiveTopologyType), desc.NumRenderTargets,
       desc.SampleDesc.Count,
-      std::hash<std::thread::id>()(std::this_thread::get_id()) % 1000);
+      std::hash<std::thread::id>()(std::this_thread::get_id()) % 1000, extra);
+}
+
+const std::vector<uint8_t>* PipelineCache::GvDxil(
+    const D3D12_SHADER_BYTECODE& dxbc, double& convert_ms) {
+  static std::mutex gv_dxil_mutex;
+  static std::unordered_map<uint64_t, std::unique_ptr<std::vector<uint8_t>>> gv_dxil_cache;
+  uint64_t hash = XXH3_64bits(dxbc.pShaderBytecode, dxbc.BytecodeLength);
+  {
+    std::lock_guard<std::mutex> lock(gv_dxil_mutex);
+    auto it = gv_dxil_cache.find(hash);
+    if (it != gv_dxil_cache.end()) {
+      return it->second.get();
+    }
+  }
+  thread_local IDxbcConverter* converter = nullptr;
+  thread_local bool converter_tried = false;
+  if (!converter_tried) {
+    converter_tried = true;
+    HRESULT hr = command_processor_.GetD3D12Provider().DxbcConverterCreateInstance(
+        CLSID_DxbcConverter, IID_PPV_ARGS(&converter));
+    if (FAILED(hr)) {
+      converter = nullptr;
+      XELOGE("Game Vault: no DxbcConverter ({:08X}), gv_pso_dxil can't work", uint32_t(hr));
+    }
+  }
+  if (!converter) {
+    return nullptr;
+  }
+  uint64_t start = xe::Clock::QueryHostTickCount();
+  void* dxil = nullptr;
+  UINT32 dxil_size = 0;
+  LPWSTR diag = nullptr;
+  HRESULT hr = converter->Convert(dxbc.pShaderBytecode, UINT32(dxbc.BytecodeLength), nullptr, &dxil, &dxil_size,
+                                  &diag);
+  convert_ms += double(xe::Clock::QueryHostTickCount() - start) * 1000.0 /
+                double(xe::Clock::QueryHostTickFrequency());
+  if (diag) {
+    CoTaskMemFree(diag);
+  }
+  if (FAILED(hr) || !dxil || dxil_size < 20) {
+    XELOGE("Game Vault: DXBC to DXIL failed {:08X}", uint32_t(hr));
+    if (dxil) {
+      CoTaskMemFree(dxil);
+    }
+    return nullptr;
+  }
+  auto out = std::make_unique<std::vector<uint8_t>>(static_cast<uint8_t*>(dxil),
+                                                     static_cast<uint8_t*>(dxil) + dxil_size);
+  CoTaskMemFree(dxil);
+  // The runtime only checks the container hash (the DXBC checksum, the same as the validator's signature).
+  unsigned int container_hash[4];
+  CalculateDXBCChecksum(out->data(), unsigned(out->size()), container_hash);
+  std::memcpy(out->data() + 4, container_hash, sizeof(container_hash));
+  std::lock_guard<std::mutex> lock(gv_dxil_mutex);
+  auto& slot = gv_dxil_cache[hash];
+  if (!slot) {
+    slot = std::move(out);
+  }
+  return slot.get();
 }
 
 ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
@@ -3554,15 +3614,78 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
 
   // Create the D3D12 pipeline state object.
   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
-  ID3D12PipelineState* state;
+  // Game Vault test: DXIL instead of DXBC (gv_pso_dxil), falling back to DXBC if conversion or creation fails.
+  double gv_convert_ms = 0.0;
+  int gv_dxil_state = 0;  // 0 DXBC, 1 DXIL, 2 conversion failed, 3 DXIL creation failed
+  HRESULT gv_dxil_result = S_OK;
+  ID3D12PipelineState* state = nullptr;
+  HRESULT create_result = E_FAIL;
   uint64_t gv_pso_start = xe::Clock::QueryHostTickCount();
-  HRESULT create_result =
-      device->CreateGraphicsPipelineState(&state_desc, IID_PPV_ARGS(&state));
+  if (cvars::gv_pso_dxil) {
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC dxil_desc = state_desc;
+    D3D12_SHADER_BYTECODE* stages[] = {&dxil_desc.VS, &dxil_desc.PS, &dxil_desc.GS, &dxil_desc.HS, &dxil_desc.DS};
+    bool converted = true;
+    for (D3D12_SHADER_BYTECODE* stage : stages) {
+      if (!stage->pShaderBytecode || !stage->BytecodeLength) {
+        continue;
+      }
+      const std::vector<uint8_t>* dxil = GvDxil(*stage, gv_convert_ms);
+      if (!dxil) {
+        converted = false;
+        break;
+      }
+      stage->pShaderBytecode = dxil->data();
+      stage->BytecodeLength = dxil->size();
+    }
+    if (converted) {
+      gv_pso_start = xe::Clock::QueryHostTickCount();
+      gv_dxil_result = device->CreateGraphicsPipelineState(&dxil_desc, IID_PPV_ARGS(&state));
+      if (SUCCEEDED(gv_dxil_result)) {
+        create_result = gv_dxil_result;
+        gv_dxil_state = 1;
+      } else {
+        state = nullptr;
+        gv_dxil_state = 3;
+        static std::atomic<int> gv_dxil_fail_logs{0};
+        if (gv_dxil_fail_logs.fetch_add(1) < 20) {
+          XELOGE("Game Vault: DXIL pipeline failed {:08X}, device removed reason {:08X}", uint32_t(gv_dxil_result),
+                 uint32_t(device->GetDeviceRemovedReason()));
+        }
+      }
+    } else {
+      gv_dxil_state = 2;
+    }
+  }
+  if (gv_dxil_state != 1) {
+    gv_pso_start = xe::Clock::QueryHostTickCount();
+    create_result =
+        device->CreateGraphicsPipelineState(&state_desc, IID_PPV_ARGS(&state));
+  }
   if (!gv_pso_dir_.empty()) {
+    const auto& bs = state_desc.BlendState;
+    const auto& dss = state_desc.DepthStencilState;
+    const auto& rs = state_desc.RasterizerState;
+    std::string extra = fmt::format(
+        "desc={:016X} dxil={} dxilhr={:08X} conv={:.1f} a2c={} ib={} be={}{}{}{} wm={:X}{:X}{:X}{:X} "
+        "bl={:X}/{:X}/{:X}/{:X}/{:X}/{:X} fmt={}/{}/{}/{} dsv={} de={} dw={} df={} se={} cull={} fill={} "
+        "db={} dbs={:g} dclip={}",
+        XXH3_64bits(&description, sizeof(description)), gv_dxil_state, uint32_t(gv_dxil_result), gv_convert_ms,
+        int(bs.AlphaToCoverageEnable), int(bs.IndependentBlendEnable), int(bs.RenderTarget[0].BlendEnable),
+        int(bs.RenderTarget[1].BlendEnable), int(bs.RenderTarget[2].BlendEnable),
+        int(bs.RenderTarget[3].BlendEnable), uint32_t(bs.RenderTarget[0].RenderTargetWriteMask),
+        uint32_t(bs.RenderTarget[1].RenderTargetWriteMask), uint32_t(bs.RenderTarget[2].RenderTargetWriteMask),
+        uint32_t(bs.RenderTarget[3].RenderTargetWriteMask), uint32_t(bs.RenderTarget[0].SrcBlend),
+        uint32_t(bs.RenderTarget[0].DestBlend), uint32_t(bs.RenderTarget[0].BlendOp),
+        uint32_t(bs.RenderTarget[0].SrcBlendAlpha), uint32_t(bs.RenderTarget[0].DestBlendAlpha),
+        uint32_t(bs.RenderTarget[0].BlendOpAlpha), uint32_t(state_desc.RTVFormats[0]),
+        uint32_t(state_desc.RTVFormats[1]), uint32_t(state_desc.RTVFormats[2]), uint32_t(state_desc.RTVFormats[3]),
+        uint32_t(state_desc.DSVFormat), int(dss.DepthEnable), uint32_t(dss.DepthWriteMask),
+        uint32_t(dss.DepthFunc), int(dss.StencilEnable), uint32_t(rs.CullMode), uint32_t(rs.FillMode),
+        rs.DepthBias, rs.SlopeScaledDepthBias, int(rs.DepthClipEnable));
     GvPsoLog(state_desc, runtime_description,
              double(xe::Clock::QueryHostTickCount() - gv_pso_start) * 1000.0 /
                  double(xe::Clock::QueryHostTickFrequency()),
-             create_result);
+             create_result, extra);
   }
   if (FAILED(create_result)) {
     // Game Vault: why (GTA IV on the Xbox failed the same 3 pipelines on every

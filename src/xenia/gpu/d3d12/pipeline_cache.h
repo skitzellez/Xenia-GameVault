@@ -532,7 +532,10 @@ class PipelineCache {
   std::filesystem::path gv_pso_dir_;
   void GvPsoLog(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc,
                 const PipelineRuntimeDescription& runtime_description,
-                double ms, HRESULT result);
+                double ms, HRESULT result, const std::string& extra);
+  // Game Vault test (gv_pso_dxil): the shader as DXIL (dxilconv + signed), converted once per bytecode; nullptr if
+  // it can't be converted.
+  const std::vector<uint8_t>* GvDxil(const D3D12_SHADER_BYTECODE& dxbc, double& convert_ms);
   void GvNoteUsed(Pipeline* pipeline, uint64_t hash);
 };
 inline bool PipelineCache::PipelineDescription::operator==(
