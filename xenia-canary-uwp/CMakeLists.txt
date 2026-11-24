@@ -71,7 +71,7 @@ target_sources(xenia-uwp PRIVATE ${_gv_shader_seed})
 # and its licence go in the package root.
 # dxil.dll (DirectX Shader Compiler, from the Windows SDK redistributables, as xemu ships it) signs the shaders
 # Edge makes with Mesa spirv_to_dxil.
-foreach(_gv_file smb2.dll libsmb2-LICENCE-LGPL-2.1.txt dxil.dll dxilconv.dll DirectXShaderCompiler-LICENSE-MS.txt
+foreach(_gv_file smb2.dll libsmb2-LICENCE-LGPL-2.1.txt dxil.dll DirectXShaderCompiler-LICENSE-MS.txt
     DirectXShaderCompiler-LICENSE-LLVM.txt)
   set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/${_gv_file}" PROPERTIES
     VS_DEPLOYMENT_CONTENT 1
