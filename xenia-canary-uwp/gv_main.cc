@@ -2238,6 +2238,8 @@ void GameVaultXeniaApp::EmulatorThread() {
     auto last_time = std::chrono::steady_clock::now();
     struct Row {
       double fps = 0, cpu = 0, gpu = 0, net_ms = 0, net_max = 0, tex_ms = 0, tex_max = 0, up_ms = 0, up_mb = 0;
+      double drive_ms = 0, drive_max = 0;
+      uint64_t drive = 0;
       uint64_t net = 0, tex = 0, draws = 0, skipped = 0, queued = 0, tex_made = 0, tex_gone = 0, up_count = 0;
       double stage[8] = {};
       uint64_t now_count = 0;
@@ -2250,13 +2252,15 @@ void GameVaultXeniaApp::EmulatorThread() {
       std::error_code ec;
       if (std::filesystem::file_size(path, ec) > (1u << 20)) return;
       std::ofstream(path, std::ios::app) << fmt::format(
-          "{} {:5}s fps {:4.1f} cpu {:3.0f}% gpu-thread {:3.0f}% | disc {} reads {:.0f} ms, longest {:.0f} | textures {} "
+          "{} {:5}s fps {:4.1f} cpu {:3.0f}% gpu-thread {:3.0f}% | disc {} reads {:.0f} ms, longest {:.0f} | drive {} reads {:.0f} ms, longest {:.0f} | textures {} "
           "{:.0f} ms, longest {:.0f} | uploads {:.1f} MB {:.1f} ms | draws {} skipped {} | new pipelines {} built now {} {:.0f} ms | cpus {} | "
           "draw ms: setup {:.0f} prim {:.0f} rt {:.0f} pipe {:.0f} tex {:.0f} state {:.0f} bind+vfetch {:.0f} memexport+rest {:.0f} | "
-          "texcache {} held {} MB, made {} destroyed {} | memory: faults {} locked requests {} uploads {}\n",
-          what, second, r.fps, r.cpu, r.gpu, r.net, r.net_ms, r.net_max, r.tex, r.tex_ms, r.tex_max, r.up_mb, r.up_ms,
+          "texcache {} held {} MB, made {} destroyed {} | memory: faults {} locked requests {} uploads {} | "
+          "network pieces: on demand {} ahead {} used {} waited {}\n",
+          what, second, r.fps, r.cpu, r.gpu, r.net, r.net_ms, r.net_max, r.drive, r.drive_ms, r.drive_max, r.tex, r.tex_ms, r.tex_max, r.up_mb, r.up_ms,
           r.draws, r.skipped, r.queued, r.now_count, r.now_ms, cpus, r.stage[0], r.stage[1], r.stage[2], r.stage[3], r.stage[4], r.stage[5],
-          r.stage[6], r.stage[7], gp::tex_count.load(), gp::tex_mb.load(), r.tex_made, r.tex_gone, gp::mem_faults.exchange(0), gp::mem_slow_requests.exchange(0), r.up_count);
+          r.stage[6], r.stage[7], gp::tex_count.load(), gp::tex_mb.load(), r.tex_made, r.tex_gone, gp::mem_faults.exchange(0), gp::mem_slow_requests.exchange(0), r.up_count,
+          gp::net_demand.exchange(0), gp::net_ahead.exchange(0), gp::net_ahead_used.exchange(0), gp::net_ahead_waits.exchange(0));
     };
     for (;;) {
       std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -2274,6 +2278,9 @@ void GameVaultXeniaApp::EmulatorThread() {
       r.net = gp::net_read.count.exchange(0);
       r.net_ms = gp::net_read.us.exchange(0) / 1000.0;
       r.net_max = gp::net_read.max_us.exchange(0) / 1000.0;
+      r.drive = gp::drive_read.count.exchange(0);
+      r.drive_ms = gp::drive_read.us.exchange(0) / 1000.0;
+      r.drive_max = gp::drive_read.max_us.exchange(0) / 1000.0;
       r.tex = gp::texture_load.count.exchange(0);
       r.tex_ms = gp::texture_load.us.exchange(0) / 1000.0;
       r.tex_max = gp::texture_load.max_us.exchange(0) / 1000.0;
@@ -2303,6 +2310,7 @@ void GameVaultXeniaApp::EmulatorThread() {
         } else {
           ++good_seconds;
           good.fps += r.fps, good.cpu += r.cpu, good.gpu += r.gpu, good.net_ms += r.net_ms, good.tex_ms += r.tex_ms;
+          good.drive += r.drive, good.drive_ms += r.drive_ms, good.drive_max = std::max(good.drive_max, r.drive_max);
           good.up_ms += r.up_ms, good.up_mb += r.up_mb, good.net += r.net, good.tex += r.tex, good.draws += r.draws;
           good.skipped += r.skipped, good.queued += r.queued;
           good.now_count += r.now_count, good.now_ms += r.now_ms;
@@ -2312,6 +2320,7 @@ void GameVaultXeniaApp::EmulatorThread() {
         if (seconds % 30 == 0 && good_seconds) {
           Row a = good;
           const double n = double(good_seconds);
+          a.drive = uint64_t(a.drive / n), a.drive_ms /= n;
           a.fps /= n, a.cpu /= n, a.gpu /= n, a.net_ms /= n, a.tex_ms /= n, a.up_ms /= n, a.up_mb /= n;
           a.net = uint64_t(a.net / n), a.tex = uint64_t(a.tex / n), a.draws = uint64_t(a.draws / n);
           a.skipped = uint64_t(a.skipped / n), a.queued = uint64_t(a.queued / n);

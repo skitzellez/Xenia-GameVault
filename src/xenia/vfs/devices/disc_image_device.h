@@ -61,6 +61,7 @@ class DiscImageDevice : public Device {
   std::filesystem::path host_path_;
   std::unique_ptr<Entry> root_entry_;
   std::unique_ptr<filesystem::FileHandle> file_handle_;
+  bool on_network_ = false;   // Game Vault: read through the network reader (timed there)
   std::unique_ptr<MappedMemory> mmap_;
   size_t image_size_ = 0;
 

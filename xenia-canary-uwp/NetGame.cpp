@@ -22,7 +22,9 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <sstream>
 #include <type_traits>
 #include <vector>
@@ -177,51 +179,33 @@ Cred ReadCred(const std::string& file, const std::string& server, const std::str
 class SmbGame : public xe::filesystem::NetFile {
  public:
   static constexpr uint64_t kChunk = 1 << 20;   // cache piece
-  static constexpr size_t kSlots = 32;          // 32 MB of them
+  static constexpr size_t kSlots = 96;          // 96 MB of them
+  // Game Vault 1.1.8.480: read-ahead. Once the game reads two pieces in a row, a second connection fetches the
+  // next kAhead pieces in the background, so the next read is already here (Spec Ops from a NAS: each 1 MB piece
+  // took ~100 ms and up to 800 ms of a second went to waiting for them).
+  static constexpr uint64_t kAhead = 8;
 
   SmbGame(const Smb2* api, Cred cred, std::string path) : api_(api), cred_(std::move(cred)), path_(std::move(path)) {}
   ~SmbGame() override {
-    Drop();
+    {
+      std::lock_guard<std::mutex> lock(lock_);
+      stop_ = true;
+    }
+    cv_.notify_all();
+    if (ahead_thread_.joinable()) {
+      ahead_thread_.join();
+    }
+    Close(main_);
+    Close(ahead_);
     Wipe(cred_.password);
   }
 
   bool Connect() {
-    Drop();
-    std::string user = cred_.user, domain;
-    size_t slash = user.find('\\');
-    if (slash != std::string::npos) {   // DOMAIN\user
-      domain = user.substr(0, slash);
-      user = user.substr(slash + 1);
-    }
-    ctx_ = api_->init_context();
-    if (!ctx_) {
-      return false;
-    }
-    api_->set_timeout(ctx_, 15);
-    api_->set_security_mode(ctx_, kSigningEnabled);
-    if (!domain.empty()) {
-      api_->set_domain(ctx_, domain.c_str());
-    }
-    api_->set_password(ctx_, cred_.password.c_str());
-    if (api_->connect_share(ctx_, cred_.server.c_str(), cred_.share.c_str(), user.c_str()) < 0) {
-      XELOGE("network: {}\\{}: {}", cred_.server, cred_.share, api_->get_error(ctx_));
-      api_->destroy_context(ctx_);
-      ctx_ = nullptr;
-      return false;
-    }
-    fh_ = api_->open(ctx_, path_.c_str(), O_RDONLY);
-    if (!fh_) {
-      XELOGE("network: {} could not be opened: {}", path_, api_->get_error(ctx_));
-      Drop();
-      return false;
-    }
     uint64_t end = 0;
-    if (api_->lseek(ctx_, fh_, 0, SEEK_END, &end) < 0) {
-      Drop();
+    if (!Open(main_, &end)) {
       return false;
     }
     size_ = end;
-    max_read_ = std::max<uint32_t>(64 * 1024, std::min<uint32_t>(api_->get_max_read_size(ctx_), kChunk));
     return true;
   }
 
@@ -232,11 +216,11 @@ class SmbGame : public xe::filesystem::NetFile {
       return false;
     }
     xe::gv_perf::Scope gv_scope(xe::gv_perf::net_read);
-    std::lock_guard<std::mutex> lock(lock_);
+    std::unique_lock<std::mutex> lock(lock_);
     auto* out = static_cast<uint8_t*>(buffer);
     while (length) {
       uint64_t chunk = offset / kChunk;
-      Slot* slot = Fetch(chunk);
+      Slot* slot = Fetch(chunk, lock);
       if (!slot) {
         return false;
       }
@@ -257,26 +241,71 @@ class SmbGame : public xe::filesystem::NetFile {
   struct Slot {
     int64_t chunk = -1;
     uint64_t used = 0;
+    bool ahead = false;   // fetched by the read-ahead and not read by the game yet
     std::vector<uint8_t> data;
   };
+  // one SMB connection with the game file open (libsmb2 contexts are not shared between threads)
+  struct Conn {
+    smb2_context* ctx = nullptr;
+    smb2fh* fh = nullptr;
+    uint32_t max_read = 64 * 1024;
+  };
 
-  void Drop() {
-    if (ctx_) {
-      if (fh_) {
-        api_->close(ctx_, fh_);
-      }
-      api_->disconnect_share(ctx_);
-      api_->destroy_context(ctx_);
+  bool Open(Conn& c, uint64_t* end) {
+    Close(c);
+    std::string user = cred_.user, domain;
+    size_t slash = user.find('\\');
+    if (slash != std::string::npos) {   // DOMAIN\user
+      domain = user.substr(0, slash);
+      user = user.substr(slash + 1);
     }
-    ctx_ = nullptr;
-    fh_ = nullptr;
+    c.ctx = api_->init_context();
+    if (!c.ctx) {
+      return false;
+    }
+    api_->set_timeout(c.ctx, 15);
+    api_->set_security_mode(c.ctx, kSigningEnabled);
+    if (!domain.empty()) {
+      api_->set_domain(c.ctx, domain.c_str());
+    }
+    api_->set_password(c.ctx, cred_.password.c_str());
+    if (api_->connect_share(c.ctx, cred_.server.c_str(), cred_.share.c_str(), user.c_str()) < 0) {
+      XELOGE("network: {}\\{}: {}", cred_.server, cred_.share, api_->get_error(c.ctx));
+      api_->destroy_context(c.ctx);
+      c.ctx = nullptr;
+      return false;
+    }
+    c.fh = api_->open(c.ctx, path_.c_str(), O_RDONLY);
+    if (!c.fh) {
+      XELOGE("network: {} could not be opened: {}", path_, api_->get_error(c.ctx));
+      Close(c);
+      return false;
+    }
+    if (api_->lseek(c.ctx, c.fh, 0, SEEK_END, end) < 0) {
+      Close(c);
+      return false;
+    }
+    c.max_read = std::max<uint32_t>(64 * 1024, std::min<uint32_t>(api_->get_max_read_size(c.ctx), kChunk));
+    return true;
   }
 
-  bool ReadNet(uint64_t at, uint8_t* buf, size_t len) {
+  void Close(Conn& c) {
+    if (c.ctx) {
+      if (c.fh) {
+        api_->close(c.ctx, c.fh);
+      }
+      api_->disconnect_share(c.ctx);
+      api_->destroy_context(c.ctx);
+    }
+    c.ctx = nullptr;
+    c.fh = nullptr;
+  }
+
+  bool ReadNet(Conn& c, uint64_t at, uint8_t* buf, size_t len) {
     size_t done = 0;
     while (done < len) {
-      uint32_t n = uint32_t(std::min<size_t>(len - done, max_read_));
-      int got = ctx_ && fh_ ? api_->pread(ctx_, fh_, buf + done, n, at + done) : -1;
+      uint32_t n = uint32_t(std::min<size_t>(len - done, c.max_read));
+      int got = c.ctx && c.fh ? api_->pread(c.ctx, c.fh, buf + done, n, at + done) : -1;
       if (got <= 0) {
         return false;
       }
@@ -285,44 +314,161 @@ class SmbGame : public xe::filesystem::NetFile {
     return true;
   }
 
-  Slot* Fetch(uint64_t chunk) {
-    Slot* pick = nullptr;
+  Slot* Find(uint64_t chunk) {
     for (auto& s : slots_) {
       if (s.chunk == int64_t(chunk)) {
-        s.used = ++clock_;
         return &s;
       }
-      if (!pick || s.used < pick->used) {
-        pick = &s;   // the empty one, or the one read longest ago
+    }
+    return nullptr;
+  }
+
+  // the empty piece, or the one read longest ago
+  Slot* Oldest() {
+    Slot* pick = &slots_[0];
+    for (auto& s : slots_) {
+      if (s.used < pick->used) {
+        pick = &s;
       }
     }
+    return pick;
+  }
+
+  // the game moved to another piece: two in a row start (or move on) the read-ahead window
+  void Note(uint64_t chunk) {
+    if (int64_t(chunk) == last_) {
+      return;
+    }
+    const bool in_a_row = last_ >= 0 && int64_t(chunk) == last_ + 1;
+    last_ = int64_t(chunk);
+    if (!in_a_row || ahead_failed_) {
+      return;
+    }
+    const uint64_t pieces = (size_ + kChunk - 1) / kChunk;
+    if (!pieces) {
+      return;
+    }
+    if (ahead_from_ <= chunk || ahead_from_ > chunk + kAhead) {
+      ahead_from_ = chunk + 1;
+    }
+    ahead_to_ = std::min<uint64_t>(chunk + kAhead, pieces - 1);
+    if (!ahead_thread_.joinable()) {
+      ahead_thread_ = std::thread([this]() { AheadLoop(); });
+    }
+    cv_.notify_all();
+  }
+
+  Slot* Fetch(uint64_t chunk, std::unique_lock<std::mutex>& lock) {
+    for (;;) {
+      if (Slot* s = Find(chunk)) {
+        if (s->ahead) {
+          s->ahead = false;
+          ++ahead_hits_;   // fetched ahead: a network wait saved
+          xe::gv_perf::net_ahead_used.fetch_add(1, std::memory_order_relaxed);
+        }
+        s->used = ++clock_;
+        Note(chunk);
+        return s;
+      }
+      if (inflight_ != int64_t(chunk)) {
+        break;
+      }
+      ++ahead_waits_;
+      xe::gv_perf::net_ahead_waits.fetch_add(1, std::memory_order_relaxed);
+      cv_.wait(lock);   // the read-ahead is fetching this very piece: wait for it instead of reading it twice
+    }
+    Slot* pick = Oldest();
     uint64_t at = chunk * kChunk;
     size_t len = size_t(std::min<uint64_t>(kChunk, size_ - at));
     pick->chunk = -1;
+    pick->ahead = false;
     pick->data.resize(len);
-    if (!ReadNet(at, pick->data.data(), len)) {
+    if (!ReadNet(main_, at, pick->data.data(), len)) {
       // once more on a fresh connection: the PC slept, the Wi-Fi blinked
-      XELOGW("network: read at {:X} failed ({}), connecting again", at, ctx_ ? api_->get_error(ctx_) : "no connection");
-      if (!Connect() || !ReadNet(at, pick->data.data(), len)) {
+      XELOGW("network: read at {:X} failed ({}), connecting again", at,
+             main_.ctx ? api_->get_error(main_.ctx) : "no connection");
+      if (!Connect() || !ReadNet(main_, at, pick->data.data(), len)) {
         XELOGE("network: the game could not be read at {:X}", at);
         return nullptr;
       }
     }
+    ++misses_;
+    xe::gv_perf::net_demand.fetch_add(1, std::memory_order_relaxed);
     pick->chunk = int64_t(chunk);
     pick->used = ++clock_;
+    Note(chunk);
     return pick;
+  }
+
+  // the read-ahead thread: its own connection, the lock dropped while it waits on the network
+  void AheadLoop() {
+    std::vector<uint8_t> buf;
+    uint64_t end = 0, fetched = 0;
+    auto last_log = GetTickCount64();
+    std::unique_lock<std::mutex> lock(lock_);
+    while (!stop_) {
+      int64_t next = -1;
+      while (ahead_from_ <= ahead_to_) {
+        uint64_t c = ahead_from_++;
+        if (!Find(c)) {
+          next = int64_t(c);
+          break;
+        }
+      }
+      if (next < 0) {
+        cv_.wait(lock);
+        continue;
+      }
+      inflight_ = next;
+      lock.unlock();
+      const uint64_t at = uint64_t(next) * kChunk;
+      const size_t len = size_t(std::min<uint64_t>(kChunk, size_ - at));
+      buf.resize(len);
+      bool ok = ahead_.ctx && ReadNet(ahead_, at, buf.data(), len);
+      if (!ok) {
+        ok = Open(ahead_, &end) && ReadNet(ahead_, at, buf.data(), len);   // first use, or a dropped connection
+      }
+      lock.lock();
+      inflight_ = -1;
+      if (!ok) {
+        XELOGW("network: read-ahead at {:X} failed, off for this game (reads go on as before)", at);
+        ahead_failed_ = true;
+        cv_.notify_all();
+        break;
+      }
+      ++fetched;
+      xe::gv_perf::net_ahead.fetch_add(1, std::memory_order_relaxed);
+      if (!Find(uint64_t(next))) {
+        Slot* pick = Oldest();
+        pick->data.swap(buf);
+        pick->chunk = next;
+        pick->ahead = true;
+        pick->used = ++clock_;   // counts as just used, so the pieces the game is about to read are kept
+      }
+      cv_.notify_all();
+      const auto now = GetTickCount64();
+      if (now - last_log > 30000) {
+        XELOGI("network read-ahead: {} pieces fetched ahead, {} used, {} waited on, {} read on demand", fetched,
+               ahead_hits_, ahead_waits_, misses_);
+        last_log = now;
+      }
+    }
   }
 
   const Smb2* api_;
   Cred cred_;
   std::string path_;
-  smb2_context* ctx_ = nullptr;
-  smb2fh* fh_ = nullptr;
+  Conn main_, ahead_;
   uint64_t size_ = 0;
-  uint32_t max_read_ = 64 * 1024;
   std::mutex lock_;
+  std::condition_variable cv_;
   Slot slots_[kSlots];
   uint64_t clock_ = 0;
+  int64_t last_ = -1, inflight_ = -1;
+  uint64_t ahead_from_ = 1, ahead_to_ = 0;
+  uint64_t ahead_hits_ = 0, ahead_waits_ = 0, misses_ = 0;
+  bool stop_ = false, ahead_failed_ = false;
+  std::thread ahead_thread_;
 };
 
 // A game that is a folder of files on the share (Games on Demand: <header> + <header>.data\Data0000...; unpacked:

@@ -9,10 +9,12 @@
 
 #include <array>
 #include <cstring>
+#include <optional>
 #include <vector>
 
 #include "xenia/vfs/devices/disc_image_device.h"
 
+#include "xenia/base/gv_perf.h"
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
@@ -45,6 +47,7 @@ bool DiscImageDevice::Initialize() {
     XELOGE("Disc image size could not be read: {}", size_error.message());
     return false;
   }
+  on_network_ = filesystem::GetNetFile(host_path_) != nullptr;
   XELOGFS("DiscImageDevice::Initialize");
 #else
   mmap_ = MappedMemory::Open(host_path_, MappedMemory::Mode::kRead);
@@ -104,6 +107,10 @@ bool DiscImageDevice::ReadImageData(size_t file_offset, void* buffer,
     return false;
   }
   size_t bytes_read = 0;
+  std::optional<xe::gv_perf::Scope> drive_scope;
+  if (!on_network_) {
+    drive_scope.emplace(xe::gv_perf::drive_read);
+  }
   if (!file_handle_->Read(file_offset, buffer, buffer_length, &bytes_read) ||
       bytes_read != buffer_length) {
     return false;
