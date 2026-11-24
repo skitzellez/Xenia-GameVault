@@ -72,6 +72,11 @@ DEFINE_bool(gv_build_needed_pipeline_now, true,
             "instead of being skipped. A skipped draw can leave noise in what "
             "the game then copies into its textures.",
             "D3D12");
+DEFINE_int32(gv_build_now_max_wait_ms, 40,
+             "Game Vault: how long a draw waits for its pipeline before it is "
+             "skipped for this frame (the pipeline goes on being built in the "
+             "background). 0 = build it at once and wait as long as it takes.",
+             "D3D12");
 DEFINE_bool(d3d12_tessellation_wireframe, false,
             "Display tessellated surfaces as wireframe for debugging.",
             "D3D12");
@@ -3848,8 +3853,35 @@ bool PipelineCache::GvBuildPipelineNow(void* handle) {
   if (pipeline->state.load(std::memory_order_acquire)) {
     return true;
   }
+  if (cvars::gv_build_now_max_wait_ms > 0 && pipeline->gv_waited) {
+    return false;   // already waited for once and still building: skip, don't wait again
+  }
   xe::gv_perf::Scope gv_scope(xe::gv_perf::pipeline_now);
   GvHelpWithStall(pipeline);
+  if (cvars::gv_build_now_max_wait_ms > 0) {
+    pipeline->gv_waited = true;
+    // Game Vault 1.1.8.483: the Xbox driver takes 0.3-1.5 s for one pipeline, and the game stood still for all of it
+    // (MW3: a freeze every few seconds in the first minutes while the stored list was still being built). Now it goes
+    // to the front of the background queue and the draw waits a short while; if it is not there by then, the draw is
+    // skipped for this frame and the game goes on.
+    {
+      std::lock_guard<xe_mutex> lock(creation_request_lock_);
+      if (!pipeline->gv_claimed.test()) {
+        gv_next_up_.push_front(pipeline);
+        gv_lookahead_waiting_ = true;
+      }
+    }
+    creation_request_cond_.notify_all();
+    const uint64_t until = GvNowMs() + uint64_t(cvars::gv_build_now_max_wait_ms);
+    while (!pipeline->gv_done.load(std::memory_order_acquire)) {
+      if (GvNowMs() >= until) {
+        xe::gv_perf::pipelines_not_waited.fetch_add(1, std::memory_order_relaxed);
+        return false;
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+    return pipeline->state.load(std::memory_order_acquire) != nullptr;
+  }
   if (!pipeline->gv_claimed.test_and_set()) {
     EnsurePipelineShadersTranslated(pipeline, *shader_translator_,
                                     ucode_disasm_buffer_, dxbc_converter_,

@@ -401,6 +401,8 @@ class PipelineCache {
     // Game Vault: whoever sets this first builds the pipeline; gv_done when it has finished, well or not.
     std::atomic_flag gv_claimed = ATOMIC_FLAG_INIT;
     std::atomic<bool> gv_done{false};
+    // Game Vault: a draw already waited its short while for this one (later draws do not wait again).
+    bool gv_waited = false;
     PipelineRuntimeDescription description;
     // For background creation: stores the untranslated shaders.
     // Background thread translates both VS and PS together, then creates the
