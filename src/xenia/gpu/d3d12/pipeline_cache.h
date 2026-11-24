@@ -513,6 +513,8 @@ class PipelineCache {
   std::vector<Pipeline*> gv_hot_by_order_;
   // Pipelines the game is likely to want next (under creation_request_lock_); they are in the queue as well.
   std::deque<Pipeline*> gv_next_up_;
+  // 1.1.8.486: pipelines whose draws are being skipped, oldest first, never trimmed (under creation_request_lock_).
+  std::deque<Pipeline*> gv_needed_;
   bool gv_lookahead_on_ = false;
   uint32_t gv_lookahead_found_ = 0;
   // Look-ahead pipelines are waiting in gv_next_up_ (every creation thread takes part; under creation_request_lock_).

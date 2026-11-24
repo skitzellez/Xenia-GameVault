@@ -77,10 +77,11 @@ DEFINE_int32(gv_build_now_max_wait_ms, 40,
              "skipped for this frame (the pipeline goes on being built in the "
              "background). 0 = build it at once and wait as long as it takes.",
              "D3D12");
-DEFINE_int32(gv_quiet_draws_per_s, 20000,
+DEFINE_int32(gv_quiet_draws_per_s, 0,
              "Game Vault: while the game draws fewer than this many draws a "
              "second (menus, loading), every creation thread builds the stored "
-             "pipelines, not just gv_startup_pipeline_threads. 0 = off.",
+             "pipelines, not just gv_startup_pipeline_threads. 0 = off (1.1.8.486: "
+             "off, MW3 menus fell from 59 to 35 fps and the driver built no faster).",
              "D3D12");
 DEFINE_int32(gv_build_now_budget_ms, 12,
              "Game Vault: all waits for pipelines together take at most this "
@@ -270,6 +271,7 @@ void PipelineCache::Shutdown() {
   }
   gv_hot_by_order_.clear();
   gv_next_up_.clear();
+  gv_needed_.clear();
   pipelines_.clear();
   COUNT_profile_set("gpu/pipeline_cache/pipelines", 0);
 
@@ -3648,7 +3650,7 @@ void PipelineCache::CreationThread(size_t thread_index) {
           limit = 1;
         }
         if (GvNowMs() < gv_boost_until_ms_.load(std::memory_order_relaxed) || gv_lookahead_waiting_ ||
-            GvGameQuiet()) {
+            !gv_needed_.empty() || GvGameQuiet()) {
           limit = SIZE_MAX;
         }
         if (thread_index >= limit) {
@@ -3705,7 +3707,11 @@ void PipelineCache::CreationThread(size_t thread_index) {
       // until the pipeline is created - other threads must be able to dequeue
       // requests, but can't set the completion event until the pipelines are
       // fully created (rather than just started creating).
-      if (!gv_next_up_.empty()) {
+      if (!gv_needed_.empty()) {
+        // 1.1.8.486: a draw is being skipped until this one is there: first of all.
+        pipeline_to_create = gv_needed_.front();
+        gv_needed_.pop_front();
+      } else if (!gv_next_up_.empty()) {
         // Still in the queue too: whoever pops it later finds it claimed and goes on.
         pipeline_to_create = gv_next_up_.front();
         gv_next_up_.pop_front();
@@ -3899,9 +3905,11 @@ bool PipelineCache::GvBuildPipelineNow(void* handle) {
     // skipped for this frame and the game goes on.
     {
       std::lock_guard<xe_mutex> lock(creation_request_lock_);
+      // 1.1.8.486: its own list, never trimmed. In gv_next_up_ (cut to 256) a skipped pipeline could be pushed off
+      // by look-ahead guesses and then wait behind ~3,800 stored ones, its draws skipped all the while (MW3 Paris:
+      // grey, untextured buildings 15% of draws for minutes). Reached once per pipeline (gv_waited).
       if (!pipeline->gv_claimed.test()) {
-        gv_next_up_.push_front(pipeline);
-        gv_lookahead_waiting_ = true;
+        gv_needed_.push_back(pipeline);
       }
     }
     creation_request_cond_.notify_all();
