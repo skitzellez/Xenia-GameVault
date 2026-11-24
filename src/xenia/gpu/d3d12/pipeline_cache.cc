@@ -77,6 +77,10 @@ DEFINE_int32(gv_build_now_max_wait_ms, 40,
              "skipped for this frame (the pipeline goes on being built in the "
              "background). 0 = build it at once and wait as long as it takes.",
              "D3D12");
+DEFINE_int32(gv_build_now_budget_ms, 12,
+             "Game Vault: all waits for pipelines together take at most this "
+             "many ms in any 100 ms; past it, draws are skipped at once.",
+             "D3D12");
 DEFINE_bool(d3d12_tessellation_wireframe, false,
             "Display tessellated surfaces as wireframe for debugging.",
             "D3D12");
@@ -3872,7 +3876,23 @@ bool PipelineCache::GvBuildPipelineNow(void* handle) {
       }
     }
     creation_request_cond_.notify_all();
-    const uint64_t until = GvNowMs() + uint64_t(cvars::gv_build_now_max_wait_ms);
+    // 1.1.8.484: one budget shared by all such waits, at most gv_build_now_budget_ms in any 100 ms (MW3 match start:
+    // 15-20 missing at once x 40 ms each = 10 fps for a few seconds). Past it, the draw is skipped without waiting.
+    // Only the GPU thread gets here, so plain statics are enough.
+    static uint64_t window_start = 0, window_used = 0;
+    const uint64_t now = GvNowMs();
+    if (now - window_start >= 100) {
+      window_start = now;
+      window_used = 0;
+    }
+    const uint64_t budget = uint64_t(std::max(cvars::gv_build_now_budget_ms, 0));
+    const uint64_t allowed = std::min<uint64_t>(uint64_t(cvars::gv_build_now_max_wait_ms),
+                                                budget > window_used ? budget - window_used : 0);
+    const uint64_t until = now + allowed;
+    struct Charge {
+      uint64_t from;
+      ~Charge() { window_used += GvNowMs() - from; }
+    } charge{now};
     while (!pipeline->gv_done.load(std::memory_order_acquire)) {
       if (GvNowMs() >= until) {
         xe::gv_perf::pipelines_not_waited.fetch_add(1, std::memory_order_relaxed);
