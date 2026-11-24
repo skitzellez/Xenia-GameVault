@@ -9,9 +9,16 @@
 
 #include "xenia/gpu/dxbc_shader_translator.h"
 
+#include <array>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <mutex>
+#include <sstream>
+#include <unordered_map>
 
 #include "third_party/dxbc/DXBCChecksum.h"
+#include "third_party/fmt/include/fmt/format.h"
 
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
@@ -105,6 +112,96 @@ DxbcShaderTranslator::DxbcShaderTranslator(
   shader_object_.reserve(16384);
 }
 DxbcShaderTranslator::~DxbcShaderTranslator() = default;
+
+// Game Vault: known texture setups per pixel shader (see Modification::pixel.gv_texture_setup).
+namespace {
+struct GvTextureSetupSlots {
+  DxbcShaderTranslator::GvTextureSetup setups[3];
+  uint32_t count = 0;
+};
+std::mutex gv_texture_setup_mutex;
+std::unordered_map<uint64_t, GvTextureSetupSlots> gv_texture_setups;
+std::filesystem::path gv_texture_setup_path;
+}  // namespace
+
+bool DxbcShaderTranslator::GvTextureSetup::operator==(const GvTextureSetup& other) const {
+  if (mask != other.mask) {
+    return false;
+  }
+  for (uint32_t i = 0; i < 32; ++i) {
+    if ((mask & (uint32_t(1) << i)) &&
+        (signs[i] != other.signs[i] || integer_scale_bits[i] != other.integer_scale_bits[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+uint32_t DxbcShaderTranslator::GvTextureSetupSlot(uint64_t ucode_hash, const GvTextureSetup& setup) {
+  std::lock_guard<std::mutex> lock(gv_texture_setup_mutex);
+  GvTextureSetupSlots& slots = gv_texture_setups[ucode_hash];
+  for (uint32_t i = 0; i < slots.count; ++i) {
+    if (slots.setups[i] == setup) {
+      return i + 1;
+    }
+  }
+  if (slots.count >= 3) {
+    return 0;
+  }
+  slots.setups[slots.count] = setup;
+  ++slots.count;
+  if (!gv_texture_setup_path.empty()) {
+    std::string line = fmt::format("{:016X} {} {:08X}", ucode_hash, slots.count, setup.mask);
+    for (uint32_t i = 0; i < 32; ++i) {
+      if (setup.mask & (uint32_t(1) << i)) {
+        line += fmt::format(" {:02X} {:08X}", setup.signs[i], setup.integer_scale_bits[i]);
+      }
+    }
+    std::ofstream(gv_texture_setup_path, std::ios::app) << line << "\n";
+  }
+  return slots.count;
+}
+
+bool DxbcShaderTranslator::GvTextureSetupGet(uint64_t ucode_hash, uint32_t slot, GvTextureSetup& setup_out) {
+  std::lock_guard<std::mutex> lock(gv_texture_setup_mutex);
+  auto it = gv_texture_setups.find(ucode_hash);
+  if (!slot || it == gv_texture_setups.end() || slot > it->second.count) {
+    return false;
+  }
+  setup_out = it->second.setups[slot - 1];
+  return true;
+}
+
+void DxbcShaderTranslator::GvTextureSetupOpenFile(const std::filesystem::path& path) {
+  std::lock_guard<std::mutex> lock(gv_texture_setup_mutex);
+  gv_texture_setup_path = path;
+  std::ifstream file(path);
+  std::string line;
+  while (std::getline(file, line)) {
+    std::istringstream in(line);
+    std::string hash_text, mask_text;
+    uint32_t slot = 0;
+    if (!(in >> hash_text >> slot >> mask_text)) {
+      continue;
+    }
+    GvTextureSetup setup;
+    setup.mask = uint32_t(std::strtoul(mask_text.c_str(), nullptr, 16));
+    bool ok = true;
+    for (uint32_t i = 0; i < 32 && ok; ++i) {
+      if (setup.mask & (uint32_t(1) << i)) {
+        std::string signs_text, scale_text;
+        ok = bool(in >> signs_text >> scale_text);
+        setup.signs[i] = uint8_t(std::strtoul(signs_text.c_str(), nullptr, 16));
+        setup.integer_scale_bits[i] = uint32_t(std::strtoul(scale_text.c_str(), nullptr, 16));
+      }
+    }
+    GvTextureSetupSlots& slots = gv_texture_setups[std::strtoull(hash_text.c_str(), nullptr, 16)];
+    // Lines are appended in slot order; a line that does not fit (damaged file) is left out.
+    if (ok && slot == slots.count + 1 && slots.count < 3) {
+      slots.setups[slots.count++] = setup;
+    }
+  }
+}
 
 std::vector<uint8_t> DxbcShaderTranslator::CreateDepthOnlyPixelShader() {
   is_depth_only_pixel_shader_ = true;
@@ -907,6 +1004,12 @@ void DxbcShaderTranslator::StartPixelShader() {
 void DxbcShaderTranslator::StartTranslation() {
   forward_only_control_flow_ = cvars::dxbc_forward_jumps_without_loop &&
                                IsForwardOnlyControlFlow(current_shader());
+  gv_texture_setup_ = GvTextureSetup();
+  if (is_pixel_shader() && GetDxbcShaderModification().pixel.gv_texture_setup &&
+      !GvTextureSetupGet(current_shader().ucode_data_hash(), GetDxbcShaderModification().pixel.gv_texture_setup,
+                         gv_texture_setup_)) {
+    gv_texture_setup_ = GvTextureSetup();  // not known (should not happen): everything from the system constants
+  }
   // Set up the input and output registers.
   Modification shader_modification = GetDxbcShaderModification();
   uint32_t interpolator_register_mask = GetModificationInterpolatorMask();

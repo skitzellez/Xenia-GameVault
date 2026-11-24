@@ -1093,6 +1093,22 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
                                  sizeof(uint32_t) * (tfetch_index >> 2),
                              dxbc::Src::kXXXX));
     uint32_t signs_shift = (tfetch_index & 3) * 8;
+    // Game Vault: the texture setup is built into this translation (see Modification::pixel.gv_texture_setup).
+    const bool gv_known = instr.opcode == FetchOpcode::kTextureFetch &&
+                          ((gv_texture_setup_.mask >> tfetch_index) & 1) != 0;
+    const uint8_t gv_signs = gv_known ? gv_texture_setup_.signs[tfetch_index] : 0;
+    const uint32_t gv_scale_bits = gv_known ? gv_texture_setup_.integer_scale_bits[tfetch_index] : 0;
+    auto gv_sign = [&](uint32_t component) {
+      return xenos::TextureSign((gv_signs >> (component * 2)) & 0b11);
+    };
+    bool gv_any_signed = false, gv_all_signed = true;
+    for (uint32_t i = 0; i < 4; ++i) {
+      if (used_result_nonzero_components & (1 << i)) {
+        bool is_signed = gv_sign(i) == xenos::TextureSign::kSigned;
+        gv_any_signed |= is_signed;
+        gv_all_signed &= is_signed;
+      }
+    }
     uint32_t signs_temp = UINT32_MAX;
     if (instr.opcode == FetchOpcode::kTextureFetch) {
       signs_temp = PushSystemTemp();
@@ -1974,7 +1990,8 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
           dxbc::Src::R(is_signed_temp).Select(result_first_component));
       dxbc::Src is_any_signed_src(
           dxbc::Src::R(is_signed_temp).Select(result_first_component));
-      if (used_result_nonzero_components != (1 << result_first_component)) {
+      if (!gv_known &&
+          used_result_nonzero_components != (1 << result_first_component)) {
         // Multiple components fetched - need to merge.
         if (srv_selection_temp == UINT32_MAX) {
           srv_selection_temp = PushSystemTemp();
@@ -2092,8 +2109,13 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
           }
           // Always 3 coordinate components (1D and 2D are padded to 2D arrays,
           // 3D and cube have 3 coordinate dimensions).
-          a_.OpIf(false, is_all_signed_src);
-          {
+          // Game Vault: with a known setup, only the SRV that is needed, without the check.
+          const bool gv_sample_unsigned = !gv_known || !gv_all_signed;
+          const bool gv_sample_signed = !gv_known || gv_any_signed;
+          if (!gv_known) {
+            a_.OpIf(false, is_all_signed_src);
+          }
+          if (gv_sample_unsigned) {
             // Sample the unsigned texture.
             if (bindless_resources_used_) {
               // Load the unsigned texture descriptor index.
@@ -2125,11 +2147,14 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
                            srv_unsigned, sampler, lod_src);
             }
           }
-          a_.OpEndIf();
-          a_.OpIf(true, is_any_signed_src);
-          {
-            // Sample the signed texture.
-            uint32_t signed_temp = PushSystemTemp();
+          if (!gv_known) {
+            a_.OpEndIf();
+            a_.OpIf(true, is_any_signed_src);
+          }
+          if (gv_sample_signed) {
+            // Sample the signed texture (straight into the result when every used component is signed).
+            const bool gv_signed_only = gv_known && gv_all_signed;
+            uint32_t signed_temp = gv_signed_only ? layer_value_temp : PushSystemTemp();
             if (bindless_resources_used_) {
               // Load the signed texture descriptor index.
               assert_true(srv_selection_temp != UINT32_MAX);
@@ -2159,14 +2184,18 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
                   dxbc::Src::R(coord_and_sampler_temp), 3, srv_signed, sampler,
                   lod_src);
             }
-            a_.OpMovC(
-                dxbc::Dest::R(layer_value_temp, used_result_nonzero_components),
-                dxbc::Src::R(is_signed_temp), dxbc::Src::R(signed_temp),
-                dxbc::Src::R(layer_value_temp));
-            // Release signed_temp.
-            PopSystemTemp();
+            if (!gv_signed_only) {
+              a_.OpMovC(
+                  dxbc::Dest::R(layer_value_temp, used_result_nonzero_components),
+                  dxbc::Src::R(is_signed_temp), dxbc::Src::R(signed_temp),
+                  dxbc::Src::R(layer_value_temp));
+              // Release signed_temp.
+              PopSystemTemp();
+            }
           }
-          a_.OpEndIf();
+          if (!gv_known) {
+            a_.OpEndIf();
+          }
           if (layer) {
             assert_true(layer_value_temp != system_temp_result_);
             // Interpolate between the two layers.
@@ -2219,6 +2248,18 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
         }
         dxbc::Dest component_dest(dxbc::Dest::R(system_temp_result_, 1 << i));
         dxbc::Src component_src(dxbc::Src::R(system_temp_result_).Select(i));
+        if (gv_known) {
+          // Game Vault: only what this component's known sign needs.
+          if (gv_sign(i) == xenos::TextureSign::kUnsignedBiased) {
+            a_.OpMAd(component_dest, component_src, dxbc::Src::LF(2.0f), dxbc::Src::LF(-1.0f));
+          } else if (gv_sign(i) == xenos::TextureSign::kGamma) {
+            uint32_t gamma_temp = PushSystemTemp();
+            PWLGammaToLinear(a_, system_temp_result_, i, system_temp_result_, i, false, gamma_temp, 0, gamma_temp,
+                             1);
+            PopSystemTemp();
+          }
+          continue;
+        }
         a_.OpSwitch(dxbc::Src::R(signs_temp).Select(i));
         a_.OpCase(dxbc::Src::LU(uint32_t(xenos::TextureSign::kUnsignedBiased)));
         a_.OpMAd(component_dest, component_src, dxbc::Src::LF(2.0f),
@@ -2252,10 +2293,17 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
           dxbc::Src::kXXXX);
       // Uniform early out. Zero means leave the sample alone. Only integer
       // num_format on fixed textures has scale bits.
-      a_.OpIf(true, integer_scale_bits_packed);
-      a_.OpAnd(dxbc::Dest::R(signs_temp, 0b0001), integer_scale_bits_packed,
-               dxbc::Src::LU(UINT32_C(1) << 24));
-      a_.OpIf(true, dxbc::Src::R(signs_temp, dxbc::Src::kXXXX));
+      // Game Vault: with a known setup, no check - nothing (0), only the rounding (bit 24), or the scaling.
+      const bool gv_no_scale = gv_known && gv_scale_bits == 0;
+      const bool gv_round_only = gv_known && (gv_scale_bits & (UINT32_C(1) << 24)) != 0;
+      const bool gv_scale_only = gv_known && !gv_no_scale && !gv_round_only;
+      if (!gv_known) {
+        a_.OpIf(true, integer_scale_bits_packed);
+        a_.OpAnd(dxbc::Dest::R(signs_temp, 0b0001), integer_scale_bits_packed,
+                 dxbc::Src::LU(UINT32_C(1) << 24));
+        a_.OpIf(true, dxbc::Src::R(signs_temp, dxbc::Src::kXXXX));
+      }
+      if (!gv_known || gv_round_only) {
       // Round normalized results to 16 fractional bits.
       a_.OpMul(
           dxbc::Dest::R(system_temp_result_, used_result_nonzero_components),
@@ -2266,7 +2314,11 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
       a_.OpMul(
           dxbc::Dest::R(system_temp_result_, used_result_nonzero_components),
           dxbc::Src::R(system_temp_result_), dxbc::Src::LF(1.0f / 65536.0f));
-      a_.OpElse();
+      }
+      if (!gv_known) {
+        a_.OpElse();
+      }
+      if (!gv_known || gv_scale_only) {
       a_.OpUBFE(integer_scale_dest, dxbc::Src::LU(4),
                 dxbc::Src::LU(0, 6, 12, 18), integer_scale_bits_packed);
       a_.OpIAdd(integer_scale_dest, integer_scale_src, dxbc::Src::LU(1));
@@ -2291,8 +2343,11 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
           dxbc::Dest::R(system_temp_result_, used_result_nonzero_components),
           dxbc::Src::R(system_temp_result_), integer_scale_src,
           integer_scale_flags_src);
-      a_.OpEndIf();
-      a_.OpEndIf();
+      }
+      if (!gv_known) {
+        a_.OpEndIf();
+        a_.OpEndIf();
+      }
       PopSystemTemp();
     }
     if (signs_temp != UINT32_MAX) {

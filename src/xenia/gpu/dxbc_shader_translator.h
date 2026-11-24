@@ -13,6 +13,7 @@
 #include "xenia/base/cvar.h"
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -58,6 +59,22 @@ class DxbcShaderTranslator : public ShaderTranslator {
                        uint32_t draw_resolution_scale_y = 1,
                        bool force_emit_source_map = false);
   ~DxbcShaderTranslator() override;
+
+  // Game Vault: the texture setup a pixel shader is translated for (Modification::pixel.gv_texture_setup). For each
+  // fetch constant in `mask`: the swizzled signs and the integer scale bits exactly as the texture cache gives them
+  // to the system constants for the draw.
+  struct GvTextureSetup {
+    uint32_t mask = 0;
+    uint8_t signs[32] = {};
+    uint32_t integer_scale_bits[32] = {};
+    bool operator==(const GvTextureSetup& other) const;
+  };
+  // The slot (1...3) of this setup for the shader, added if new; 0 if the shader already has 3 others.
+  static uint32_t GvTextureSetupSlot(uint64_t ucode_hash, const GvTextureSetup& setup);
+  static bool GvTextureSetupGet(uint64_t ucode_hash, uint32_t slot, GvTextureSetup& setup_out);
+  // The title's file of known setups (read now, new ones appended), so stored pipelines can be translated the same
+  // way in a later session.
+  static void GvTextureSetupOpenFile(const std::filesystem::path& path);
 
   // Stage linkage ordering and rules (must be respected not only within the
   // DxbcShaderTranslator, but also by everything else between the VS and the
@@ -210,6 +227,11 @@ class DxbcShaderTranslator : public ShaderTranslator {
       // SV_Coverage in it. The Xbox's driver ignores SV_Depth in a pixel shader
       // that has either (Naughty Bear pastes its scene depth back with one).
       uint32_t gv_depth_no_alpha_kill : 1;
+      // Game Vault: 0 - texture signedness, gamma and integer scaling are read from the system constants in the
+      // shader (any texture works). 1...3 - this shader's 1st...3rd known texture setup (GvTextureSetup), built into
+      // the code: one sample instead of signed + unsigned, no per-component switch. Much smaller code, and the Xbox
+      // driver's compile time grows with the code size (about 12 ms per KB).
+      uint32_t gv_texture_setup : 2;
     } pixel;
 
     explicit Modification(uint64_t modification_value = 0)
@@ -1264,6 +1286,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // Vector ALU or fetch result / scratch (since Xenos write masks can contain
   // swizzles).
   uint32_t system_temp_result_;
+  // Game Vault: the texture setup this translation is for (gv_texture_setup slot), mask 0 if none.
+  GvTextureSetup gv_texture_setup_;
   // Temporary register ID for previous scalar result, program counter,
   // predicate and absolute address register.
   uint32_t system_temp_ps_pc_p0_a0_;

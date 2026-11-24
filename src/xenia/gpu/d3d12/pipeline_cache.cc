@@ -299,6 +299,8 @@ void PipelineCache::InitializeShaderStorage(
     std::function<void()> completion_callback) {
   ShutdownShaderStorage();
   ClearShaderStorageIfRequested(cache_root, title_id);
+  // Game Vault: the texture setups stored shaders were translated for (before any stored shader is translated).
+  DxbcShaderTranslator::GvTextureSetupOpenFile(cache_root / fmt::format("{:08X}.gvtex", title_id));
 
   bool edram_rov_used = render_target_cache_.GetPath() ==
                         RenderTargetCache::Path::kPixelShaderInterlock;

@@ -19,6 +19,7 @@
 #include <cstring>
 #include <intrin.h>
 #include <map>
+#include <unordered_map>
 #include <mutex>
 #include <string>
 #include "xenia/apu/audio_system.h"
@@ -108,6 +109,11 @@ DEFINE_bool(d3d12_submit_on_primary_buffer_end, !XE_PLATFORM_WINRT,
             "Off by default on UWP, where each submission is costly.",
             "D3D12");
 UPDATE_from_bool(d3d12_submit_on_primary_buffer_end, 2026, 10, 27, 15, true);
+DEFINE_bool(gv_static_texture_setup, true,
+            "Game Vault: build each pixel shader for the texture signedness / gamma it is used with (up to 3 setups "
+            "per shader) instead of checking it in the shader for every texture fetch. Much smaller shaders, which "
+            "the Xbox driver compiles faster.",
+            "D3D12");
 DEFINE_bool(gv_pipeline_look_ahead, true,
             "Game Vault: when a draw has to wait for a new pipeline, read ahead in the game's queued commands and "
             "build the pipelines the coming draws need at the same time on the other processors (shorter loads and "
@@ -3057,6 +3063,35 @@ void D3D12CommandProcessor::GvProbeQueue(const std::string& name, uint32_t base,
   gv_probes.push_back({buffer, size, GetCurrentSubmission(), name});
 }
 
+// Game Vault: the pixel shader translated for the texture setup of this draw (Modification::pixel.gv_texture_setup).
+static void GvApplyTextureSetup(const D3D12Shader* pixel_shader, TextureCache& texture_cache,
+                                DxbcShaderTranslator::Modification& modification) {
+  if (!pixel_shader || !cvars::gv_static_texture_setup || pixel_shader->texture_bindings().empty()) {
+    return;
+  }
+  DxbcShaderTranslator::GvTextureSetup gv_setup;
+  for (const Shader::TextureBinding& binding : pixel_shader->texture_bindings()) {
+    uint32_t index = binding.fetch_constant;
+    if (index >= 32 || (gv_setup.mask & (uint32_t(1) << index))) {
+      continue;
+    }
+    gv_setup.mask |= uint32_t(1) << index;
+    texture_cache.GvSignsAndScaleFromFetchConstant(index, gv_setup.signs[index], gv_setup.integer_scale_bits[index]);
+  }
+  // The last setup and slot per shader (GPU thread only), so the shared list is looked at only on a change.
+  struct GvLastSetup {
+    DxbcShaderTranslator::GvTextureSetup setup;
+    uint32_t slot = 0;
+  };
+  static std::unordered_map<uint64_t, GvLastSetup> gv_last_setups;
+  GvLastSetup& last = gv_last_setups[pixel_shader->ucode_data_hash()];
+  if (last.setup.mask == 0 || !(last.setup == gv_setup)) {
+    last.setup = gv_setup;
+    last.slot = DxbcShaderTranslator::GvTextureSetupSlot(pixel_shader->ucode_data_hash(), gv_setup);
+  }
+  modification.pixel.gv_texture_setup = last.slot;
+}
+
 bool D3D12CommandProcessor::GvDryDraw(xenos::PrimitiveType primitive_type, uint32_t index_count) {
   // The parts of IssueDraw that decide the pipeline, and nothing else: no render target update (no transfers), no
   // binding, no drawing. Ends with ConfigurePipeline in look-ahead mode, which only queues a new pipeline.
@@ -3136,6 +3171,7 @@ bool D3D12CommandProcessor::GvDryDraw(xenos::PrimitiveType primitive_type, uint3
                                                                          ps_param_gen_pos, normalized_depth_control,
                                                                          apply_host_depth_polygon_offset)
                    : DxbcShaderTranslator::Modification(0);
+  GvApplyTextureSetup(pixel_shader, *texture_cache_, pixel_shader_modification);
   uint32_t formats[1 + xenos::kMaxColorRenderTargets];
   uint32_t bits = render_target_cache_->GvDryPredict(is_rasterization_done, normalized_depth_control,
                                                      normalized_color_mask, formats);
@@ -3502,6 +3538,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                 *pixel_shader, interpolator_mask, ps_param_gen_pos,
                 normalized_depth_control, apply_host_depth_polygon_offset)
           : DxbcShaderTranslator::Modification(0);
+  GvApplyTextureSetup(pixel_shader, *texture_cache_, pixel_shader_modification);
 
   // Set up the render targets - this may perform dispatches and draws.
   xe::gv_perf::DrawStage(1, gv_t);

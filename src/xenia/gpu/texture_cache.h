@@ -122,6 +122,7 @@ class TextureCache {
 
   void TextureFetchConstantWritten(uint32_t index) {
     texture_bindings_in_sync_ &= ~(UINT32_C(1) << index);
+    gv_fetch_info_valid_ &= ~(UINT32_C(1) << index);
   }
   void TextureFetchConstantsWritten(uint32_t first_index, uint32_t last_index) {
     // generate a mask of all bits from before the first index, and xor it with
@@ -132,6 +133,7 @@ class TextureCache {
     // todo: check that this is right
 
     texture_bindings_in_sync_ &= ~res;
+    gv_fetch_info_valid_ &= ~res;
   }
 
   virtual void RequestTextures(uint32_t used_texture_mask);
@@ -152,6 +154,28 @@ class TextureCache {
     const TextureBinding* binding =
         GetValidTextureBinding(fetch_constant_index);
     return binding ? binding->integer_scale_bits : 0;
+  }
+  // Game Vault: what GetActiveTextureSwizzledSigns / GetActiveIntegerScaleBits will give for this fetch constant
+  // once the textures of the draw are requested, worked out from the fetch constant now (before the pipeline).
+  void GvSignsAndScaleFromFetchConstant(uint32_t fetch_constant_index, uint8_t& signs_out,
+                                        uint32_t& integer_scale_bits_out) const {
+    // Kept until the game writes this fetch constant again (once per texture change, not per draw).
+    if (gv_fetch_info_valid_ & (UINT32_C(1) << fetch_constant_index)) {
+      signs_out = gv_fetch_signs_[fetch_constant_index];
+      integer_scale_bits_out = gv_fetch_scale_bits_[fetch_constant_index];
+      return;
+    }
+    gv_fetch_info_valid_ |= UINT32_C(1) << fetch_constant_index;
+    xenos::xe_gpu_texture_fetch_t fetch = register_file().GetTextureFetch(fetch_constant_index);
+    TextureKey key;
+    uint8_t signs = kSwizzledSignsUnsigned;
+    BindingInfoFromFetchConstant(fetch, key, &signs);
+    if (!key.is_valid) {
+      signs = kSwizzledSignsUnsigned;
+    }
+    gv_fetch_signs_[fetch_constant_index] = signs_out = signs;
+    gv_fetch_scale_bits_[fetch_constant_index] = integer_scale_bits_out =
+        key.is_valid ? GetIntegerScaleBits(fetch.format, fetch.num_format, fetch.swizzle, signs) : 0;
   }
   bool IsActiveTextureResolutionScaled(uint32_t fetch_constant_index) const {
     const TextureBinding* binding =
@@ -715,6 +739,10 @@ class TextureCache {
   // Bit vector with bits reset on fetch constant writes to avoid parsing fetch
   // constants again and again.
   uint32_t texture_bindings_in_sync_ = 0;
+  // Game Vault: GvSignsAndScaleFromFetchConstant's results per fetch constant, valid until it is written again.
+  mutable uint32_t gv_fetch_info_valid_ = 0;
+  mutable uint8_t gv_fetch_signs_[32] = {};
+  mutable uint32_t gv_fetch_scale_bits_[32] = {};
 };
 
 }  // namespace gpu
