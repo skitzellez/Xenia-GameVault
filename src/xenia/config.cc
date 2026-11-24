@@ -816,6 +816,9 @@ const BuiltInGameConfig kBuiltInGameConfigs[] = {
     {"58410960", "[GPU]\nreadback_resolve = \"full\"\n"},   // Portal: Still Alive
     {"5841125A", "[GPU]\nreadback_resolve = \"full\"\n"},   // Counter-Strike: GO
     {"55530804", "[GPU]\nreadback_resolve = \"full\"\n"},   // Dark Messiah: Might and Magic Elements
+    // Call of Duty: Modern Warfare 3: blood pools drawn as solid red squares with gv_depth_no_alpha_kill (made for
+    // Naughty Bear, which needs it); without it the splatter shape is right (console check 2026-11-24).
+    {"415608CB", "[D3D12]\ngv_depth_no_alpha_kill = false\n"},
     // Spider-Man 4 (Radical's 2010 prototype, Prototype engine, title ID 565507EF): the whole city covered in dark
     // diagonal stripes; its shadows compare 24-bit float depth, so the depth must be converted exactly
     // (console check 2026-11-16: stripes gone, city, Spider-Man, cars and people drawn).
