@@ -533,6 +533,65 @@ class FpsOverlay final : public ui::ImGuiDialog {
   char text_[48] = {};
 };
 
+// Game Vault 1.1.8.488: "Getting Graphics Ready  412 / 1,295" at the top right after a game starts. The Xbox driver
+// builds ~6 pipelines a second and keeps none between runs; a draw whose pipeline is not built yet waits (the game
+// stutters) or is skipped (MW3: gun, enemies and walls missing, owner 11-24). The counter shows how far the pipelines
+// the game really uses (its gvhot list) are, so the player can wait in the menu until they are all there. "Graphics
+// Ready" shows for 4 s at the end, then nothing more. Draws only, no input.
+class GraphicsReadyOverlay final : public ui::ImGuiDialog {
+ public:
+  explicit GraphicsReadyOverlay(ui::ImGuiDrawer* drawer) : ui::ImGuiDialog(drawer) {}
+  void Restart() { done_ = {}, gone_ = false, started_ = std::chrono::steady_clock::now(); }
+
+ protected:
+  void OnDraw(ImGuiIO& io) override {
+    if (gone_) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const uint64_t total = gv_perf::hot_total.load(std::memory_order_relaxed);
+    const uint64_t built = std::min(gv_perf::hot_built.load(std::memory_order_relaxed), total);
+    if (total == 0) {   // the list comes with the pipeline cache a little after the start; none: nothing shown
+      if (now - started_ > std::chrono::minutes(3)) gone_ = true;
+      return;
+    }
+    if (built >= total) {
+      if (done_ == std::chrono::steady_clock::time_point()) done_ = now;
+      if (now - done_ > std::chrono::seconds(4)) {
+        gone_ = true;
+        return;
+      }
+    }
+    char line1[64], line2[64];
+    const bool ready = built >= total;
+    snprintf(line1, sizeof(line1), ready ? "Graphics Ready" : "Getting Graphics Ready");
+    snprintf(line2, sizeof(line2), "%llu / %llu  -  wait in the menu for the smoothest game",
+             (unsigned long long)built, (unsigned long long)total);
+    ImDrawList* list = ImGui::GetForegroundDrawList();
+    ImFont* font = ImGui::GetFont();
+    const float big = ImGui::GetFontSize() * 1.6f, sub_size = ImGui::GetFontSize() * 1.15f;
+    const ImVec2 t1 = font->CalcTextSizeA(big, FLT_MAX, 0.0f, line1);
+    const ImVec2 t2 = ready ? ImVec2(0, 0) : font->CalcTextSizeA(sub_size, FLT_MAX, 0.0f, line2);
+    const float pad = big * 0.45f, w = std::max(t1.x, t2.x), barh = ready ? 0.0f : sub_size * 0.45f;
+    const float h = t1.y + (ready ? 0.0f : t2.y + barh + pad * 0.8f);
+    const ImVec2 at(io.DisplaySize.x * 0.98f - w, io.DisplaySize.y * 0.03f);
+    list->AddRectFilled(ImVec2(at.x - pad, at.y - pad * 0.6f), ImVec2(at.x + w + pad, at.y + h + pad * 0.6f),
+                        IM_COL32(0, 0, 0, 170), pad);
+    list->AddText(font, big, at, ready ? IM_COL32(120, 230, 130, 255) : IM_COL32(255, 255, 255, 240), line1);
+    if (!ready) {
+      const float y = at.y + t1.y + pad * 0.3f;
+      list->AddRectFilled(ImVec2(at.x, y), ImVec2(at.x + w, y + barh), IM_COL32(255, 255, 255, 50), barh * 0.5f);
+      list->AddRectFilled(ImVec2(at.x, y), ImVec2(at.x + w * float(built) / float(total), y + barh),
+                          IM_COL32(110, 200, 255, 230), barh * 0.5f);
+      list->AddText(font, sub_size, ImVec2(at.x, y + barh + pad * 0.4f), IM_COL32(210, 220, 235, 230), line2);
+    }
+  }
+
+ private:
+  std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now(), done_{};
+  bool gone_ = false;
+};
+
 // Game Vault: Xbox 360 title updates and DLC from the player's USB drive. Game Vault finds the packages (in "Game
 // Vault\xbox 360 add-ons" on the drive), copies the new ones into the shared folder and lists them in "xbox 360
 // add-ons.txt" there; each start installs the ones not installed yet, the way Xenia's own "Install content" does, and writes what happened
@@ -1641,6 +1700,7 @@ class GameVaultXeniaApp final : public ui::WindowedApp {
   std::unique_ptr<ui::ImmediateDrawer> immediate_drawer_;
   ui::Presenter* presenter_painting_ = nullptr;
   FpsOverlay* fps_overlay_ = nullptr;  // owned by the ImGui drawer
+  GraphicsReadyOverlay* graphics_ready_ = nullptr;   // owned by the ImGui drawer (1.1.8.488)
   GameMenu* game_menu_ = nullptr;      // owned by the ImGui drawer, when open
   std::atomic<bool> emulator_ready_{false};
   std::atomic<bool> switching_{false};
@@ -1952,6 +2012,9 @@ void GameVaultXeniaApp::StartTitle(const std::filesystem::path& path) {
     if (fps_overlay_) {
       fps_overlay_->set_shown(UWP::GetShowFps());
     }
+    // 1.1.8.488: the graphics counter, for every game start
+    if (!graphics_ready_) graphics_ready_ = new GraphicsReadyOverlay(imgui_drawer_.get());
+    else graphics_ready_->Restart();
   });
   XELOGI("Game Vault: starting {} (frame rate shown: {})", path,
          UWP::GetShowFps());
