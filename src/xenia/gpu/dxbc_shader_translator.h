@@ -70,7 +70,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
     bool operator==(const GvTextureSetup& other) const;
   };
   // The slot (1...3) of this setup for the shader, added if new; 0 if the shader already has 3 others.
-  static uint32_t GvTextureSetupSlot(uint64_t ucode_hash, const GvTextureSetup& setup);
+  // With add false (a guessed draw of the look-ahead), only a setup already known gets a slot.
+  static uint32_t GvTextureSetupSlot(uint64_t ucode_hash, const GvTextureSetup& setup, bool add = true);
   static bool GvTextureSetupGet(uint64_t ucode_hash, uint32_t slot, GvTextureSetup& setup_out);
   // The title's file of known setups (read now, new ones appended), so stored pipelines can be translated the same
   // way in a later session.

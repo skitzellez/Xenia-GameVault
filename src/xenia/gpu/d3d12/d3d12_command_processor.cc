@@ -3065,7 +3065,7 @@ void D3D12CommandProcessor::GvProbeQueue(const std::string& name, uint32_t base,
 
 // Game Vault: the pixel shader translated for the texture setup of this draw (Modification::pixel.gv_texture_setup).
 static void GvApplyTextureSetup(const D3D12Shader* pixel_shader, TextureCache& texture_cache,
-                                DxbcShaderTranslator::Modification& modification) {
+                                DxbcShaderTranslator::Modification& modification, bool guessed = false) {
   if (!pixel_shader || !cvars::gv_static_texture_setup || pixel_shader->texture_bindings().empty()) {
     return;
   }
@@ -3084,6 +3084,12 @@ static void GvApplyTextureSetup(const D3D12Shader* pixel_shader, TextureCache& t
     uint32_t slot = 0;
   };
   static std::unordered_map<uint64_t, GvLastSetup> gv_last_setups;
+  if (guessed) {
+    // Look-ahead: the fetch constants may not be the draw's yet - never take a slot for a new setup.
+    modification.pixel.gv_texture_setup =
+        DxbcShaderTranslator::GvTextureSetupSlot(pixel_shader->ucode_data_hash(), gv_setup, false);
+    return;
+  }
   GvLastSetup& last = gv_last_setups[pixel_shader->ucode_data_hash()];
   if (last.setup.mask == 0 || !(last.setup == gv_setup)) {
     last.setup = gv_setup;
@@ -3171,7 +3177,7 @@ bool D3D12CommandProcessor::GvDryDraw(xenos::PrimitiveType primitive_type, uint3
                                                                          ps_param_gen_pos, normalized_depth_control,
                                                                          apply_host_depth_polygon_offset)
                    : DxbcShaderTranslator::Modification(0);
-  GvApplyTextureSetup(pixel_shader, *texture_cache_, pixel_shader_modification);
+  GvApplyTextureSetup(pixel_shader, *texture_cache_, pixel_shader_modification, true);
   uint32_t formats[1 + xenos::kMaxColorRenderTargets];
   uint32_t bits = render_target_cache_->GvDryPredict(is_rasterization_done, normalized_depth_control,
                                                      normalized_color_mask, formats);

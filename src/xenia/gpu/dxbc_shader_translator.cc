@@ -138,7 +138,7 @@ bool DxbcShaderTranslator::GvTextureSetup::operator==(const GvTextureSetup& othe
   return true;
 }
 
-uint32_t DxbcShaderTranslator::GvTextureSetupSlot(uint64_t ucode_hash, const GvTextureSetup& setup) {
+uint32_t DxbcShaderTranslator::GvTextureSetupSlot(uint64_t ucode_hash, const GvTextureSetup& setup, bool add) {
   std::lock_guard<std::mutex> lock(gv_texture_setup_mutex);
   GvTextureSetupSlots& slots = gv_texture_setups[ucode_hash];
   for (uint32_t i = 0; i < slots.count; ++i) {
@@ -146,7 +146,7 @@ uint32_t DxbcShaderTranslator::GvTextureSetupSlot(uint64_t ucode_hash, const GvT
       return i + 1;
     }
   }
-  if (slots.count >= 3) {
+  if (slots.count >= 3 || !add) {
     return 0;
   }
   slots.setups[slots.count] = setup;
