@@ -3661,6 +3661,12 @@ void PipelineCache::CreationThread(size_t thread_index) {
             !gv_needed_.empty() || GvGameQuiet()) {
           limit = SIZE_MAX;
         }
+        // 1.1.8.490: while "Getting Graphics Ready" is on screen the player waits in the menu for it (1,305 for MW3
+        // at ~6 a second on 3 threads, CPU only ~40% busy, owner 11-24 "super slow"): every thread builds then
+        if (xe::gv_perf::hot_built.load(std::memory_order_relaxed) <
+            xe::gv_perf::hot_total.load(std::memory_order_relaxed)) {
+          limit = SIZE_MAX;
+        }
         if (thread_index >= limit) {
           // 1.1.8.485: look again now and then: the game may have gone quiet (a loading screen) without anyone
           // notifying.
