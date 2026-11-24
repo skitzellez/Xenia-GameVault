@@ -30,6 +30,8 @@ inline std::atomic<uint64_t> draws_total{0}, pipelines_built{0}, pipelines_left{
 // 1.1.8.488: the pipelines on the title's used list (gvhot) and how many are built: the "getting graphics ready"
 // counter on screen (emulator_window.cc)
 inline std::atomic<uint64_t> hot_total{0}, hot_built{0};
+// Draws that used the generic pixel shader pipeline while the one for their texture setup was being built.
+inline std::atomic<uint64_t> draws_generic{0};
 inline std::atomic<uint64_t> upload_bytes{0}, draws{0}, draws_skipped{0}, pipelines_queued{0}, pipelines_not_waited{0};
 // Texture cache: made and destroyed since the last look, how many it holds and their host memory (MB) now.
 // Shared memory: writes by the game caught on watched pages, and requests that had to take the lock.

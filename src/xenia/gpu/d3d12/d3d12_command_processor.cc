@@ -3609,6 +3609,13 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       pipeline_cache_->GvMarkLookedAhead(pipeline_handle);
       GvLookAhead();
     }
+    if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
+      // Game Vault: built for this texture setup but not ready yet - the generic one draws the same.
+      if (void* generic = pipeline_cache_->GvReadyGenericSibling(pipeline_handle)) {
+        xe::gv_perf::draws_generic.fetch_add(1, std::memory_order_relaxed);
+        pipeline_handle = generic;
+      }
+    }
     if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr &&
         !pipeline_cache_->GvBuildPipelineNow(pipeline_handle)) {
       xe::gv_perf::draws_skipped.fetch_add(1, std::memory_order_relaxed);

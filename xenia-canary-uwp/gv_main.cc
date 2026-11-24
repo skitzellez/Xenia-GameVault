@@ -2318,12 +2318,12 @@ void GameVaultXeniaApp::EmulatorThread() {
       if (std::filesystem::file_size(path, ec) > (1u << 20)) return;
       std::ofstream(path, std::ios::app) << fmt::format(
           "{} {:5}s fps {:4.1f} frame longest {:3.0f} ms, over 25 ms {}, over 50 ms {} | cpu {:3.0f}% gpu-thread {:3.0f}% | disc {} reads {:.0f} ms, longest {:.0f} | drive {} reads {:.0f} ms, longest {:.0f} | textures {} "
-          "{:.0f} ms, longest {:.0f} | uploads {:.1f} MB {:.1f} ms | draws {} skipped {} | new pipelines {} built now {} {:.0f} ms, not waited for {}, built in background {}, left {} | cpus {} | "
+          "{:.0f} ms, longest {:.0f} | uploads {:.1f} MB {:.1f} ms | draws {} skipped {} generic {} | new pipelines {} built now {} {:.0f} ms, not waited for {}, built in background {}, left {} | cpus {} | "
           "draw ms: setup {:.0f} prim {:.0f} rt {:.0f} pipe {:.0f} tex {:.0f} state {:.0f} bind+vfetch {:.0f} memexport+rest {:.0f} | "
           "texcache {} held {} MB, made {} destroyed {} | memory: faults {} locked requests {} uploads {} | "
           "network pieces: on demand {} ahead {} used {} waited {}\n",
           what, second, r.fps, r.frame_max, r.frames25, r.frames50, r.cpu, r.gpu, r.net, r.net_ms, r.net_max, r.drive, r.drive_ms, r.drive_max, r.tex, r.tex_ms, r.tex_max, r.up_mb, r.up_ms,
-          r.draws, r.skipped, r.queued, r.now_count, r.now_ms, gp::pipelines_not_waited.exchange(0), gp::pipelines_built.exchange(0), gp::pipelines_left.load(), cpus, r.stage[0], r.stage[1], r.stage[2], r.stage[3], r.stage[4], r.stage[5],
+          r.draws, r.skipped, gp::draws_generic.exchange(0), r.queued, r.now_count, r.now_ms, gp::pipelines_not_waited.exchange(0), gp::pipelines_built.exchange(0), gp::pipelines_left.load(), cpus, r.stage[0], r.stage[1], r.stage[2], r.stage[3], r.stage[4], r.stage[5],
           r.stage[6], r.stage[7], gp::tex_count.load(), gp::tex_mb.load(), r.tex_made, r.tex_gone, gp::mem_faults.exchange(0), gp::mem_slow_requests.exchange(0), r.up_count,
           gp::net_demand.exchange(0), gp::net_ahead.exchange(0), gp::net_ahead_used.exchange(0), gp::net_ahead_waits.exchange(0));
     };

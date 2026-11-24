@@ -60,6 +60,7 @@ DEFINE_bool(dxbc_source_map, false,
             "GPU.Debug");
 
 // Game Vault debugging (2026-11-02): no SV_Coverage output in pixel shaders that write depth.
+DEFINE_bool(gv_pso_fake_tex_setup, false, "Game Vault test only (wrong pictures): pixel shaders without a known texture setup are built as if every texture were unsigned and unscaled, to measure the driver build time.", "D3D12");
 DEFINE_bool(gv_no_coverage_with_depth, false, "Game Vault: pixel shaders writing depth get no SV_Coverage output (the Xbox driver zeroes their depth otherwise).", "D3D12");
 
 namespace xe {
@@ -1009,6 +1010,9 @@ void DxbcShaderTranslator::StartTranslation() {
       !GvTextureSetupGet(current_shader().ucode_data_hash(), GetDxbcShaderModification().pixel.gv_texture_setup,
                          gv_texture_setup_)) {
     gv_texture_setup_ = GvTextureSetup();  // not known (should not happen): everything from the system constants
+  }
+  if (cvars::gv_pso_fake_tex_setup && is_pixel_shader() && !gv_texture_setup_.mask) {
+    gv_texture_setup_.mask = UINT32_MAX;  // signs 0 = unsigned, no integer scale
   }
   // Set up the input and output registers.
   Modification shader_modification = GetDxbcShaderModification();

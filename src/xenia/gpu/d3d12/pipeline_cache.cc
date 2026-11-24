@@ -10,6 +10,7 @@
 #include "xenia/base/gv_perf.h"
 #include "xenia/gpu/d3d12/pipeline_cache.h"
 
+#include <algorithm>
 #include <chrono>
 #include <unordered_map>
 #include <fstream>
@@ -361,6 +362,38 @@ void PipelineCache::InitializeShaderStorage(
       }
     }
   }
+  // Game Vault: a used-list pipeline with the generic pixel shader is left out of the used list when the same
+  // pipeline built for a known texture setup is on it too (that one is used now; the generic one is only a fallback).
+  size_t gv_generic_dropped = 0;
+  {
+    const uint64_t bits = GvTextureSetupBits();
+    std::unordered_set<uint64_t> generic_of_hot_specialised;
+    for (const PipelineStoredDescription& stored : pipeline_stored_descriptions) {
+      if ((stored.description.pixel_shader_modification & bits) &&
+          gv_hot_list.count(stored.description_hash)) {
+        PipelineDescription generic = stored.description;
+        generic.pixel_shader_modification &= ~bits;
+        generic_of_hot_specialised.insert(XXH3_64bits(&generic, sizeof(generic)));
+      }
+    }
+    for (uint64_t hash : generic_of_hot_specialised) {
+      gv_generic_dropped += gv_hot_list.erase(hash);
+    }
+    if (gv_generic_dropped) {
+      // Keep the order numbers dense (they index gv_hot_by_order_).
+      std::vector<std::pair<uint32_t, uint64_t>> ordered;
+      for (const auto& entry : gv_hot_list) {
+        ordered.emplace_back(entry.second, entry.first);
+      }
+      std::sort(ordered.begin(), ordered.end());
+      gv_hot_list.clear();
+      for (const auto& entry : ordered) {
+        gv_hot_list.emplace(entry.second, uint32_t(gv_hot_list.size()));
+      }
+    }
+  }
+  XELOGI("Game Vault: {} generic pipelines left off the used list (built for their texture setup instead)",
+         gv_generic_dropped);
   gv_have_hot_list_ = !gv_hot_list.empty();
   gv_hot_by_order_.assign(gv_hot_list.size(), nullptr);
   XELOGI("Game Vault: {} pipelines on the title's used list", gv_hot_list.size());
@@ -3098,6 +3131,31 @@ void PipelineCache::GvPsoLog(
       uint32_t(desc.PrimitiveTopologyType), desc.NumRenderTargets,
       desc.SampleDesc.Count,
       std::hash<std::thread::id>()(std::this_thread::get_id()) % 1000, extra);
+}
+
+uint64_t PipelineCache::GvTextureSetupBits() {
+  DxbcShaderTranslator::Modification modification(0);
+  modification.pixel.gv_texture_setup = 3;
+  return modification.value;
+}
+
+void* PipelineCache::GvReadyGenericSibling(void* handle) {
+  const Pipeline* pipeline = reinterpret_cast<const Pipeline*>(handle);
+  const uint64_t bits = GvTextureSetupBits();
+  if (!pipeline || !(pipeline->description.description.pixel_shader_modification & bits)) {
+    return nullptr;
+  }
+  PipelineDescription generic = pipeline->description.description;
+  generic.pixel_shader_modification &= ~bits;
+  uint64_t hash = XXH3_64bits(&generic, sizeof(generic));
+  auto found_range = pipelines_.equal_range(hash);
+  for (auto it = found_range.first; it != found_range.second; ++it) {
+    Pipeline* found = it->second;
+    if (found->description.description == generic) {
+      return found->state.load(std::memory_order_acquire) ? found : nullptr;
+    }
+  }
+  return nullptr;
 }
 
 const std::vector<uint8_t>* PipelineCache::GvDxil(

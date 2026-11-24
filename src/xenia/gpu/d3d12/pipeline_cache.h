@@ -130,6 +130,12 @@ class PipelineCache {
         std::memory_order_acquire);
   }
   ID3D12PipelineState* AwaitD3D12PipelineByHandle(void* handle);
+  // Game Vault: for a pipeline whose pixel shader is built for a known texture setup (gv_texture_setup), the same
+  // pipeline with the generic pixel shader (signs read in the shader), if it is already built; nullptr otherwise.
+  // Draws correctly with any texture setup, so a draw can use it while the faster-to-build one is being built.
+  void* GvReadyGenericSibling(void* handle);
+  // The bits of a pixel shader modification value that hold gv_texture_setup.
+  static uint64_t GvTextureSetupBits();
 
   ID3D12RootSignature* GetRootSignatureByHandle(void* handle) const {
     return reinterpret_cast<const Pipeline*>(handle)
