@@ -520,6 +520,10 @@ class PipelineCache {
   // Until this time (ms) all creation threads work: the game is waiting for pipelines anyway.
   std::atomic<int64_t> gv_boost_until_ms_{0};
   void GvHelpWithStall(Pipeline* pipeline);
+  // 1.1.8.485: the game draws little (menus, loading): all creation threads build (under creation_request_lock_).
+  bool GvGameQuiet();
+  uint64_t gv_quiet_at_ms_ = 0, gv_quiet_draws_ = 0;
+  bool gv_quiet_ = false;
   std::filesystem::path gv_hot_path_;
   // Game Vault test probe (only with gv_pso_on.txt in the cache folder): how long the driver takes for each
   // pipeline, with sizes, written to gv_pso\pso.log, and every translated shader saved once in gv_pso\.

@@ -77,6 +77,11 @@ DEFINE_int32(gv_build_now_max_wait_ms, 40,
              "skipped for this frame (the pipeline goes on being built in the "
              "background). 0 = build it at once and wait as long as it takes.",
              "D3D12");
+DEFINE_int32(gv_quiet_draws_per_s, 20000,
+             "Game Vault: while the game draws fewer than this many draws a "
+             "second (menus, loading), every creation thread builds the stored "
+             "pipelines, not just gv_startup_pipeline_threads. 0 = off.",
+             "D3D12");
 DEFINE_int32(gv_build_now_budget_ms, 12,
              "Game Vault: all waits for pipelines together take at most this "
              "many ms in any 100 ms; past it, draws are skipped at once.",
@@ -3642,11 +3647,14 @@ void PipelineCache::CreationThread(size_t thread_index) {
             !creation_queue_.top()->gv_hot) {
           limit = 1;
         }
-        if (GvNowMs() < gv_boost_until_ms_.load(std::memory_order_relaxed) || gv_lookahead_waiting_) {
+        if (GvNowMs() < gv_boost_until_ms_.load(std::memory_order_relaxed) || gv_lookahead_waiting_ ||
+            GvGameQuiet()) {
           limit = SIZE_MAX;
         }
         if (thread_index >= limit) {
-          creation_request_cond_.wait(lock);
+          // 1.1.8.485: look again now and then: the game may have gone quiet (a loading screen) without anyone
+          // notifying.
+          creation_request_cond_.wait_for(lock, std::chrono::milliseconds(250));
           continue;
         }
       }
@@ -3745,6 +3753,7 @@ void PipelineCache::CreationThread(size_t thread_index) {
                  : 0);
     }
     pipeline_to_create->gv_done.store(true, std::memory_order_release);
+    xe::gv_perf::pipelines_built.fetch_add(1, std::memory_order_relaxed);
 
     // Pipeline created - the thread is not busy anymore, safe to set the
     // completion event if needed (at the next iteration, or in some other
@@ -3752,6 +3761,7 @@ void PipelineCache::CreationThread(size_t thread_index) {
     {
       std::lock_guard<xe_mutex> lock(creation_request_lock_);
       --creation_threads_busy_;
+      xe::gv_perf::pipelines_left.store(creation_queue_.size(), std::memory_order_relaxed);
     }
   }
 }
@@ -3801,6 +3811,25 @@ void PipelineCache::GvNoteUsed(Pipeline* pipeline, uint64_t hash) {
   if (!gv_hot_path_.empty()) {
     std::ofstream(gv_hot_path_, std::ios::app) << fmt::format("{:016X}\n", hash);
   }
+}
+
+bool PipelineCache::GvGameQuiet() {
+  // Game Vault 1.1.8.485: MW3 started a match about 50 s after boot with ~220 of its 1,370 stored pipelines not built
+  // yet (3 low-priority threads, 0.3-1.5 s each on the Xbox driver), so a quarter of the draws were skipped for a
+  // minute. In menus and loading screens the game leaves the CPU free: then every creation thread helps. Called under
+  // creation_request_lock_; looks at the draw count twice a second.
+  if (cvars::gv_quiet_draws_per_s <= 0) {
+    return false;
+  }
+  const uint64_t now = uint64_t(GvNowMs());
+  if (now - gv_quiet_at_ms_ >= 500) {
+    const uint64_t total = xe::gv_perf::draws_total.load(std::memory_order_relaxed);
+    const uint64_t per_s = (total - gv_quiet_draws_) * 1000 / std::max<uint64_t>(now - gv_quiet_at_ms_, 1);
+    gv_quiet_ = gv_quiet_at_ms_ != 0 && per_s < uint64_t(cvars::gv_quiet_draws_per_s);
+    gv_quiet_at_ms_ = now;
+    gv_quiet_draws_ = total;
+  }
+  return gv_quiet_;
 }
 
 void PipelineCache::GvLookAheadBegin() {

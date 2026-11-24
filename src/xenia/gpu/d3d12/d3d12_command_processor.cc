@@ -3564,6 +3564,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   }
 
   xe::gv_perf::draws.fetch_add(1, std::memory_order_relaxed);
+  xe::gv_perf::draws_total.fetch_add(1, std::memory_order_relaxed);
   if (cvars::async_shader_compilation) {
     if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr && cvars::gv_pipeline_look_ahead &&
         gv_in_primary_ && !pipeline_cache_->GvFoundByLookAhead(pipeline_handle)) {

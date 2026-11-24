@@ -24,6 +24,9 @@ inline Timed drive_read;
 // frame times (presenter): longest in the second, frames over 25 ms and over 50 ms
 inline std::atomic<uint64_t> frame_max_us{0}, frames_over_25{0}, frames_over_50{0};
 inline std::atomic<uint64_t> net_ahead{0}, net_ahead_used{0}, net_ahead_waits{0}, net_demand{0};
+// 1.1.8.485: draws_total never reset (creation threads read it to see a quiet game); pipelines built in the
+// background this second and how many are still waiting in the queue.
+inline std::atomic<uint64_t> draws_total{0}, pipelines_built{0}, pipelines_left{0};
 inline std::atomic<uint64_t> upload_bytes{0}, draws{0}, draws_skipped{0}, pipelines_queued{0}, pipelines_not_waited{0};
 // Texture cache: made and destroyed since the last look, how many it holds and their host memory (MB) now.
 // Shared memory: writes by the game caught on watched pages, and requests that had to take the lock.
