@@ -74,7 +74,7 @@ DEFINE_bool(gv_build_needed_pipeline_now, true,
             "instead of being skipped. A skipped draw can leave noise in what "
             "the game then copies into its textures.",
             "D3D12");
-DEFINE_int32(gv_build_now_max_wait_ms, 40,
+DEFINE_int32(gv_build_now_max_wait_ms, 0,   // 1.1.8.497: 0 = wait, as before .483 (40 + skip left MW3 guns, enemies and walls invisible; owner 11-24)
              "Game Vault: how long a draw waits for its pipeline before it is "
              "skipped for this frame (the pipeline goes on being built in the "
              "background). 0 = build it at once and wait as long as it takes.",
