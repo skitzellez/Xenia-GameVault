@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_SHADER_STORAGE_H_
 #define XENIA_GPU_SHADER_STORAGE_H_
 
+#include <array>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -146,6 +147,23 @@ inline void SeedShaderStorageFile(const std::filesystem::path& file,
                              ec);
   XELOGI("Game Vault: shader storage {} {} from the package",
          xe::path_to_utf8(file.filename()), ec ? "NOT taken" : "taken");
+}
+
+// Game Vault: shader sharing (cdn.gamevault.fyi). The Xbox app sets this hook. It runs at
+// each title's storage start, after the package seed and before the files open: it merges
+// the records other players shared into the title's files (only records this build's
+// format can read: the exact file headers are passed) and sends this console's new
+// records in the background. Not after an in-game "Clear shader cache".
+struct ShaderShareFiles {
+  uint32_t title_id;
+  std::filesystem::path xsh, xpso;
+  std::array<uint8_t, 8> xsh_header;
+  std::array<uint8_t, 12> xpso_header;
+  uint32_t xpso_record_size;
+};
+inline std::function<void(const ShaderShareFiles&)>& ShaderShareHook() {
+  static std::function<void(const ShaderShareFiles&)> hook;
+  return hook;
 }
 
 // Ensures shader storage directories exist. Returns true on success.
@@ -296,6 +314,21 @@ class ShaderStorageWriter {
     SeedShaderStorageFile(pipeline_storage_file_path, title_id);
     SeedShaderStorageFile(GetShaderStorageFilePath(cache_root, title_id),
                           title_id);
+    if (ShaderShareHook() && title_id &&
+        ShaderStorageClearedTitle().load() != title_id) {
+      ShaderShareFiles share;
+      share.title_id = title_id;
+      share.xsh = GetShaderStorageFilePath(cache_root, title_id);
+      share.xpso = pipeline_storage_file_path;
+      uint32_t xsh_words[2] = {kShaderStorageMagic,
+                               xe::byte_swap(ShaderStoredHeader::kVersion)};
+      std::memcpy(share.xsh_header.data(), xsh_words, sizeof(xsh_words));
+      uint32_t xpso_words[3] = {kPipelineStorageMagic, pipeline_config.api_magic,
+                                xe::byte_swap(pipeline_config.version)};
+      std::memcpy(share.xpso_header.data(), xpso_words, sizeof(xpso_words));
+      share.xpso_record_size = uint32_t(sizeof(TPipelineStoredDescription));
+      ShaderShareHook()(share);
+    }
     pipeline_storage_file_ =
         xe::filesystem::OpenFile(pipeline_storage_file_path, "a+b");
     if (!pipeline_storage_file_) {

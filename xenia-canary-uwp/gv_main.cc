@@ -1861,6 +1861,12 @@ GameVaultXeniaApp::CreateInputDrivers(ui::Window* window) {
   return drivers;
 }
 
+}  // namespace app
+}  // namespace xe
+void GvShaderShareInstall();   // gv_shader_share.cc (global)
+namespace xe {
+namespace app {
+
 bool GameVaultXeniaApp::OnInitialize() {
   Profiler::Initialize();
   Profiler::ThreadEnter("Main");
@@ -1897,6 +1903,7 @@ bool GameVaultXeniaApp::OnInitialize() {
   }
   XELOGI("Host cache root: {}", cache_root);
   XELOGI("Game Vault: Xenia Edge build {}", UWP::GetPackageVersion());
+  ::GvShaderShareInstall();   // (gv_shader_share.cc) shared shader records from cdn.gamevault.fyi
 
   emulator_ =
       std::make_unique<Emulator>("", storage_root, content_root, cache_root);
