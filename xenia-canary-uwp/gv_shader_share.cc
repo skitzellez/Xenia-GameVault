@@ -242,14 +242,22 @@ size_t Merge(const std::filesystem::path& path, const uint8_t* header, size_t he
 std::filesystem::path MarkPath(const xe::gpu::ShaderShareFiles& f) {
   return f.xsh.parent_path() / fmt::format("{:08X}.gvshare", f.title_id);
 }
+// The title's used-list (pipelines it drew with, in first-use order): <cache_root>/<TID>.gvhot.
+std::filesystem::path HotPath(const xe::gpu::ShaderShareFiles& f) {
+  return f.xsh.parent_path().parent_path().parent_path() /
+         fmt::format("{:08X}.gvhot", f.title_id);
+}
+std::atomic<uint64_t> g_mark_hot{0};   // third number of the mark: used-list size sent/taken
 void ReadMark(const xe::gpu::ShaderShareFiles& f, uint64_t& xsh, uint64_t& xpso) {
   xsh = xpso = 0;
+  uint64_t hot = 0;
   std::ifstream in(MarkPath(f));
-  in >> xsh >> xpso;
+  in >> xsh >> xpso >> hot;
+  g_mark_hot = hot;
 }
 void WriteMark(const xe::gpu::ShaderShareFiles& f, uint64_t xsh, uint64_t xpso) {
   std::ofstream out(MarkPath(f), std::ios::trunc);
-  out << xsh << " " << xpso << "\n";
+  out << xsh << " " << xpso << " " << g_mark_hot.load() << "\n";
 }
 
 void SendGrown(const xe::gpu::ShaderShareFiles& f, const std::string& base) {
@@ -276,7 +284,50 @@ void SendGrown(const xe::gpu::ShaderShareFiles& f, const std::string& base) {
              xsh ? "shaders" : "draw setups");
     }
   }
+  // The used-list: the server ranks every console's lists into one shared list per game.
+  uint64_t now_hot = FileSize(HotPath(f));
+  if (now_hot > g_mark_hot.load()) {
+    Bytes file, reply;
+    if (ReadFile(HotPath(f), file)) {
+      std::string url = fmt::format("{}/api/x360/v1/upload?tid={:08X}&kind=hot&fmt={}", base,
+                                    f.title_id, Hex(f.xpso_header.data(), f.xpso_header.size()));
+      if (Http(url, &file, std::chrono::seconds(20), reply)) {
+        any = true;
+        g_mark_hot = now_hot;
+        XELOGI("Game Vault: shader sharing: sent the used-list ({} KB): {}", file.size() >> 10,
+               std::string(reply.begin(), reply.end()));
+      }
+    }
+  }
   if (any) WriteMark(f, sent_xsh, sent_xpso);
+}
+
+// The shared used-list, only for a game this console has no list for yet (its first start), so
+// "Getting Graphics Ready" builds first what players really use. A console's own list is never
+// replaced. Returns the lines taken.
+size_t TakeHotList(const xe::gpu::ShaderShareFiles& f, const std::string& base) {
+  if (FileSize(HotPath(f)) != 0) return 0;
+  std::string url = fmt::format("{}/x360/shaders/{}/{:08X}.gvhot", base,
+                                Hex(f.xpso_header.data(), f.xpso_header.size()), f.title_id);
+  Bytes shared;
+  if (!Http(url, nullptr, std::chrono::seconds(3), shared) || shared.empty()) return 0;
+  std::string text(shared.begin(), shared.end()), clean;
+  size_t lines = 0, start = 0;
+  while (start < text.size()) {
+    size_t end = text.find('\n', start);
+    if (end == std::string::npos) end = text.size();
+    std::string line = text.substr(start, end - start);
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.size() == 16 &&
+        line.find_first_not_of("0123456789ABCDEFabcdef") == std::string::npos) {
+      clean += line + "\n";
+      ++lines;
+    }
+    start = end + 1;
+  }
+  if (!lines) return 0;
+  std::ofstream(HotPath(f), std::ios::trunc | std::ios::binary) << clean;
+  return lines;
 }
 
 void OnTitleStorage(const xe::gpu::ShaderShareFiles& f) {
@@ -311,10 +362,12 @@ void OnTitleStorage(const xe::gpu::ShaderShareFiles& f) {
   // (when everything of its own was already sent).
   if (before[0] <= mark_xsh) mark_xsh = FileSize(f.xsh);
   if (before[1] <= mark_xpso) mark_xpso = FileSize(f.xpso);
-  if (added[0] || added[1]) WriteMark(f, mark_xsh, mark_xpso);
-  XELOGI("Game Vault: shader sharing: {:08X} took {} shaders + {} draw setups from other players "
-         "({} ms)",
-         f.title_id, added[0], added[1],
+  size_t hot_lines = TakeHotList(f, base);
+  if (hot_lines) g_mark_hot = FileSize(HotPath(f));   // (taken, not this console's to send)
+  if (added[0] || added[1] || hot_lines) WriteMark(f, mark_xsh, mark_xpso);
+  XELOGI("Game Vault: shader sharing: {:08X} took {} shaders + {} draw setups + a used-list of {} "
+         "from other players ({} ms)",
+         f.title_id, added[0], added[1], hot_lines,
          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
                                                                t0)
              .count());
