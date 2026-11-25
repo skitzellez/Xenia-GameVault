@@ -197,7 +197,12 @@ void FileLogSink::WriteLine(const char* line, size_t size) {
   // only log messages ("w> 00001AB0 ..."); blocks like the settings list or the module header stay whole
   bool prefixed = size > 12 && line[1] == '>' && line[2] == ' ';
   // log_lr_at_instruction lines are asked for on purpose: each hit is written (only the size limit applies)
-  if (!prefixed || std::string_view(line, size).find("log_lr_at_instruction: lr") != std::string_view::npos) {
+  // Game Vault's own regular status lines (frame rate every 30 s; look-ahead, capped at 300 by its caller) are
+  // limited where they are written, so the repeat filter must not stop them after 20 copies (about 10 minutes in)
+  std::string_view whole(line, size);
+  if (!prefixed || whole.find("log_lr_at_instruction: lr") != std::string_view::npos ||
+      whole.find("Game Vault: frame rate ") != std::string_view::npos ||
+      whole.find("Game Vault: look-ahead ") != std::string_view::npos) {
     if (written_ + size <= limit_) Put(line, size);
     return;
   }
