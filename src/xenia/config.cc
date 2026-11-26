@@ -81,7 +81,38 @@ bool sortCvar(cvar::IConfigVar* a, cvar::IConfigVar* b) {
   return false;
 }
 
+// Game Vault: Xenia 1.1.8.501 saved its gv_fixes setting under "[Game Vault]".
+// A bare TOML table name can't have a space, so the next start could not read
+// the file. Rename that header to "[GameVault]" before parsing.
+static void GvRepairConfigHeaders(const std::filesystem::path& config_path) {
+  std::string text;
+  {
+    std::ifstream in(config_path, std::ios::binary);
+    if (!in.is_open()) {
+      return;
+    }
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    text = ss.str();
+  }
+  const std::string bad = "[Game Vault]";
+  size_t pos = text.find(bad);
+  if (pos == std::string::npos) {
+    return;
+  }
+  while (pos != std::string::npos) {
+    text.replace(pos, bad.size(), "[GameVault]");
+    pos = text.find(bad, pos);
+  }
+  std::ofstream out(config_path, std::ios::binary | std::ios::trunc);
+  if (out.is_open()) {
+    out << text;
+    XELOGI("Game Vault: repaired a [Game Vault] header in {}", config_path);
+  }
+}
+
 toml::parse_result ParseConfig(const std::filesystem::path& config_path) {
+  GvRepairConfigHeaders(config_path);
   try {
     return ParseFile(config_path);
   } catch (toml::parse_error& e) {

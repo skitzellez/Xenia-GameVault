@@ -397,7 +397,7 @@ void OnTitleStorage(const xe::gpu::ShaderShareFiles& f) {
 DEFINE_bool(gv_fixes, true,
             "Game Vault: take per-game fixes (settings and patches) from Game Vault's server. Off: only the fixes "
             "built into this Xenia.",
-            "Game Vault");
+            "GameVault");
 
 void GvShaderShareInstall() {
   xe::gpu::ShaderShareHook() = OnTitleStorage;
