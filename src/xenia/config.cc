@@ -11,6 +11,9 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
+#include <fstream>
+#include <mutex>
 #include <functional>
 #include <optional>
 #include <sstream>
@@ -945,6 +948,109 @@ static void ApplyGameVaultSettings(const std::string_view title_id) {
 
 // Game Vault (Xbox app): at title load, the game's own config file, or the
 // built-in settings for games known to need them, then the player's choices from Game Vault.
+
+std::function<std::string()> gamevault_fixes_fetch;
+
+// The server's fixes file, fetched once per run when the kept copy is missing or over 6 hours old
+static const toml::table& GameVaultFixes() {
+  static toml::table fixes;
+  static std::once_flag once;
+  std::call_once(once, [] {
+    if (config_folder.empty()) return;
+    const auto path = config_folder / "gvfixes.toml";
+    std::error_code ec;
+    bool fresh = false;
+    if (std::filesystem::exists(path, ec)) {
+      auto age = std::filesystem::file_time_type::clock::now() - std::filesystem::last_write_time(path, ec);
+      fresh = !ec && age < std::chrono::hours(6) && age > -std::chrono::hours(1);
+    }
+    if (!fresh && gamevault_fixes_fetch) {
+      std::string text = gamevault_fixes_fetch();
+      if (!text.empty()) {
+        try {
+          (void)toml::parse(text);   // only a file that reads replaces the kept one
+          const auto tmp = config_folder / "gvfixes.toml.new";
+          {
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            out.write(text.data(), std::streamsize(text.size()));
+          }
+          std::filesystem::rename(tmp, path, ec);
+          XELOGI("Game Vault fixes: new list from the server ({} bytes)", text.size());
+        } catch (const std::exception& e) {
+          XELOGE("Game Vault fixes: the server's list could not be read: {}", e.what());
+        }
+      } else {
+        XELOGI("Game Vault fixes: server not reached, using the kept list");
+      }
+    }
+    if (std::filesystem::exists(path, ec)) {
+      try {
+        fixes = ParseFile(path);
+      } catch (const std::exception& e) {
+        XELOGE("Game Vault fixes: kept list could not be read: {}", e.what());
+      }
+    }
+  });
+  return fixes;
+}
+
+const toml::table* GameVaultFix(std::string_view title_id) {
+  const auto* games = GameVaultFixes()["games"].as_table();
+  if (!games) return nullptr;
+  std::string id(title_id);
+  std::transform(id.begin(), id.end(), id.begin(), [](unsigned char c) { return char(std::toupper(c)); });
+  return (*games)[id].as_table();
+}
+
+std::vector<std::pair<uint32_t, std::vector<std::string>>> GameVaultFixPatches() {
+  std::vector<std::pair<uint32_t, std::vector<std::string>>> out;
+  const auto* games = GameVaultFixes()["games"].as_table();
+  if (!games) return out;
+  for (const auto& [key, node] : *games) {
+    const auto* game = node.as_table();
+    const auto* list = game ? (*game)["patches"].as_array() : nullptr;
+    if (!list) continue;
+    uint32_t id = 0;
+    const std::string_view k = key.str();
+    if (k.size() != 8 || std::from_chars(k.data(), k.data() + k.size(), id, 16).ec != std::errc() || !id) continue;
+    std::vector<std::string> names;
+    for (const auto& n : *list) {
+      if (auto v = n.value<std::string>()) names.push_back(*v);
+    }
+    out.emplace_back(id, std::move(names));
+  }
+  return out;
+}
+
+// The server's settings for one game, over the built-in ones. Never a storage path, address or URL.
+static void ApplyServerGameConfig(const std::string_view title_id) {
+  const toml::table* fix = GameVaultFix(title_id);
+  const toml::table* config = fix ? (*fix)["config"].as_table() : nullptr;
+  if (!config) return;
+  size_t applied = 0;
+  for (auto& it : *cvar::ConfigVars) {
+    auto config_var = static_cast<cvar::IConfigVar*>(it.second);
+    const auto node = config->at_path(toml::path(config_var->category() + "." + config_var->name()));
+    if (!node) continue;
+    std::string name = config_var->name();
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    if (config_var->category() == "Storage" || name.find("path") != std::string::npos ||
+        name.find("root") != std::string::npos || name.find("url") != std::string::npos ||
+        name.find("address") != std::string::npos) {
+      XELOGW("Game Vault fixes: {} skipped (not allowed from the server)", config_var->name());
+      continue;
+    }
+    if (!LoadAliasedGameConfigValue(config_var, *node.node())) {
+      config_var->LoadGameConfigValue(node.node());
+    }
+    std::stringstream ss;
+    ss << node;
+    XELOGI("Game Vault fixes: {} = {}", config_var->name(), ss.str());
+    applied++;
+  }
+  XELOGI("Game Vault fixes: {} setting(s) for {} from the server", applied, title_id);
+}
+
 void LoadGameConfig(const std::string_view title_id, bool arcade) {
   if (!cvar::ConfigVars) {
     return;
@@ -976,6 +1082,7 @@ void LoadGameConfig(const std::string_view title_id, bool arcade) {
     XELOGI("Loaded game config: {}", title_id);
   } else {
     ApplyBuiltInGameConfig(title_id);
+    ApplyServerGameConfig(title_id);
   }
   ApplyGameVaultSettings(title_id);
 }

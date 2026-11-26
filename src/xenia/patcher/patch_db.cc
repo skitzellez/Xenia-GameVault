@@ -83,6 +83,13 @@ void PatchDB::LoadPatches() {
   std::vector<DefaultOn> kGameVaultDefaultOn = {
       {0x4D5307D5, {"60 FPS", "Black Shading Fix"}},
   };
+  // Game Vault fixes from the server (config.h): "patches = [...]" for a game replaces the built-in choice above.
+  // The player's own picks below still replace both.
+  for (const auto& [id, picked] : config::GameVaultFixPatches()) {
+    std::erase_if(kGameVaultDefaultOn, [&](const DefaultOn& d) { return d.title_id == id; });
+    XELOGI("PatchDB: {:08X}: {} patch(es) switched on by Game Vault fixes", id, picked.size());
+    kGameVaultDefaultOn.push_back({id, picked});
+  }
   // Game Vault 2026-11-16 (a player: "Is there a way to apply patches to 360
   // games? Like 60fps"): the patches the player picked in Game Vault's 360
   // game settings, "<title id>.patches.txt" in its xenia-config folder, one

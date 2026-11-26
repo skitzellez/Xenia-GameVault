@@ -12,7 +12,10 @@
 
 #include <filesystem>
 #include <functional>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 #include "third_party/tomlplusplus/toml.hpp"
 
 namespace xe {
@@ -39,6 +42,14 @@ void LoadGameConfig(const std::string_view title_id, bool arcade = false);
 // Game Vault: the "xenia-config" folder in Game Vault's shared folder, where its 360 game settings page writes
 // <title id>.config.toml for a game the player changed. Empty: not used.
 extern std::filesystem::path gamevault_settings_folder;
+// Game Vault: per-game fixes from Game Vault's server (cdn.gamevault.fyi/fixes/x360/fixes.toml): settings and the
+// patches switched on for games that need them, so a fix reaches players without a new Xenia. The Xbox app sets the
+// fetch hook; the file is fetched at most every 6 hours and kept as <config folder>/gvfixes.toml (used offline).
+// GameVaultFix: the [games.<TITLE ID>] table, nullptr when the server has nothing for that game.
+extern std::function<std::string()> gamevault_fixes_fetch;
+const toml::table* GameVaultFix(std::string_view title_id);
+// Every game's "patches = [names]" from the fixes file: (title ID, patch names to switch on).
+std::vector<std::pair<uint32_t, std::vector<std::string>>> GameVaultFixPatches();
 void SaveConfig();
 void SaveGameConfig(uint32_t title_id, const toml::table& config_table);
 // Resolves a possibly dotted category ("GPU.Debug") to a nested table.

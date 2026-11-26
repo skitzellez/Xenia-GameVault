@@ -35,6 +35,7 @@
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/xxhash.h"
+#include "xenia/config.h"
 #include "xenia/gpu/shader_storage.h"
 
 #if __has_include("gv_share_key.h")
@@ -393,4 +394,20 @@ void OnTitleStorage(const xe::gpu::ShaderShareFiles& f) {
 
 }  // namespace
 
-void GvShaderShareInstall() { xe::gpu::ShaderShareHook() = OnTitleStorage; }
+DEFINE_bool(gv_fixes, true,
+            "Game Vault: take per-game fixes (settings and patches) from Game Vault's server. Off: only the fixes "
+            "built into this Xenia.",
+            "Game Vault");
+
+void GvShaderShareInstall() {
+  xe::gpu::ShaderShareHook() = OnTitleStorage;
+  // per-game fixes (config.h): one small file for every game, 3 s at most, only every 6 hours
+  config::gamevault_fixes_fetch = []() -> std::string {
+    if (!cvars::gv_fixes) return {};
+    std::string base = cvars::gv_shader_share_url;
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    Bytes reply;
+    if (!Http(base + "/fixes/x360/fixes.toml", nullptr, std::chrono::seconds(3), reply)) return {};
+    return std::string(reply.begin(), reply.end());
+  };
+}
