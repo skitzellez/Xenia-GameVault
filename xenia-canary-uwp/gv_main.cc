@@ -2416,6 +2416,46 @@ void GameVaultXeniaApp::EmulatorThread() {
     }
   }).detach();
 
+  // Game Vault test: disk speed of the save folder (LocalState\content), only when LocalState\gv_fs_test.txt is there
+  // (MW3 autosave: making a save folder took 1.6 s, moving one 1.9 s). Each step's time goes to the log.
+  std::thread([]() {
+    namespace fs = std::filesystem;
+    const fs::path local = fs::path(xe::to_path(UWP::GetLocalState()));
+    std::error_code ec;
+    if (!fs::exists(local / "gv_fs_test.txt", ec)) return;
+    fs::remove(local / "gv_fs_test.txt", ec);
+    for (const fs::path& base : {local / "content" / "gv_fs_test", local / "gv_fs_test", fs::path(xe::to_path(UWP::GetLocalCache())) / "gv_fs_test"}) {
+      fs::remove_all(base, ec);
+      std::string line;
+      auto step = [&](const char* name, auto fn) {
+        const auto t0 = std::chrono::steady_clock::now();
+        std::error_code e;
+        fn(e);
+        line += fmt::format(" {} {:.1f}{}", name,
+                            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+                            e ? "!" : "");
+      };
+      step("mkdir", [&](std::error_code& e) { fs::create_directories(base / "a", e); });
+      step("mkdir2", [&](std::error_code& e) { fs::create_directory(base / "b", e); });
+      step("write", [&](std::error_code& e) {
+        FILE* f = xe::filesystem::OpenFile(base / "a" / "save.dat", "wb");
+        if (!f) { e = std::make_error_code(std::errc::io_error); return; }
+        std::vector<uint8_t> data(256 * 1024, 7);
+        fwrite(data.data(), 1, data.size(), f);
+        fclose(f);
+      });
+      step("exists", [&](std::error_code& e) { fs::exists(base / "a" / "save.dat", e); });
+      step("list", [&](std::error_code& e) { for (auto& x : fs::directory_iterator(base / "a", e)) (void)x; });
+      step("renamefile", [&](std::error_code& e) { fs::rename(base / "a" / "save.dat", base / "b" / "save.dat", e); });
+      step("renamedir", [&](std::error_code& e) { fs::rename(base / "a", base / "c", e); });
+      step("equivalent", [&](std::error_code& e) { fs::equivalent(base / "b", base / "c", e); });
+      step("rmfile", [&](std::error_code& e) { fs::remove(base / "b" / "save.dat", e); });
+      step("rmdir", [&](std::error_code& e) { fs::remove(base / "c", e); });
+      step("removeall", [&](std::error_code& e) { fs::remove_all(base, e); });
+      XELOGW("Game Vault: disk test {} (ms):{}", xe::path_to_utf8(base.parent_path().filename()), line);
+    }
+  }).detach();
+
   // Game Vault: how long the black screen at a game's start lasts (owner 11-26: "games
   // take a very long time on that black screen"): when the game opened and when its
   // first picture came, counted from Xenia's start.
