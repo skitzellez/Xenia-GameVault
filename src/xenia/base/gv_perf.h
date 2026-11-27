@@ -20,6 +20,10 @@ struct Timed {
 inline Timed net_read, texture_load, memory_upload, pipeline_now;
 // Game Vault 1.1.8.480: disc image reads from a drive on the console (USB, internal), not the network
 inline Timed drive_read;
+// 1.1.8.517: start-up black screen: game code translated on demand, and every NtReadFile (any drive) with its bytes
+inline Timed jit_compile, file_read;
+inline const std::chrono::steady_clock::time_point process_start = std::chrono::steady_clock::now();
+inline std::atomic<uint64_t> file_read_bytes{0};
 // network read-ahead: pieces fetched ahead, of those read by the game, waits on one in flight, pieces read on demand
 // frame times (presenter): longest in the second, frames over 25 ms and over 50 ms
 inline std::atomic<uint64_t> frame_max_us{0}, frames_over_25{0}, frames_over_50{0};

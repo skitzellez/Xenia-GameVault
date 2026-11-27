@@ -1132,6 +1132,16 @@ std::string D3D12CommandProcessor::GetWindowTitleText() const {
 }
 
 bool D3D12CommandProcessor::SetupContext() {
+  // Game Vault 1.1.8.518: how long each graphics setup step takes (start-up black screen).
+  auto gv_setup_last = std::chrono::steady_clock::now();
+  XELOGI("Game Vault: graphics setup began {} ms after Xenia started",
+         std::chrono::duration_cast<std::chrono::milliseconds>(gv_setup_last - gv_perf::process_start).count());
+  auto gv_setup_mark = [&gv_setup_last](const char* step) {
+    const auto now = std::chrono::steady_clock::now();
+    XELOGI("Game Vault: graphics setup: {} took {} ms", step,
+           std::chrono::duration_cast<std::chrono::milliseconds>(now - gv_setup_last).count());
+    gv_setup_last = now;
+  };
   if (!CommandProcessor::SetupContext()) {
     XELOGE("Failed to initialize base command processor context");
     return false;
@@ -1203,10 +1213,12 @@ bool D3D12CommandProcessor::SetupContext() {
 
   shared_memory_ =
       std::make_unique<D3D12SharedMemory>(*this, *memory_, trace_writer_);
+  gv_setup_mark("base + device objects");
   if (!shared_memory_->Initialize()) {
     XELOGE("Failed to initialize shared memory");
     return false;
   }
+  gv_setup_mark("shared memory");
 
   // Initialize the render target cache before configuring binding - need to
   // know if using rasterizer-ordered views for the bindless root signature.
@@ -1217,6 +1229,7 @@ bool D3D12CommandProcessor::SetupContext() {
     XELOGE("Failed to initialize the render target cache");
     return false;
   }
+  gv_setup_mark("render target cache");
 
   // Initialize resource binding.
   constant_buffer_pool_ = std::make_unique<ui::d3d12::D3D12UploadBufferPool>(
@@ -1505,6 +1518,7 @@ bool D3D12CommandProcessor::SetupContext() {
     }
   }
 
+  gv_setup_mark("root signatures + views");
   primitive_processor_ = std::make_unique<D3D12PrimitiveProcessor>(
       *register_file_, *memory_, trace_writer_, *shared_memory_, *this);
   if (!primitive_processor_->Initialize()) {
@@ -1519,6 +1533,7 @@ bool D3D12CommandProcessor::SetupContext() {
     XELOGE("Failed to initialize the texture cache");
     return false;
   }
+  gv_setup_mark("primitive processor + texture cache");
 
   // Fallback for query segment normalization when no draw pinned a scale.
   zpd_draw_resolution_scale_x_ = draw_resolution_scale_x;
@@ -1531,6 +1546,7 @@ bool D3D12CommandProcessor::SetupContext() {
     XELOGE("Failed to initialize the graphics pipeline cache");
     return false;
   }
+  gv_setup_mark("pipeline cache");
 
   D3D12_HEAP_FLAGS heap_flag_create_not_zeroed =
       provider.GetHeapFlagCreateNotZeroed();
@@ -2012,6 +2028,7 @@ bool D3D12CommandProcessor::SetupContext() {
   // Just not to expose uninitialized memory.
   std::memset(&system_constants_, 0, sizeof(system_constants_));
 
+  gv_setup_mark("the rest");
   return true;
 }
 

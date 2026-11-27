@@ -416,7 +416,31 @@ bool D3D12RenderTargetCache::Initialize() {
     }
   }
 
+  auto gv_rtc_last = std::chrono::steady_clock::now();
+  auto gv_rtc_mark = [&gv_rtc_last](const char* step) {
+    const auto now = std::chrono::steady_clock::now();
+    XELOGI("Game Vault: render target setup: {} took {} ms", step,
+           std::chrono::duration_cast<std::chrono::milliseconds>(now - gv_rtc_last).count());
+    gv_rtc_last = now;
+  };
   // Create the resolve copying pipelines.
+  // Game Vault 1.1.8.520: all built at once on several threads (were ~9 s one by one at 2x scale).
+  ID3D12PipelineState* gv_copy[size_t(draw_util::ResolveCopyShaderIndex::kCount)] = {};
+  ID3D12PipelineState* gv_copy_native[size_t(draw_util::ResolveCopyShaderIndex::kCount)] = {};
+  {
+    std::vector<ui::d3d12::util::ComputePipelineJob> gv_jobs;
+    for (size_t i = 0; i < size_t(draw_util::ResolveCopyShaderIndex::kCount); ++i) {
+      const ResolveCopyShaderCode& code = kResolveCopyShaders[i];
+      gv_jobs.push_back({draw_resolution_scaled ? code.scaled : code.unscaled,
+                         draw_resolution_scaled ? code.scaled_size : code.unscaled_size,
+                         resolve_copy_root_signature_, &gv_copy[i]});
+      if (draw_resolution_scaled) {
+        gv_jobs.push_back({code.unscaled, code.unscaled_size, resolve_copy_native_root_signature_,
+                           &gv_copy_native[i]});
+      }
+    }
+    ui::d3d12::util::CreateComputePipelinesParallel(device, gv_jobs.data(), gv_jobs.size());
+  }
   for (size_t i = 0; i < size_t(draw_util::ResolveCopyShaderIndex::kCount);
        ++i) {
     const draw_util::ResolveCopyShaderInfo& resolve_copy_shader_info =
@@ -428,14 +452,8 @@ bool D3D12RenderTargetCache::Initialize() {
                 resolve_copy_shader_code.unscaled_size &&
                 resolve_copy_shader_code.scaled &&
                 resolve_copy_shader_code.scaled_size);
-    ID3D12PipelineState* resolve_copy_pipeline =
-        ui::d3d12::util::CreateComputePipeline(
-            device,
-            draw_resolution_scaled ? resolve_copy_shader_code.scaled
-                                   : resolve_copy_shader_code.unscaled,
-            draw_resolution_scaled ? resolve_copy_shader_code.scaled_size
-                                   : resolve_copy_shader_code.unscaled_size,
-            resolve_copy_root_signature_);
+    ID3D12PipelineState* resolve_copy_pipeline = gv_copy[i];
+    gv_copy[i] = nullptr;
     if (resolve_copy_pipeline == nullptr) {
       XELOGE(
           "D3D12RenderTargetCache: Failed to create {} resolve copy pipeline",
@@ -450,11 +468,8 @@ bool D3D12RenderTargetCache::Initialize() {
     resolve_copy_pipelines_[i] = resolve_copy_pipeline;
     if (draw_resolution_scaled) {
       // Unscaled variant for fully native resolves.
-      ID3D12PipelineState* resolve_copy_native_pipeline =
-          ui::d3d12::util::CreateComputePipeline(
-              device, resolve_copy_shader_code.unscaled,
-              resolve_copy_shader_code.unscaled_size,
-              resolve_copy_native_root_signature_);
+      ID3D12PipelineState* resolve_copy_native_pipeline = gv_copy_native[i];
+      gv_copy_native[i] = nullptr;
       if (resolve_copy_native_pipeline == nullptr) {
         XELOGE(
             "D3D12RenderTargetCache: Failed to create {} native resolve copy "
@@ -469,6 +484,7 @@ bool D3D12RenderTargetCache::Initialize() {
     }
   }
 
+  gv_rtc_mark("resolve copy pipelines");
   // Using the cvar on emulator initialization so used pipelines are consistent
   // across different titles launched in one emulator instance.
   use_stencil_reference_output_ =
@@ -680,6 +696,7 @@ bool D3D12RenderTargetCache::Initialize() {
     host_depth_store_pipelines_[size_t(xenos::MsaaSamples::k4X)]->SetName(
         L"Host Depth Store 4xMSAA");
 
+    gv_rtc_mark("host depth store pipelines");
     // Transfer and clear vertex buffer, for quads of up to tile granularity.
     transfer_vertex_buffer_pool_ =
         std::make_unique<ui::d3d12::D3D12UploadBufferPool>(
@@ -849,6 +866,7 @@ bool D3D12RenderTargetCache::Initialize() {
       }
     }
 
+    gv_rtc_mark("transfer root signatures");
     // Dumping root signatures.
     D3D12_DESCRIPTOR_RANGE dump_root_source_range;
     dump_root_source_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -1028,6 +1046,7 @@ bool D3D12RenderTargetCache::Initialize() {
       }
     }
 
+    gv_rtc_mark("dump root signatures + clear pipelines");
     // FXC-compiled depth / stencil dumping shader is ~2 KB, reserve 4 KB for
     // some additional space.
     built_shader_.reserve(1024);
@@ -1083,6 +1102,7 @@ bool D3D12RenderTargetCache::Initialize() {
       return false;
     }
 
+    gv_rtc_mark("up to ROV clear pipelines");
     // Create the resolve EDRAM buffer clearing pipelines.
     resolve_rov_clear_32bpp_pipeline_ = ui::d3d12::util::CreateComputePipeline(
         device,
@@ -1120,7 +1140,9 @@ bool D3D12RenderTargetCache::Initialize() {
     return false;
   }
 
+  gv_rtc_mark("ROV clear pipelines");
   InitializeCommon();
+  gv_rtc_mark("common part");
 
   return true;
 }

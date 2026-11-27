@@ -2469,7 +2469,21 @@ void GameVaultXeniaApp::EmulatorThread() {
           std::chrono::duration<double>(std::chrono::steady_clock::now() - gv_start).count();
       if (opened < 0 && emulator_->is_title_open()) opened = t;
       auto* presenter = presenter_painting_;
-      if (opened >= 0 && presenter && presenter->guest_output_refresh_count() > 0) {
+      const bool pictured = opened >= 0 && presenter && presenter->guest_output_refresh_count() > 0;
+      // 1.1.8.517: every second until the first picture, what the start-up spent its time on (game code
+      // translated, file reads, GPU draws), to find where the black screen goes.
+      if (pictured || (i % 10) == 9) {
+        namespace gp = xe::gv_perf;
+        XELOGI("Game Vault: start step {:.1f} s: code translated {} ({} ms, slowest {} ms), file reads {} ({} ms, "
+               "{} KB, slowest {} ms), disc reads {} ({} ms), draws {}, pipelines built now {} ({} ms)",
+               t, gp::jit_compile.count.load(), gp::jit_compile.us.load() / 1000,
+               gp::jit_compile.max_us.load() / 1000, gp::file_read.count.load(), gp::file_read.us.load() / 1000,
+               gp::file_read_bytes.load() / 1024, gp::file_read.max_us.load() / 1000,
+               gp::drive_read.count.load() + gp::net_read.count.load(),
+               (gp::drive_read.us.load() + gp::net_read.us.load()) / 1000, gp::draws_total.load(),
+               gp::pipeline_now.count.load(), gp::pipeline_now.us.load() / 1000);
+      }
+      if (pictured) {
         XELOGI("Game Vault: start timing: game opened {:.1f} s, first picture {:.1f} s after "
                "this thread began",
                opened, t);

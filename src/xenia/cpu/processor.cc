@@ -8,6 +8,7 @@
  */
 
 #include "xenia/cpu/processor.h"
+#include "xenia/base/gv_perf.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -917,6 +918,7 @@ bool Processor::DemandFunction(Function* function) {
   if (symbol_status == Symbol::Status::kNew) {
     // Symbol is undefined, so define now.
     assert_true(function->is_guest());
+    gv_perf::Scope gv_scope(gv_perf::jit_compile);  // Game Vault: start-up timing
     if (!frontend_->DefineFunction(static_cast<GuestFunction*>(function),
                                    debug_info_flags_)) {
       function->set_status(Symbol::Status::kFailed);

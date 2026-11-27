@@ -8,6 +8,7 @@
  */
 
 #include <atomic>
+#include "xenia/base/gv_perf.h"
 #include <charconv>
 #include <functional>
 
@@ -415,6 +416,8 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
                                 pointer_t<X_IO_STATUS_BLOCK> io_status_block,
                                 lpvoid_t buffer, dword_t buffer_length,
                                 lpqword_t byte_offset_ptr) {
+  gv_perf::Scope gv_scope(gv_perf::file_read);  // Game Vault: start-up timing
+  gv_perf::file_read_bytes.fetch_add(buffer_length, std::memory_order_relaxed);
   X_STATUS result = X_STATUS_SUCCESS;
 
   auto ev = kernel_state()->object_table()->LookupObject<XEvent>(event_handle);

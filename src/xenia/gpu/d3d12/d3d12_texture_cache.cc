@@ -610,16 +610,28 @@ bool D3D12TextureCache::Initialize() {
   }
 
   // Create the loading pipelines.
+  // Game Vault 1.1.8.520: all built at once on several threads (were ~2 s one by one).
+  {
+    std::vector<ui::d3d12::util::ComputePipelineJob> gv_jobs;
+    for (size_t i = 0; i < kLoadShaderCount; ++i) {
+      if (!load_shader_code[i].pShaderBytecode) {
+        continue;
+      }
+      gv_jobs.push_back({load_shader_code[i].pShaderBytecode, load_shader_code[i].BytecodeLength,
+                         load_root_signature_.Get(), load_pipelines_[i].ReleaseAndGetAddressOf()});
+      if (IsDrawResolutionScaled() && load_shader_code_scaled[i].pShaderBytecode) {
+        gv_jobs.push_back({load_shader_code_scaled[i].pShaderBytecode,
+                           load_shader_code_scaled[i].BytecodeLength, load_root_signature_.Get(),
+                           load_pipelines_scaled_[i].ReleaseAndGetAddressOf()});
+      }
+    }
+    ui::d3d12::util::CreateComputePipelinesParallel(device, gv_jobs.data(), gv_jobs.size());
+  }
   for (size_t i = 0; i < kLoadShaderCount; ++i) {
     const D3D12_SHADER_BYTECODE& current_load_shader_code = load_shader_code[i];
     if (!current_load_shader_code.pShaderBytecode) {
       continue;
     }
-    *(load_pipelines_[i].ReleaseAndGetAddressOf()) =
-        ui::d3d12::util::CreateComputePipeline(
-            device, current_load_shader_code.pShaderBytecode,
-            current_load_shader_code.BytecodeLength,
-            load_root_signature_.Get());
     if (!load_pipelines_[i]) {
       XELOGE(
           "D3D12TextureCache: Failed to create the texture loading pipeline "
@@ -631,11 +643,6 @@ bool D3D12TextureCache::Initialize() {
       const D3D12_SHADER_BYTECODE& current_load_shader_code_scaled =
           load_shader_code_scaled[i];
       if (current_load_shader_code_scaled.pShaderBytecode) {
-        *(load_pipelines_scaled_[i].ReleaseAndGetAddressOf()) =
-            ui::d3d12::util::CreateComputePipeline(
-                device, current_load_shader_code_scaled.pShaderBytecode,
-                current_load_shader_code_scaled.BytecodeLength,
-                load_root_signature_.Get());
         if (!load_pipelines_scaled_[i]) {
           XELOGE(
               "D3D12TextureCache: Failed to create the resolution-scaled "

@@ -44,6 +44,17 @@ ID3D12PipelineState* CreateComputePipeline(ID3D12Device* device,
                                            size_t shader_size,
                                            ID3D12RootSignature* root_signature);
 
+// Game Vault 1.1.8.520: the Xbox keeps no driver cache, so Xenia's built-in compute pipelines (resolve copies,
+// texture loads) cost up to 1.9 s each at every start, one after another = most of the black screen at a game's
+// start. This builds a list of them on several threads at once; each *out is null if its build failed.
+struct ComputePipelineJob {
+  const void* shader;
+  size_t shader_size;
+  ID3D12RootSignature* root_signature;
+  ID3D12PipelineState** out;
+};
+void CreateComputePipelinesParallel(ID3D12Device* device, const ComputePipelineJob* jobs, size_t count);
+
 constexpr DXGI_FORMAT GetUintPow2DXGIFormat(uint32_t element_size_bytes_log2) {
   switch (element_size_bytes_log2) {
     case 0:

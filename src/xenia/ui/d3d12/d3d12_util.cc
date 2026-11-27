@@ -9,6 +9,12 @@
 
 #include "xenia/ui/d3d12/d3d12_util.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <thread>
+#include <vector>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
 
@@ -61,8 +67,45 @@ ID3D12PipelineState* CreateComputePipeline(
   desc.CachedPSO.CachedBlobSizeInBytes = 0;
   desc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
   ID3D12PipelineState* pipeline = nullptr;
+  // Game Vault 1.1.8.519: start-up black screen: how long the driver takes for each built-in compute pipeline.
+  const auto gv_t0 = std::chrono::steady_clock::now();
   device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pipeline));
+  const uint64_t gv_us = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - gv_t0).count());
+  static std::atomic<uint64_t> gv_count{0}, gv_total_us{0};
+  const uint64_t n = ++gv_count, total = gv_total_us += gv_us;
+  if (gv_us >= 50000 || (n % 25) == 0) {
+    XELOGI("Game Vault: built-in compute pipeline #{} ({} bytes) took {} ms, {} ms for all so far", n, shader_size,
+           gv_us / 1000, total / 1000);
+  }
   return pipeline;
+}
+
+void CreateComputePipelinesParallel(ID3D12Device* device, const ComputePipelineJob* jobs, size_t count) {
+  if (!count) {
+    return;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  // Biggest first, so the slowest builds don't start last.
+  std::vector<size_t> order(count);
+  for (size_t i = 0; i < count; ++i) order[i] = i;
+  std::sort(order.begin(), order.end(),
+            [jobs](size_t a, size_t b) { return jobs[a].shader_size > jobs[b].shader_size; });
+  std::atomic<size_t> next{0};
+  auto work = [&]() {
+    for (size_t k; (k = next.fetch_add(1)) < count;) {
+      const ComputePipelineJob& job = jobs[order[k]];
+      *job.out = CreateComputePipeline(device, job.shader, job.shader_size, job.root_signature);
+    }
+  };
+  const size_t thread_count = std::min<size_t>(count, 6) - 1;  // + this thread
+  std::vector<std::thread> threads;
+  threads.reserve(thread_count);
+  for (size_t i = 0; i < thread_count; ++i) threads.emplace_back(work);
+  work();
+  for (auto& t : threads) t.join();
+  XELOGI("Game Vault: built {} built-in compute pipelines on {} threads in {} ms", count, thread_count + 1,
+         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
 }
 
 void CreateBufferRawSRV(ID3D12Device* device,
