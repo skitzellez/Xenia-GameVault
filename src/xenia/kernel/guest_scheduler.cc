@@ -46,6 +46,13 @@ DEFINE_bool(
     "behind the single I/O worker.",
     "Kernel");
 
+DEFINE_int32(
+    gv_guest_cpu_priority, 0,
+    "Game Vault test: host priority of the emulated CPU threads, -2 lowest .. 2 highest, 0 normal. Short "
+    "hitches with the game's own thread runnable but slow (PSYCHOsmurf / Spartan Test trackers) may be "
+    "Xbox system or app threads taking its core.",
+    "Kernel");
+
 namespace xe {
 namespace kernel {
 
@@ -284,6 +291,10 @@ void GuestScheduler::EnsureStarted() {
         xe::threading::Thread::Create(params, [this, i]() { RunLoop(i); });
     cpus_[i].host_thread->set_name(std::string("Guest CPU ") +
                                    std::to_string(i));
+    if (cvars::gv_guest_cpu_priority) {
+      cpus_[i].host_thread->set_priority(
+          std::clamp(int32_t(cvars::gv_guest_cpu_priority), -2, 2));
+    }
   }
 }
 
