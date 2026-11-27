@@ -3624,8 +3624,20 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
         pipeline_handle = generic;
       }
     }
+    // Game Vault (from upstream Xenia f9431eb95): a skipped draw with memexport, or to a surface at most 2 EDRAM tiles
+    // wide (data kept past the frame, like 1x1 eye adaptation), may never be redone, so it always waits.
+    bool gv_must_wait = memexport_used;
+    if (!gv_must_wait) {
+      const auto gv_surface = regs.Get<reg::RB_SURFACE_INFO>();
+      const uint32_t gv_pitch = gv_surface.surface_pitch;
+      const uint32_t gv_msaa_x_log2 = uint32_t(gv_surface.msaa_samples >= xenos::MsaaSamples::k4X);
+      gv_must_wait = gv_pitch != 0 &&
+                     ((gv_pitch << gv_msaa_x_log2) + (xenos::kEdramTileWidthSamples - 1)) /
+                             xenos::kEdramTileWidthSamples <=
+                         2;
+    }
     if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr &&
-        !pipeline_cache_->GvBuildPipelineNow(pipeline_handle)) {
+        !pipeline_cache_->GvBuildPipelineNow(pipeline_handle, gv_must_wait)) {
       xe::gv_perf::draws_skipped.fetch_add(1, std::memory_order_relaxed);
       XELOGGPU(
           "Skipping draw - pipeline not ready: VS {:016X} mod {:016X}, PS "

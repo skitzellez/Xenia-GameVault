@@ -114,7 +114,8 @@ class PipelineCache {
   // if failed to create the pipeline or still being created asynchronously.
   // Game Vault: a draw needs this pipeline now. Builds it on this thread (the GPU thread), or waits for the creation
   // thread already building it. False if there is still no pipeline (failed, or the option is off).
-  bool GvBuildPipelineNow(void* handle);
+  // must_wait: the draw is never skipped (memexport, or a small data surface that is not redrawn).
+  bool GvBuildPipelineNow(void* handle, bool must_wait = false);
   // Look-ahead (D3D12CommandProcessor::GvLookAhead): while on, ConfigurePipeline only queues new pipelines (at the
   // front, every creation thread working on them) and changes nothing else. End returns how many it queued.
   void GvLookAheadBegin();

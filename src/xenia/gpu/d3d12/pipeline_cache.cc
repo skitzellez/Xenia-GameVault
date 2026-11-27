@@ -4163,7 +4163,7 @@ void PipelineCache::GvHelpWithStall(Pipeline* pipeline) {
   creation_request_cond_.notify_all();
 }
 
-bool PipelineCache::GvBuildPipelineNow(void* handle) {
+bool PipelineCache::GvBuildPipelineNow(void* handle, bool must_wait) {
   if (!cvars::gv_build_needed_pipeline_now) {
     return false;
   }
@@ -4171,13 +4171,14 @@ bool PipelineCache::GvBuildPipelineNow(void* handle) {
   if (pipeline->state.load(std::memory_order_acquire)) {
     return true;
   }
-  if (cvars::gv_build_now_max_wait_ms > 0 && pipeline->gv_waited) {
+  const bool gv_may_skip = cvars::gv_build_now_max_wait_ms > 0 && !must_wait;
+  if (gv_may_skip && pipeline->gv_waited) {
     return false;   // already waited for once and still building: skip, don't wait again
   }
   xe::gv_perf::Scope gv_scope(xe::gv_perf::pipeline_now);
   xe::spartan::GpuPhaseScope spartan_phase(xe::spartan::GpuPhase::kPipeline);
   GvHelpWithStall(pipeline);
-  if (cvars::gv_build_now_max_wait_ms > 0) {
+  if (gv_may_skip) {
     // Spartan Test trackers: the time this draw waits, however it ends.
     struct SpartanWait {
       uint64_t from = xe::spartan::NowUs();
