@@ -9,6 +9,8 @@
 
 #include "xenia/kernel/xam/content_manager.h"
 
+#include <chrono>
+
 #include <algorithm>
 #include <cstring>
 
@@ -110,6 +112,21 @@ void ContentPackage::LoadPackageLicenseMask(
   size_t result = fread(&license_, 1, sizeof(license_), file);
   fclose(file);
 }
+
+
+// Game Vault: how long a save call waited for the kernel's global lock (Spec Ops: opening a
+// save took 3.9 s at an autosave; is it the lock or the disk?).
+namespace {
+struct GvLockWait {
+  const char* where;
+  std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+  void Done() {
+    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t0).count();
+    if (ms >= 50) XELOGW("Game Vault: saves: {} waited {} ms for the kernel lock", where, ms);
+  }
+};
+}  // namespace
 
 ContentManager::ContentManager(KernelState* kernel_state,
                                const std::filesystem::path& root_path)
@@ -580,7 +597,9 @@ X_RESULT ContentManager::ReadContentHeaderFile(
 
 X_RESULT ContentManager::CreatePackage(const uint64_t xuid,
                                        const XCONTENT_AGGREGATE_DATA& data) {
+  GvLockWait gv_lw{"CreatePackage"};
   auto global_lock = global_critical_region_.Acquire();
+  gv_lw.Done();
 
   std::filesystem::path package_path;
   if (const X_RESULT result = ResolvePackagePath(xuid, data, package_path)) {
@@ -600,7 +619,9 @@ X_RESULT ContentManager::CreatePackage(const uint64_t xuid,
 X_RESULT ContentManager::CreateContent(const std::string_view root_name,
                                        const uint64_t xuid,
                                        const XCONTENT_AGGREGATE_DATA& data) {
+  GvLockWait gv_lw{"CreateContent"};
   auto global_lock = global_critical_region_.Acquire();
+  gv_lw.Done();
 
   if (open_packages_.count(string_key_insensitive(root_name))) {
     // Already content open with this root name.
@@ -627,7 +648,9 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name,
                                      const XCONTENT_AGGREGATE_DATA& data,
                                      uint32_t& content_license,
                                      const uint32_t disc_number) {
+  GvLockWait gv_lw{"OpenContent"};
   auto global_lock = global_critical_region_.Acquire();
+  gv_lw.Done();
 
   if (open_packages_.count(string_key_insensitive(root_name))) {
     // Already content open with this root name.
@@ -672,7 +695,9 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name,
 }
 
 X_RESULT ContentManager::CloseContent(const std::string_view root_name) {
+  GvLockWait gv_lw{"CloseContent"};
   auto global_lock = global_critical_region_.Acquire();
+  gv_lw.Done();
 
   // 415607D6 - Uses XamContentCreate with name "save", but XamContentClose with
   // "SAVE".
@@ -909,7 +934,9 @@ void ContentManager::RecoverLeftSave(const std::filesystem::path& package_path) 
 X_RESULT ContentManager::DeleteContent(const uint64_t xuid,
                                        const XCONTENT_AGGREGATE_DATA& data,
                                        bool keep_old) {
+  GvLockWait gv_lw{"DeleteContent"};
   auto global_lock = global_critical_region_.Acquire();
+  gv_lw.Done();
 
   std::filesystem::path package_path;
   if (const X_RESULT result = ResolvePackagePath(xuid, data, package_path)) {

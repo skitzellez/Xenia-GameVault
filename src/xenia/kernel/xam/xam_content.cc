@@ -427,15 +427,23 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
     struct GvTimer {
       std::chrono::steady_clock::time_point t0;
       std::string name;
+      std::chrono::steady_clock::time_point last;
+      std::string steps;
+      void Step(const char* what) {
+        const auto now = std::chrono::steady_clock::now();
+        steps += fmt::format(" {} {}", what,
+                             std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count());
+        last = now;
+      }
       ~GvTimer() {
         const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                  std::chrono::steady_clock::now() - t0)
                                  .count();
         if (ms >= 50) {
-          XELOGW("Game Vault: saves: opening '{}' took {} ms", name, ms);
+          XELOGW("Game Vault: saves: opening '{}' took {} ms (ms per step:{})", name, ms, steps);
         }
       }
-    } gv_timer{gv_t0, root_name};
+    } gv_timer{gv_t0, root_name, gv_t0, {}};
     // Spartan: what happened to an old package, for the line at the end.
     const char* spartan_old = "";
     uint64_t xuid = 0;
@@ -446,12 +454,14 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
     if (!result) {
       result = content_manager->CheckPackageName(xuid, content_data);
     }
+    gv_timer.Step("name");
     // The root is mounted after the content is chosen and made. A create on a
     // root in use still makes the package and fails with ERROR_DUP_NAME, while
     // an open fails with ERROR_ALREADY_EXISTS.
     const bool root_in_use =
         kernel_state()->file_system()->IsSymbolicLinkRegistered(root_name +
                                                                 ':');
+    gv_timer.Step("root");
 
     kDispositionState disposition = kDispositionState::Unknown;
     if (!result) {
@@ -528,6 +538,7 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
       disposition = kDispositionState::Unknown;
     }
 
+    gv_timer.Step("check");
     uint32_t content_license = 0;
     if (disposition == kDispositionState::Create) {
       result = content_manager->CreateContent(root_name, xuid, content_data);
@@ -538,6 +549,7 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
       result = content_manager->OpenContent(root_name, xuid, content_data,
                                             content_license);
     }
+    gv_timer.Step("mount");
     // A request that failed reports no disposition.
     if (result) {
       disposition = kDispositionState::Unknown;
