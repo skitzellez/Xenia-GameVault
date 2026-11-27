@@ -66,6 +66,12 @@ DEFINE_int32(
     "the number of threads explicitly (up to the number of logical CPU cores), "
     "0 to disable multithreaded pipeline creation.",
     "D3D12");
+DEFINE_int32(gv_play_pipeline_threads, 2,
+             "Game Vault: pipeline creation threads that keep building while the game plays (all of them build "
+             "while \"Getting Graphics Ready\" is up). Every 80-120 ms hitch PSYCHOsmurf / Spartan Test's trackers "
+             "caught in Spec Ops and Fall of Cybertron had the builders on 5-6 cores and the game's threads waiting "
+             "for CPU; 2 threads: Spec Ops hitches 150 -> 35 in 8 minutes, no shader freezes. 0 = no limit.",
+             "D3D12");
 DEFINE_int32(gv_startup_pipeline_threads, 3,
              "Game Vault: threads building a game's stored pipelines in the "
              "background while it starts.",
@@ -3863,6 +3869,15 @@ void PipelineCache::CreationThread(size_t thread_index) {
     // pipeline if there is any.
     {
       std::unique_lock<xe_mutex> lock(creation_request_lock_);
+      // Game Vault: during play only a few builders run, so the game keeps its CPU cores.
+      if (cvars::gv_play_pipeline_threads > 0 &&
+          thread_index >= size_t(cvars::gv_play_pipeline_threads) &&
+          thread_index < creation_threads_shutdown_from_ &&
+          xe::gv_perf::hot_built.load(std::memory_order_relaxed) >=
+              xe::gv_perf::hot_total.load(std::memory_order_relaxed)) {
+        creation_request_cond_.wait_for(lock, std::chrono::milliseconds(250));
+        continue;
+      }
       if (gv_startup_build_low_priority_ &&
           thread_index < creation_threads_shutdown_from_) {
         // Pipelines the game really uses get the start-up threads; once those are built the rest take only one, so
