@@ -28,7 +28,7 @@
 #include "xenia/ui/graphics_provider.h"
 
 // The test case for AMD is 4D5307E6 (checked in 2018).
-DEFINE_bool(dxbc_switch, !XE_PLATFORM_WINRT,
+DEFINE_bool(dxbc_switch, true,
             "Use switch rather than if for flow control. Turning this off or "
             "on may improve stability, though this heavily depends on the "
             "driver - on AMD, it's recommended to have this set to true, as "
@@ -36,8 +36,12 @@ DEFINE_bool(dxbc_switch, !XE_PLATFORM_WINRT,
             "(possibly the shader compiler tries to flatten them). On Intel "
             "HD Graphics, this is ignored because of a crash with the switch "
             "instruction. Off by default on UWP, where it crashed titles on "
-            "the Xbox driver.",
+            "the Xbox driver. Game Vault 1.1.8.504: on again on the Xbox (the GTA IV "
+            "crash came from forward jumps, now dxbc_forward_jumps_without_loop): "
+            "shaders with loops built 25x faster (Fall of Cybertron 49 s -> 1.9 s).",
             "GPU.Debug");
+// Game Vault: configs saved with the old Xbox default (false) get switch mode.
+UPDATE_from_bool(dxbc_switch, 2026, 11, 27, 5, false);
 DEFINE_uint32(dxbc_control_flow_guard_max_jumps, XE_PLATFORM_WINRT ? 65536 : 0,
               "Maximum number of backward control flow jumps (loop back-edges "
               "and backward jmp) per shader invocation before the shader is "
