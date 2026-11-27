@@ -60,6 +60,12 @@ DEFINE_bool(dxbc_source_map, false,
             "GPU.Debug");
 
 // Game Vault debugging (2026-11-02): no SV_Coverage output in pixel shaders that write depth.
+DEFINE_uint32(gv_skip_opt_vs_dwords, 0,
+              "Game Vault test: vertex shaders at least this many microcode dwords long ask the "
+              "Xbox driver to skip its optimizations (Fall of Cybertron: pipelines with its "
+              "~750-dword skinning shaders took 20-80 s each to build, found by PSYCHOsmurf / "
+              "Spartan Test). 0 = off.",
+              "D3D12");
 DEFINE_bool(gv_pso_fake_tex_setup, false, "Game Vault test only (wrong pictures): pixel shaders without a known texture setup are built as if every texture were unsigned and unscaled, to measure the driver build time.", "D3D12");
 DEFINE_bool(gv_no_coverage_with_depth, false, "Game Vault: pixel shaders writing depth get no SV_Coverage output (the Xbox driver zeroes their depth otherwise).", "D3D12");
 
@@ -3648,9 +3654,14 @@ void DxbcShaderTranslator::WriteShaderCode() {
   // invariance (needed even in pixel shaders for oDepth invariance).
   bool global_flag_force_early_depth_stencil =
       IsForceEarlyDepthStencilGlobalFlagEnabled();
-  ao_.OpDclGlobalFlags(global_flag_force_early_depth_stencil
-                           ? dxbc::kGlobalFlagForceEarlyDepthStencil
-                           : 0);
+  uint32_t gv_global_flags = global_flag_force_early_depth_stencil
+                                 ? dxbc::kGlobalFlagForceEarlyDepthStencil
+                                 : 0;
+  if (cvars::gv_skip_opt_vs_dwords && is_vertex_shader() &&
+      current_shader().ucode_dword_count() >= cvars::gv_skip_opt_vs_dwords) {
+    gv_global_flags |= dxbc::kGlobalFlagSkipOptimization;
+  }
+  ao_.OpDclGlobalFlags(gv_global_flags);
 
   // Constant buffers, from most frequenly accessed to least frequently accessed
   // (the order is a hint to the driver according to the DXBC header).

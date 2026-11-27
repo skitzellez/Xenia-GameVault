@@ -2412,6 +2412,27 @@ void GameVaultXeniaApp::EmulatorThread() {
     }
   }).detach();
 
+  // Game Vault: how long the black screen at a game's start lasts (owner 11-26: "games
+  // take a very long time on that black screen"): when the game opened and when its
+  // first picture came, counted from Xenia's start.
+  std::thread([this]() {
+    static const auto gv_start = std::chrono::steady_clock::now();
+    double opened = -1;
+    for (int i = 0; i < 6000; ++i) {   // 10 minutes at most
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      const double t =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - gv_start).count();
+      if (opened < 0 && emulator_->is_title_open()) opened = t;
+      auto* presenter = presenter_painting_;
+      if (opened >= 0 && presenter && presenter->guest_output_refresh_count() > 0) {
+        XELOGI("Game Vault: start timing: game opened {:.1f} s, first picture {:.1f} s after "
+               "this thread began",
+               opened, t);
+        return;
+      }
+    }
+  }).detach();
+
   // The game's frame rate, CPU and GPU load and memory in the log every 30 s
   // (test runs and player reports show the speed without a screenshot).
   std::thread([this]() {

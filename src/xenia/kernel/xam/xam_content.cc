@@ -13,6 +13,8 @@
 
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
+
+#include <chrono>
 #include "xenia/base/math.h"
 #include "xenia/base/string_util.h"
 #include "xenia/base/threading.h"
@@ -393,6 +395,19 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
   auto run = [content_manager, user_index, root_name = root_name.value(), flags,
               content_data, disposition_ptr, license_mask_ptr, overlapped_ptr](
                  uint32_t& extended_error, uint32_t& length) -> X_RESULT {
+    const auto gv_t0 = std::chrono::steady_clock::now();
+    struct GvTimer {
+      std::chrono::steady_clock::time_point t0;
+      std::string name;
+      ~GvTimer() {
+        const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - t0)
+                                 .count();
+        if (ms >= 50) {
+          XELOGW("Game Vault: saves: opening '{}' took {} ms", name, ms);
+        }
+      }
+    } gv_timer{gv_t0, root_name};
     uint64_t xuid = 0;
     X_RESULT result = ContentXuid(user_index, xuid);
     if (content_data.content_type == XContentType::kMarketplaceContent) {
@@ -424,7 +439,7 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
           // delete does.
           if (!root_in_use &&
               content_manager->ContentExists(xuid, content_data)) {
-            result = content_manager->DeleteContent(xuid, content_data);
+            result = content_manager->DeleteContent(xuid, content_data, true);
           }
           if (!result) {
             disposition = kDispositionState::Create;

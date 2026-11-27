@@ -49,6 +49,7 @@ ContentPackage::ContentPackage(KernelState* kernel_state,
 
   auto fs = kernel_state_->file_system();
   if (std::filesystem::is_directory(package_path)) {
+    host_folder_ = true;
     auto device = std::make_unique<vfs::HostPathDevice>(
         device_path_, package_path, false, false, "STFS");
     mounted_ = device->Initialize();
@@ -74,7 +75,16 @@ ContentPackage::ContentPackage(KernelState* kernel_state,
 ContentPackage::~ContentPackage() {
   auto fs = kernel_state_->file_system();
   fs->UnregisterSymbolicLink(root_name_ + ":");
-  fs->UnregisterDevice(device_path_);
+  // Game Vault: a game thread can still be reading or writing a file of a
+  // package another thread just closed (XFile reads its entry and device on
+  // every read and write), so a folder package's device is kept like a
+  // swapped-out disc's. Found by PSYCHOsmurf / Spartan Test (Fall of
+  // Cybertron checkpoint saves).
+  if (host_folder_) {
+    fs->RetireDevice(device_path_);
+  } else {
+    fs->UnregisterDevice(device_path_);
+  }
 }
 
 void ContentPackage::LoadPackageLicenseMask(
@@ -420,7 +430,13 @@ std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
 bool ContentManager::ContentExists(const uint64_t xuid,
                                    const XCONTENT_AGGREGATE_DATA& data) {
   std::filesystem::path path;
-  return !ResolvePackagePath(xuid, data, path) && std::filesystem::exists(path);
+  if (ResolvePackagePath(xuid, data, path)) {
+    return false;
+  }
+  if (data.content_type == XContentType::kSavedGame) {
+    RecoverLeftSave(path);
+  }
+  return std::filesystem::exists(path);
 }
 
 X_RESULT ContentManager::WriteContentHeaderFile(const uint64_t xuid,
@@ -666,9 +682,11 @@ X_RESULT ContentManager::CloseContent(const std::string_view root_name) {
   }
   auto package = it->second;
   CloseOpenedFilesFromContent(*package);
+  const std::filesystem::path package_path = package->package_path();
 
   open_packages_.erase(it);
   delete package;
+  RestoreSaveIfEmpty(package_path);
 
   return X_ERROR_SUCCESS;
 }
@@ -775,8 +793,122 @@ X_RESULT ContentManager::TruncateContent(const uint64_t xuid,
   return X_ERROR_SUCCESS;
 }
 
+// Game Vault: a saved game replaced with "create always" is moved to
+// <title>\.gvold\<type>\<name> instead of deleted. When the new package is
+// closed with nothing written in it (the game's write failed), the old one
+// comes back; otherwise the old one stays there as one older copy until the
+// next replace. Found by PSYCHOsmurf / Spartan Test: Fall of Cybertron lost a
+// save when another thread closed the shared "save" root between the delete
+// and the write.
+static std::string SaveKey(const std::filesystem::path& p) {
+  return xe::utf8::lower_ascii(xe::path_to_utf8(p.lexically_normal()));
+}
+
+static std::filesystem::path SaveBackupPath(const std::filesystem::path& p) {
+  // <root>\<xuid>\<title>\<type>\<name>
+  return p.parent_path().parent_path() / ".gvold" /
+         p.parent_path().filename() / p.filename();
+}
+
+static bool PackageHasData(const std::filesystem::path& p) {
+  std::error_code ec;
+  if (!std::filesystem::exists(p, ec)) {
+    return false;
+  }
+  if (!std::filesystem::is_directory(p, ec)) {
+    return std::filesystem::file_size(p, ec) > 0 && !ec;
+  }
+  for (auto it = std::filesystem::recursive_directory_iterator(p, ec);
+       !ec && it != std::filesystem::recursive_directory_iterator();
+       it.increment(ec)) {
+    if (it->is_regular_file(ec) &&
+        it->path().filename() != vfs::kPackageThumbnailFileName &&
+        it->file_size(ec) > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ContentManager::MoveSaveAside(const std::filesystem::path& package_path) {
+  std::error_code ec;
+  if (!PackageHasData(package_path)) {
+    return false;
+  }
+  const std::filesystem::path backup = SaveBackupPath(package_path);
+  std::filesystem::remove_all(backup, ec);
+  ec.clear();
+  std::filesystem::create_directories(backup.parent_path(), ec);
+  ec.clear();
+  std::filesystem::rename(package_path, backup, ec);
+  if (ec) {
+    XELOGW("Game Vault: saves: could not keep the old copy of {} ({}), "
+           "replacing it",
+           xe::path_to_utf8(package_path.filename()), ec.message());
+    return false;
+  }
+  replaced_saves_[SaveKey(package_path)] = backup;
+  XELOGI("Game Vault: saves: old copy of {} kept until the new one is written",
+         xe::path_to_utf8(package_path.filename()));
+  return true;
+}
+
+void ContentManager::RestoreSaveIfEmpty(
+    const std::filesystem::path& package_path) {
+  auto it = replaced_saves_.find(SaveKey(package_path));
+  if (it == replaced_saves_.end()) {
+    return;
+  }
+  const std::filesystem::path backup = it->second;
+  replaced_saves_.erase(it);
+  if (PackageHasData(package_path)) {
+    XELOGI("Game Vault: saves: new {} written",
+           xe::path_to_utf8(package_path.filename()));
+    return;
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(package_path, ec);
+  ec.clear();
+  std::filesystem::rename(backup, package_path, ec);
+  if (ec) {
+    XELOGE("Game Vault: saves: new {} closed empty and the old copy could not "
+           "be put back ({}); it is in {}",
+           xe::path_to_utf8(package_path.filename()), ec.message(),
+           xe::path_to_utf8(backup));
+  } else {
+    XELOGW("Game Vault: saves: new {} closed with nothing written, old copy "
+           "put back",
+           xe::path_to_utf8(package_path.filename()));
+  }
+}
+
+// Game Vault: the game was closed after a replace moved the old save aside
+// and before the new one was written: put the old one back the next time the
+// game looks for it.
+void ContentManager::RecoverLeftSave(const std::filesystem::path& package_path) {
+  auto global_lock = global_critical_region_.Acquire();
+  std::error_code ec;
+  if (replaced_saves_.count(SaveKey(package_path)) ||
+      !std::filesystem::exists(package_path, ec) ||
+      IsContentOpen(package_path) || PackageHasData(package_path)) {
+    return;
+  }
+  const std::filesystem::path backup = SaveBackupPath(package_path);
+  if (!PackageHasData(backup)) {
+    return;
+  }
+  std::filesystem::remove_all(package_path, ec);
+  ec.clear();
+  std::filesystem::rename(backup, package_path, ec);
+  if (!ec) {
+    XELOGW("Game Vault: saves: {} was left empty last time, old copy put back",
+           xe::path_to_utf8(package_path.filename()));
+  }
+}
+
 X_RESULT ContentManager::DeleteContent(const uint64_t xuid,
-                                       const XCONTENT_AGGREGATE_DATA& data) {
+                                       const XCONTENT_AGGREGATE_DATA& data,
+                                       bool keep_old) {
   auto global_lock = global_critical_region_.Acquire();
 
   std::filesystem::path package_path;
@@ -785,6 +917,16 @@ X_RESULT ContentManager::DeleteContent(const uint64_t xuid,
   }
   if (IsContentOpen(package_path)) {
     return X_ERROR_SHARING_VIOLATION;
+  }
+  if (keep_old && data.content_type == XContentType::kSavedGame &&
+      MoveSaveAside(package_path)) {
+    return X_ERROR_SUCCESS;
+  }
+  if (data.content_type == XContentType::kSavedGame) {
+    // A real delete takes the older copy with it.
+    std::error_code ec;
+    std::filesystem::remove_all(SaveBackupPath(package_path), ec);
+    replaced_saves_.erase(SaveKey(package_path));
   }
   if (std::filesystem::remove_all(package_path) > 0) {
     return X_ERROR_SUCCESS;

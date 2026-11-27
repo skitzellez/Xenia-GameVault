@@ -331,18 +331,41 @@ size_t TakeHotList(const xe::gpu::ShaderShareFiles& f, const std::string& base) 
   return lines;
 }
 
+// The package's shader_seed is copied only for a title with no storage yet; a console
+// that played the game before a bigger seed shipped gets the records it lacks here.
+// (Fall of Cybertron: 352 -> 2,156 pipelines from PSYCHOsmurf / Spartan Test.)
+void MergePackageSeed(const xe::gpu::ShaderShareFiles& f) {
+  std::filesystem::path dir = xe::filesystem::GetExecutablePath().parent_path() / "shader_seed";
+  size_t added[2] = {0, 0};
+  for (int i = 0; i < 2; ++i) {
+    bool xsh = i == 0;
+    const std::filesystem::path& path = xsh ? f.xsh : f.xpso;
+    Bytes seed;
+    if (!ReadFile(dir / path.filename(), seed)) continue;
+    const uint8_t* header = xsh ? f.xsh_header.data() : f.xpso_header.data();
+    size_t header_size = xsh ? f.xsh_header.size() : f.xpso_header.size();
+    added[i] = Merge(path, header, header_size, seed, xsh, f.xpso_record_size);
+  }
+  if (added[0] || added[1])
+    XELOGI("Game Vault: shader storage {:08X}: {} shaders + {} draw setups added from the package",
+           f.title_id, added[0], added[1]);
+}
+
 void OnTitleStorage(const xe::gpu::ShaderShareFiles& f) {
   uint32_t session = ++g_session;
-  if (!cvars::gv_shader_share) return;
   std::string base = cvars::gv_shader_share_url;
   while (!base.empty() && base.back() == '/') base.pop_back();
-  if (base.empty()) return;
+  if (!cvars::gv_shader_share || base.empty()) {
+    MergePackageSeed(f);
+    return;
+  }
 
   // 1) Take the shared records (a short wait: a first start is worth a few seconds; no
   //    network fails at once).
   uint64_t mark_xsh, mark_xpso;
   ReadMark(f, mark_xsh, mark_xpso);
   const uint64_t before[2] = {FileSize(f.xsh), FileSize(f.xpso)};
+  MergePackageSeed(f);   // (counted like shared records: not this console's to send)
   auto t0 = std::chrono::steady_clock::now();
   size_t added[2] = {0, 0};
   for (int i = 0; i < 2; ++i) {

@@ -13,6 +13,8 @@
 
 #include "xenia/kernel/kernel_state.h"
 
+#include <chrono>
+
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
@@ -1291,15 +1293,32 @@ void KernelState::CompleteOverlappedDeferredEx(
     }
   }
   std::lock_guard lock(dispatch_mutex_);
+  const auto queued_at = std::chrono::steady_clock::now();
   dispatch_queue_.push_back([this, completion_callback, overlapped_ptr,
-                             thread_handle, pre_callback, post_callback]() {
+                             thread_handle, pre_callback, post_callback,
+                             queued_at]() {
     if (pre_callback) {
       pre_callback();
     }
     // 5454082B infinitely loads free roam in netplay without sleep.
     xe::threading::Sleep(kDeferredOverlappedDelayMillis);
+    const auto started = std::chrono::steady_clock::now();
     uint32_t extended_error, length;
     auto result = completion_callback(extended_error, length);
+    // Game Vault: a slow background system call (saves, profile, content) shows up here
+    // (lead from PSYCHOsmurf / Spartan Test: every checkpoint save paused the game 1.5 s).
+    {
+      using ms = std::chrono::milliseconds;
+      const auto now = std::chrono::steady_clock::now();
+      const long long waited =
+          std::chrono::duration_cast<ms>(started - queued_at).count();
+      const long long ran = std::chrono::duration_cast<ms>(now - started).count();
+      if (ran >= 100 || waited >= 250) {
+        XELOGW("Game Vault: slow system call: ran {} ms after {} ms in the queue "
+               "(result {:08X})",
+               ran, waited, result);
+      }
+    }
     CompleteOverlappedEx(overlapped_ptr, result, extended_error, length,
                          thread_handle);
     if (post_callback) {

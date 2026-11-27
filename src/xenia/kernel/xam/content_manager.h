@@ -231,6 +231,7 @@ class ContentPackage {
   XCONTENT_AGGREGATE_DATA content_data_;
   uint32_t license_;
   bool mounted_ = false;
+  bool host_folder_ = false;
 };
 
 class ContentManager {
@@ -288,8 +289,11 @@ class ContentManager {
   X_RESULT SetContentThumbnail(const uint64_t xuid,
                                const XCONTENT_AGGREGATE_DATA& data,
                                std::vector<uint8_t> buffer);
+  // Game Vault: keep_old moves a saved game aside instead of deleting it (a
+  // "create always" replace); it comes back if the new one closes empty.
   X_RESULT DeleteContent(const uint64_t xuid,
-                         const XCONTENT_AGGREGATE_DATA& data);
+                         const XCONTENT_AGGREGATE_DATA& data,
+                         bool keep_old = false);
   std::filesystem::path ResolveGameUserContentPath(const uint64_t xuid);
   bool IsContentOpen(const std::filesystem::path& package_path) const;
   void CloseOpenedFilesFromContent(const ContentPackage& package);
@@ -318,6 +322,13 @@ class ContentManager {
       uint32_t base_title_id = kCurrentlyRunningTitleId) const;
 
   bool UpdateSpaData(vfs::Entry* spa_file_update);
+
+  // Game Vault: the old copy of a replaced save (PSYCHOsmurf / Spartan Test
+  // found saves lost when the new one was never written).
+  bool MoveSaveAside(const std::filesystem::path& package_path);
+  void RestoreSaveIfEmpty(const std::filesystem::path& package_path);
+  void RecoverLeftSave(const std::filesystem::path& package_path);
+  std::unordered_map<std::string, std::filesystem::path> replaced_saves_;
 
   KernelState* kernel_state_;
   std::filesystem::path root_path_;
