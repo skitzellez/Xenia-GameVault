@@ -27,6 +27,7 @@ constexpr fourcc_t kPIRSSignature = make_fourcc("PIRS");
 
 class XContentContainerDevice : public Device {
  public:
+  const char* spartan_medium() const override { return "package"; }
   constexpr static uint32_t kBlockSize = 0x1000;
 
   static std::unique_ptr<XContentContainerDevice> CreateContentDevice(

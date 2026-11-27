@@ -8,6 +8,7 @@
  */
 
 #include "xenia/base/gv_perf.h"
+#include "xenia/base/spartan_trace.h"
 #include "xenia/gpu/d3d12/d3d12_texture_cache.h"
 
 #include <array>
@@ -1774,6 +1775,7 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                                               bool load_base,
                                                               bool load_mips) {
   xe::gv_perf::Scope gv_scope(xe::gv_perf::texture_load);
+  xe::spartan::GpuPhaseScope spartan_phase(xe::spartan::GpuPhase::kTexture);
   D3D12Texture& d3d12_texture = static_cast<D3D12Texture&>(texture);
   TextureKey texture_key = d3d12_texture.key();
 

@@ -14,6 +14,7 @@
 
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/spartan_trace.h"
 #include "xenia/base/threading.h"
 #include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
@@ -22,6 +23,27 @@
 
 namespace xe {
 namespace kernel {
+
+namespace {
+
+// Spartan Test trackers (PSYCHOsmurf / Spartan Test): each guest read and write is timed, and on a list while it
+// runs so a freeze report can name the file a thread waits for (xe::spartan::IoBegin, base/spartan_trace.h).
+uint32_t SpartanIoBegin(XFile* file, bool write, uint64_t byte_offset, uint32_t length, uint64_t start_us) {
+  // IsInThread(nullptr): no guest thread here (an I/O worker finishing an async request)
+  XThread* thread = XThread::IsInThread(nullptr) ? nullptr : XThread::GetCurrentThread();
+  return xe::spartan::IoBegin(thread ? thread->thread_id() : 0, write, file->spartan_path(),
+                              file->spartan_medium(),
+                              byte_offset == uint64_t(-1) ? file->position() : byte_offset, length, start_us);
+}
+
+void SpartanIoEnd(XFile* file, uint32_t ticket, bool write, X_STATUS result, const uint32_t* out_bytes,
+                  uint64_t start_us, uint64_t io_done_us) {
+  xe::spartan::IoEnd(ticket, write, file->spartan_path(), file->spartan_medium(),
+                     XSUCCEEDED(result) && out_bytes ? *out_bytes : 0, start_us, io_done_us,
+                     xe::spartan::NowUs());
+}
+
+}  // namespace
 
 XFile::XFile(KernelState* kernel_state, vfs::File* file, bool synchronous,
              bool alertable, bool buffered)
@@ -32,6 +54,16 @@ XFile::XFile(KernelState* kernel_state, vfs::File* file, bool synchronous,
       is_buffered_(buffered) {
   async_event_ = threading::Event::CreateManualResetEvent(false);
   assert_not_null(async_event_);
+  SpartanRemember();
+}
+
+void XFile::SpartanRemember() {
+  if (file_ && file_->entry()) {
+    spartan_path_ = file_->entry()->path();
+    if (file_->entry()->device()) {
+      spartan_medium_ = file_->entry()->device()->spartan_medium();
+    }
+  }
 }
 
 XFile::XFile() : XObject(kObjectType), completion_port_lock_() {
@@ -133,6 +165,9 @@ X_STATUS XFile::Read(uint32_t buffer_guest_address, uint32_t buffer_length,
   // file_lock_ is taken inside the closure, on an I/O worker, so it is never
   // held while the calling fiber waits.
   // Booked before the offload, so requests queue in the order they are issued.
+  const uint64_t spartan_start = xe::spartan::NowUs();
+  const uint32_t spartan_ticket =
+      SpartanIoBegin(this, false, byte_offset, buffer_length, spartan_start);
   const uint64_t deadline_ms = ReserveDriveTime(byte_offset, buffer_length);
   X_STATUS result = X_STATUS_SUCCESS;
   RunSynchronousIo([&]() {
@@ -140,7 +175,10 @@ X_STATUS XFile::Read(uint32_t buffer_guest_address, uint32_t buffer_length,
     result = ReadInternal(buffer_guest_address, buffer_length, byte_offset,
                           out_bytes_read, apc_context, notify_completion);
   });
+  const uint64_t spartan_io_done = xe::spartan::NowUs();
   AwaitDriveTime(deadline_ms);
+  SpartanIoEnd(this, spartan_ticket, false, result, out_bytes_read,
+               spartan_start, spartan_io_done);
   return result;
 }
 
@@ -368,6 +406,9 @@ X_STATUS XFile::ReadScatter(uint32_t segments_guest_address, uint32_t length,
                             uint64_t byte_offset, uint32_t* out_bytes_read,
                             uint32_t apc_context, bool notify_completion) {
   // The whole loop as one request, so the fiber waits once.
+  const uint64_t spartan_start = xe::spartan::NowUs();
+  const uint32_t spartan_ticket =
+      SpartanIoBegin(this, false, byte_offset, length, spartan_start);
   const uint64_t deadline_ms = ReserveDriveTime(byte_offset, length);
   X_STATUS result = X_STATUS_SUCCESS;
   RunSynchronousIo([&]() {
@@ -375,7 +416,10 @@ X_STATUS XFile::ReadScatter(uint32_t segments_guest_address, uint32_t length,
         ReadScatterInternal(segments_guest_address, length, byte_offset,
                             out_bytes_read, apc_context, notify_completion);
   });
+  const uint64_t spartan_io_done = xe::spartan::NowUs();
   AwaitDriveTime(deadline_ms);
+  SpartanIoEnd(this, spartan_ticket, false, result, out_bytes_read,
+               spartan_start, spartan_io_done);
   return result;
 }
 
@@ -434,11 +478,16 @@ X_STATUS XFile::ReadScatterInternal(uint32_t segments_guest_address,
 X_STATUS XFile::Write(uint32_t buffer_guest_address, uint32_t buffer_length,
                       uint64_t byte_offset, uint32_t* out_bytes_written,
                       uint32_t apc_context, bool notify_completion) {
+  const uint64_t spartan_start = xe::spartan::NowUs();
+  const uint32_t spartan_ticket =
+      SpartanIoBegin(this, true, byte_offset, buffer_length, spartan_start);
   X_STATUS result = X_STATUS_SUCCESS;
   RunSynchronousIo([&]() {
     result = WriteInternal(buffer_guest_address, buffer_length, byte_offset,
                            out_bytes_written, apc_context, notify_completion);
   });
+  SpartanIoEnd(this, spartan_ticket, true, result, out_bytes_written,
+               spartan_start, xe::spartan::NowUs());
   return result;
 }
 
@@ -585,6 +634,7 @@ object_ref<XFile> XFile::Restore(KernelState* kernel_state,
   }
 
   file->file_ = vfs_file;
+  file->SpartanRemember();
   file->position_ = position;
   file->is_synchronous_ = is_synchronous;
   file->is_buffered_ = is_buffered;

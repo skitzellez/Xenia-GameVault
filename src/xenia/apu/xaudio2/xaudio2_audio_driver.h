@@ -10,6 +10,7 @@
 #ifndef XENIA_APU_XAUDIO2_XAUDIO2_AUDIO_DRIVER_H_
 #define XENIA_APU_XAUDIO2_XAUDIO2_AUDIO_DRIVER_H_
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -113,6 +114,8 @@ class XAudio2AudioDriver : public AudioDriver {
 
   float frames_[frame_count_][kFrameSamplesMax];
   uint32_t current_frame_ = 0;
+  // Spartan trackers: when this voice last got a frame (a gap of 250 ms+ is a pause, not the sound running dry)
+  std::chrono::steady_clock::time_point spartan_last_submit_{};
 
   // Base voice volume (1.0 for game audio; the XMP player sets its own).
   float volume_ = 1.0f;

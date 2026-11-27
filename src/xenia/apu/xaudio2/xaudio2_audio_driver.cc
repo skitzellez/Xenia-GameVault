@@ -9,12 +9,15 @@
 
 #include "xenia/apu/xaudio2/xaudio2_audio_driver.h"
 
+#include <chrono>
+
 #include "xenia/apu/apu_flags.h"
 #include "xenia/apu/conversion.h"
 #include "xenia/apu/xaudio2/xaudio2_api.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/spartan_trace.h"
 #include "xenia/base/platform_win.h"
 #include "xenia/base/threading.h"
 
@@ -212,6 +215,28 @@ void XAudio2AudioDriver::SubmitFrame(float* frame) {
     objects_.api_2_7.pcm_voice->GetState(&state);
   }
   assert_true(state.BuffersQueued < frame_count_);
+  {
+    // Spartan trackers: an empty queue when the next frame comes means the sound already ran dry (an audible gap).
+    // Not counted for the first frame after a pause (the in-game menu, a load), where an empty queue is expected.
+    namespace sp = xe::spartan;
+    const auto spartan_now = std::chrono::steady_clock::now();
+    const bool spartan_flowing = spartan_last_submit_.time_since_epoch().count() &&
+                                 spartan_now - spartan_last_submit_ < std::chrono::milliseconds(250);
+    spartan_last_submit_ = spartan_now;
+    sp::audio_frames.fetch_add(1, std::memory_order_relaxed);
+    sp::audio_queue_size.store(frame_count_, std::memory_order_relaxed);
+    if (spartan_flowing) {
+      if (state.BuffersQueued == 0) {
+        sp::audio_dry.fetch_add(1, std::memory_order_relaxed);
+      } else if (state.BuffersQueued == 1) {
+        sp::audio_one_left.fetch_add(1, std::memory_order_relaxed);
+      }
+      uint32_t seen = sp::audio_min_queued.load(std::memory_order_relaxed);
+      while (state.BuffersQueued < seen &&
+             !sp::audio_min_queued.compare_exchange_weak(seen, state.BuffersQueued, std::memory_order_relaxed)) {
+      }
+    }
+  }
 
   auto output_frame = reinterpret_cast<float*>(frames_[current_frame_]);
 

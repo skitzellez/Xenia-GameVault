@@ -8,6 +8,7 @@
  */
 
 #include "xenia/kernel/xthread.h"
+#include "xenia/base/spartan_trace.h"
 
 #if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID || XE_PLATFORM_MAC
 #include <pthread.h>
@@ -184,6 +185,7 @@ void XThread::set_last_error(uint32_t error_code) {
 void XThread::set_name(const std::string_view name) {
   std::lock_guard<std::mutex> lock(thread_lock_);
   thread_name_ = fmt::format("{} ({:08X})", name, handle());
+  xe::spartan::SetThreadName(thread_id_, thread_name_);  // Spartan trackers: the stall sampler's name list
 
   if (thread_) {
     // May be getting set before the thread is created.

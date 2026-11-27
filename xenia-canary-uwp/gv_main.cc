@@ -27,6 +27,7 @@
 #include <thread>
 
 #include "third_party/fmt/include/fmt/format.h"
+#include "spartan_tracker.h"
 #include "xenia/base/gv_perf.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/platform_win.h"
@@ -2148,6 +2149,9 @@ void GameVaultXeniaApp::EmulatorThread() {
   // The hard drive's cache partitions and the other standard drives, as
   // Edge's xenia_main.cc does (GTA IV streams the city through cache:).
   emulator_->MountStandardDrives();
+  // Spartan trackers (PSYCHOsmurf / Spartan Test): start line, crash handler, memory and audio watch
+  spartan::StartTrackers(emulator_.get());
+  app_context().CallInUIThread([]() { spartan::WatchAppLeaving(); });
 
   // A relaunch makes a new graphics system: its frames go to the window again.
   // Edge binds controllers to the game's player slots only when a driver
@@ -2536,6 +2540,7 @@ void GameVaultXeniaApp::OnDestroy() {
   UWP::SetHostGuideAction({});
   UWP::RegisterInputSystem(nullptr);
   config::SaveConfig();
+  spartan::FinalReport();
   XELOGI("Game Vault: Xenia closing");
   xe::FlushLog();
   // Like Edge and Canary: no orderly teardown of a running title.

@@ -199,8 +199,21 @@ void FileLogSink::WriteLine(const char* line, size_t size) {
   // log_lr_at_instruction lines are asked for on purpose: each hit is written (only the size limit applies)
   // Game Vault's own regular status lines (frame rate every 30 s; look-ahead, capped at 300 by its caller) are
   // limited where they are written, so the repeat filter must not stop them after 20 copies (about 10 minutes in)
+  // Spartan trackers (PSYCHOsmurf / Spartan Test): their messages start with "Spartan " and come every few seconds at
+  // most by design, and the numbers in them are the point, so they are not counted as repeats (a 10 s line read the
+  // same as the last one after 200 s). Only the start of the message counts, so a game's own lines naming "Spartan"
+  // are filtered as usual.
+  // The message starts after "w> ", the frame ("f:0001234 ", once the game shows frames) and the thread id.
+  size_t message = 3;
+  if (prefixed && size > 5 && line[3] == 'f' && line[4] == ':') {
+    const void* space = std::memchr(line + 3, ' ', size - 3);
+    message = space ? size_t(static_cast<const char*>(space) - line) + 1 : size;
+  }
+  message += 9;
+  const bool spartan = prefixed && message < size &&
+                       std::string_view(line + message, size - message).substr(0, 8) == "Spartan ";
   std::string_view whole(line, size);
-  if (!prefixed || whole.find("log_lr_at_instruction: lr") != std::string_view::npos ||
+  if (!prefixed || whole.find("log_lr_at_instruction: lr") != std::string_view::npos || spartan ||
       whole.find("Game Vault: frame rate ") != std::string_view::npos ||
       whole.find("Game Vault: look-ahead ") != std::string_view::npos) {
     if (written_ + size <= limit_) Put(line, size);
@@ -664,6 +677,19 @@ void InitializeLogging(const std::string_view app_name) {
     if (!games.empty()) {
       auto file_path = std::filesystem::path(xe::to_path(games)) / "logs" / "Xenia (Xbox 360).log";
       xe::filesystem::CreateParentFolder(file_path);
+      log_file = xe::filesystem::OpenFile(file_path, "wt");
+      log_limit = 4_MiB;
+    }
+  }
+  // An app without the shared folder (a test build under its own publisher) keeps the log in its LocalState, which
+  // the Device Portal can read; the app's install folder, the fallback below, cannot be written to.
+  if (!log_file && cvars::log_file.empty()) {
+    std::string local = UWP::GetLocalState();
+    if (!local.empty()) {
+      auto file_path = std::filesystem::path(xe::to_path(local)) / "Xenia (Xbox 360).log";
+      std::error_code rotate_error;
+      std::filesystem::rename(file_path, std::filesystem::path(file_path).replace_extension(".previous.log"),
+                              rotate_error);
       log_file = xe::filesystem::OpenFile(file_path, "wt");
       log_limit = 4_MiB;
     }

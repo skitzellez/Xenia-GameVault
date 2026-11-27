@@ -9,6 +9,8 @@
 
 #include "xenia/base/gv_perf.h"
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
+#include <optional>
+#include "xenia/base/spartan_trace.h"
 #include <fstream>
 #include <cstdlib>
 #include <cstdio>
@@ -4805,7 +4807,11 @@ void D3D12CommandProcessor::CheckSubmissionCompletion(
 
   const uint64_t gv_w0 = GvNowNs();
   const uint64_t gv_done_before = GetCompletedSubmission();
-  completion_timeline_->AwaitSubmissionAndUpdateCompleted(await_submission);
+  {
+    std::optional<xe::spartan::GpuPhaseScope> spartan_await;
+    if (await_submission > gv_done_before) spartan_await.emplace(xe::spartan::GpuPhase::kAwaitGpu);
+    completion_timeline_->AwaitSubmissionAndUpdateCompleted(await_submission);
+  }
   if (await_submission > gv_done_before) {
     gv_submit_stats[5]++;
     gv_submit_stats[6] += GvNowNs() - gv_w0;
@@ -7036,6 +7042,7 @@ CommandProcessor::QueryOpenResult D3D12CommandProcessor::OpenZPDQuery(
       }
 
       const uint64_t gv_w0 = GvNowNs();
+      xe::spartan::GpuPhaseScope spartan_query(xe::spartan::GpuPhase::kQueryWait);
       completion_timeline_->AwaitSubmissionAndUpdateCompleted(wait_for);
       gv_submit_stats[7]++;
       gv_submit_stats[8] += GvNowNs() - gv_w0;
@@ -7189,6 +7196,7 @@ bool D3D12CommandProcessor::AwaitQueryResolve(ReportHandle report_handle,
 
   if (wait_for_submission > GetCompletedSubmission()) {
     const uint64_t gv_w0 = GvNowNs();
+    xe::spartan::GpuPhaseScope spartan_query(xe::spartan::GpuPhase::kQueryWait);
     completion_timeline_->AwaitSubmissionAndUpdateCompleted(
         wait_for_submission);
     gv_submit_stats[7]++;

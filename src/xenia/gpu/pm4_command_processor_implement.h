@@ -690,8 +690,11 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_XE_SWAP(uint32_t packet,
 
   // Game Vault: the guest scheduler's no-progress dump watches this count
   xe::logging::IncrementFrameNumber();
-  COMMAND_PROCESSOR::IssueSwap(frontbuffer_ptr, frontbuffer_width,
-                               frontbuffer_height);
+  {
+    xe::spartan::GpuPhaseScope spartan_swap(xe::spartan::GpuPhase::kSwap);
+    COMMAND_PROCESSOR::IssueSwap(frontbuffer_ptr, frontbuffer_width,
+                                 frontbuffer_height);
+  }
 
   ++counter_;
   return true;
@@ -745,6 +748,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
                 : register_file_->values[poll_reg_addr];
 
   bool matched = false;
+  // Spartan trackers: set once the first poll fails, so the stall sampler and the freeze report can say the GPU thread
+  // waits for the game to write this value
+  std::optional<xe::spartan::GpuPhaseScope> spartan_wait;
 
   do {
     uint32_t value = value_ref;
@@ -762,6 +768,14 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
     matched = MatchValueAndRef(value & mask, ref, wait_info);
 
     if (!matched) {
+      if (!spartan_wait) {
+        spartan_wait.emplace(xe::spartan::GpuPhase::kWaitRegMem);
+        xe::spartan::wait_addr.store(poll_reg_addr, std::memory_order_relaxed);
+        xe::spartan::wait_ref.store(ref, std::memory_order_relaxed);
+        xe::spartan::wait_mask.store(mask, std::memory_order_relaxed);
+        xe::spartan::wait_is_memory.store(is_memory, std::memory_order_relaxed);
+      }
+      xe::spartan::wait_value.store(value, std::memory_order_relaxed);
       // Wait.
       if (wait >= 0x100) {
         PrepareForWait();

@@ -8,6 +8,8 @@
  */
 
 #include "xenia/gpu/command_processor.h"
+#include <optional>
+#include "xenia/base/spartan_trace.h"
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/byte_stream.h"
@@ -15,6 +17,8 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/spartan_trace.h"
+#include "xenia/base/threading.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/packet_disassembler.h"
@@ -347,6 +351,11 @@ void CommandProcessor::WorkerThreadMain() {
     return;
   }
 
+  // Spartan trackers: this is the GPU thread (phase scopes act only here; its CPU time goes in the stall lines)
+  xe::spartan::tls_is_gpu_thread = true;
+  xe::spartan::gpu_thread_handle.store(xe::spartan::CurrentThreadQueryHandle(), std::memory_order_relaxed);
+  xe::spartan::gpu_phase.store(uint8_t(xe::spartan::GpuPhase::kCommands), std::memory_order_relaxed);
+
   while (worker_running_) {
     while (!pending_fns_.empty()) {
       auto fn = std::move(pending_fns_.front());
@@ -361,6 +370,7 @@ void CommandProcessor::WorkerThreadMain() {
       // We spin here waiting for new ones, as the overhead of waiting on our
       // event is too high.
       PrepareForWait();
+      xe::spartan::GpuPhaseScope spartan_idle(xe::spartan::GpuPhase::kIdle);
       uint32_t loop_count = 0;
       do {
         // If we spin around too much, revert to a "low-power" state.
@@ -385,6 +395,8 @@ void CommandProcessor::WorkerThreadMain() {
 
     // Execute. Note that we handle wraparound transparently.
     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
+    xe::spartan::gpu_read_ptr.store(read_ptr_index_, std::memory_order_relaxed);
+    xe::spartan::gpu_write_ptr.store(write_ptr_index, std::memory_order_relaxed);
 
     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
     //     that many indices.
@@ -399,6 +411,8 @@ void CommandProcessor::WorkerThreadMain() {
     // but no games seem to actually use it.
   }
 
+  xe::spartan::gpu_thread_handle.store(nullptr, std::memory_order_relaxed);
+  xe::spartan::gpu_phase.store(uint8_t(xe::spartan::GpuPhase::kNotStarted), std::memory_order_relaxed);
   ShutdownContext();
 }
 

@@ -8,6 +8,7 @@
  */
 
 #include "xenia/base/gv_perf.h"
+#include "xenia/base/spartan_trace.h"
 #include "xenia/gpu/d3d12/d3d12_shared_memory.h"
 
 #include <cstring>
@@ -323,6 +324,7 @@ bool D3D12SharedMemory::UploadRanges(
     return true;
   }
   xe::gv_perf::Scope gv_scope(xe::gv_perf::memory_upload);
+  xe::spartan::GpuPhaseScope spartan_phase(xe::spartan::GpuPhase::kUpload);
   for (uint32_t gv_i = 0; gv_i < num_upload_page_ranges; ++gv_i) {
     xe::gv_perf::upload_bytes.fetch_add(uint64_t(upload_page_ranges[gv_i].second) * 4096,
                                         std::memory_order_relaxed);

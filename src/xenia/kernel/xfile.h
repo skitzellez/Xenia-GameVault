@@ -151,6 +151,13 @@ class XFile : public XObject {
   const std::string& path() const { return file_->entry()->path(); }
   const std::string& name() const { return file_->entry()->name(); }
 
+  // Spartan trackers: the path and medium as they were when the file was
+  // opened. A game can close a save package (its device and entries freed)
+  // while a thread still reads or writes a file in it, so the trackers never
+  // look at the entry or device again.
+  const std::string& spartan_path() const { return spartan_path_; }
+  const char* spartan_medium() const { return spartan_medium_; }
+
   uint64_t position() const;
   void set_position(uint64_t value);
 
@@ -248,6 +255,10 @@ class XFile : public XObject {
                          uint32_t apc_context, bool notify_completion);
 
   vfs::File* file_ = nullptr;
+  // Spartan trackers: copied from file_ when it is set (SpartanRemember).
+  std::string spartan_path_;
+  const char* spartan_medium_ = "other";  // a string literal: never freed
+  void SpartanRemember();
   // The handle's wait state. Manual reset like NT's file object event, so every
   // wait after a completion returns until the next request clears it.
   std::unique_ptr<threading::Event> async_event_ = nullptr;

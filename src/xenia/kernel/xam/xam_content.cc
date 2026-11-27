@@ -16,6 +16,7 @@
 
 #include <chrono>
 #include "xenia/base/math.h"
+#include "xenia/base/spartan_trace.h"
 #include "xenia/base/string_util.h"
 #include "xenia/base/threading.h"
 #include "xenia/base/utf8.h"
@@ -346,6 +347,30 @@ static X_RESULT ContentXuid(uint32_t user_index, uint64_t& xuid) {
   return X_ERROR_SUCCESS;
 }
 
+// Spartan trackers (PSYCHOsmurf / Spartan Test): a line for each save, DLC or
+// other package a game opens or closes, so a lost save can be followed step by
+// step (watch only). The game thread that asked; empty off a guest thread.
+static std::string SpartanCaller() {
+  XThread* thread = XThread::IsInThread(nullptr) ? nullptr : XThread::GetCurrentThread();
+  return thread ? thread->name() : std::string();
+}
+static const char* SpartanContentMode(uint32_t flags) {
+  switch (flags & 0xF) {
+    case vfs::XContentFlag::kCreateNew:
+      return "create new";
+    case vfs::XContentFlag::kCreateAlways:
+      return "create always (replaces an old one)";
+    case vfs::XContentFlag::kOpenExisting:
+      return "open existing";
+    case vfs::XContentFlag::kOpenAlways:
+      return "open or create";
+    case vfs::XContentFlag::kTruncateExisting:
+      return "empty and open existing";
+    default:
+      return "unknown mode";
+  }
+}
+
 // A request with an overlapped completes it with ERROR_FUNCTION_FAILED and its
 // error as an HRESULT, or with success.
 static X_RESULT CompleteRequest(pointer_t<XAM_OVERLAPPED> overlapped_ptr,
@@ -391,9 +416,12 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
   }
 
   auto content_manager = kernel_state()->content_manager();
+  const uint64_t spartan_call_us = xe::spartan::NowUs();
+  const std::string spartan_caller = SpartanCaller();
 
   auto run = [content_manager, user_index, root_name = root_name.value(), flags,
-              content_data, disposition_ptr, license_mask_ptr, overlapped_ptr](
+              content_data, disposition_ptr, license_mask_ptr, overlapped_ptr,
+              spartan_call_us, spartan_caller](
                  uint32_t& extended_error, uint32_t& length) -> X_RESULT {
     const auto gv_t0 = std::chrono::steady_clock::now();
     struct GvTimer {
@@ -408,6 +436,8 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
         }
       }
     } gv_timer{gv_t0, root_name};
+    // Spartan: what happened to an old package, for the line at the end.
+    const char* spartan_old = "";
     uint64_t xuid = 0;
     X_RESULT result = ContentXuid(user_index, xuid);
     if (content_data.content_type == XContentType::kMarketplaceContent) {
@@ -440,6 +470,8 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
           if (!root_in_use &&
               content_manager->ContentExists(xuid, content_data)) {
             result = content_manager->DeleteContent(xuid, content_data, true);
+            spartan_old = result ? "; deleting the old one failed"
+                                 : "; the old one was kept aside (Game Vault)";
           }
           if (!result) {
             disposition = kDispositionState::Create;
@@ -470,6 +502,8 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
             result = X_ERROR_ALREADY_EXISTS;
           } else {
             result = content_manager->TruncateContent(xuid, content_data);
+            spartan_old = result ? "; emptying the old one failed"
+                                 : "; the old one was emptied first";
             if (!result) {
               disposition = kDispositionState::Open;
             }
@@ -522,6 +556,22 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
 
     if (result && overlapped_ptr) {
       result = X_ERROR_FUNCTION_FAILED;
+    }
+    {
+      const uint64_t spartan_ms =
+          (xe::spartan::NowUs() - spartan_call_us) / 1000;
+      const char* spartan_done =
+          disposition == kDispositionState::Create  ? "made and mounted"
+          : disposition == kDispositionState::Open ? "opened and mounted"
+                                                   : "NOT mounted";
+      XELOGI(
+          "Spartan saves: {} '{}' (root '{}:') for '{}': {}{}; error {:08X}{}",
+          spartan_done, content_data.file_name(), root_name,
+          spartan_caller.empty() ? std::string("?") : spartan_caller,
+          SpartanContentMode(flags), spartan_old, extended_error,
+          overlapped_ptr ? fmt::format("; asked {} ms before (in the background)",
+                                       spartan_ms)
+                         : std::string("; at once"));
     }
     return result;
   };
@@ -598,9 +648,11 @@ DECLARE_XAM_EXPORT1(XamContentFlush, kContent, kStub);
 dword_result_t XamContentClose_entry(lpstring_t root_name,
                                      pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
   // Closes a previously opened root from XamContentCreate*.
-  return CompleteRequest(
-      overlapped_ptr,
-      kernel_state()->content_manager()->CloseContent(root_name.value()));
+  const X_RESULT result =
+      kernel_state()->content_manager()->CloseContent(root_name.value());
+  XELOGI("Spartan saves: closed root '{}:' for '{}': error {:08X}",
+         root_name.value(), SpartanCaller(), result);
+  return CompleteRequest(overlapped_ptr, result);
 }
 DECLARE_XAM_EXPORT1(XamContentClose, kContent, kImplemented);
 

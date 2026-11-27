@@ -26,6 +26,9 @@ constexpr fourcc_t kXSFSignature = make_fourcc(0x58, 0x53, 0x46, 0x1A);
 
 class DiscImageDevice : public Device {
  public:
+  const char* spartan_medium() const override {
+    return on_network_ ? "network disc image" : "disc image";
+  }
   DiscImageDevice(const std::string_view mount_path,
                   const std::filesystem::path& host_path);
   ~DiscImageDevice() override;

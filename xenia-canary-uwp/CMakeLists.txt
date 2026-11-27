@@ -3,6 +3,7 @@ add_executable(xenia-uwp WIN32
   App.cpp
   gv_main.cc
   gv_uwp_util.cpp
+  spartan_tracker.cc
   gv_audio_helper.cc
   gv_shader_share.cc
   gv_import_stubs.cc

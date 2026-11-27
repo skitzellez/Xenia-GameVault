@@ -8,6 +8,8 @@
  */
 
 #include "xenia/gpu/vulkan/vulkan_command_processor.h"
+#include <optional>
+#include "xenia/base/spartan_trace.h"
 
 #include <cstdint>
 #include <cstring>

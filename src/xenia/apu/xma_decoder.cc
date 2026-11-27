@@ -20,6 +20,7 @@
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/ring_buffer.h"
+#include "xenia/base/spartan_trace.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/thread_state.h"
@@ -83,6 +84,21 @@ UPDATE_from_string(xma_decoder, 2026, 2, 16, 12, "old");
 
 namespace xe {
 namespace apu {
+
+namespace {
+// Spartan trackers: times a decode that did work (watch only; the call is unchanged). A context that is not enabled
+// returns at once without work, so only enabled ones are timed.
+bool SpartanTimedWork(XmaContext& context) {
+  namespace sp = xe::spartan;
+  const bool timed = context.is_enabled();
+  const uint64_t start = timed ? sp::NowUs() : 0;
+  const bool worked = context.Work();
+  if (worked && timed) {
+    sp::SoundDecoded(context.id(), sp::NowUs() - start);
+  }
+  return worked;
+}
+}  // namespace
 
 XmaDecoder::XmaDecoder(cpu::Processor* processor)
     : memory_(processor->memory()), processor_(processor) {}
@@ -207,7 +223,7 @@ void XmaDecoder::WorkerThreadMain() {
     // Okay, let's loop through XMA contexts to find ones we need to decode!
     bool did_work = false;
     for (uint32_t n = 0; n < kContextCount; n++) {
-      did_work = contexts_[n]->Work() || did_work;
+      did_work = SpartanTimedWork(*contexts_[n]) || did_work;
     }
 
     if (paused_) {
@@ -261,8 +277,10 @@ uint32_t XmaDecoder::AllocateContext() {
   size_t index = context_bitmap_.Acquire();
   if (index == -1) {
     // Out of contexts.
+    xe::spartan::SoundStreamOpened(false);
     return 0;
   }
+  xe::spartan::SoundStreamOpened(true);
 
   XmaContext& context = *contexts_[index];
   assert_false(context.is_allocated());
@@ -278,6 +296,7 @@ void XmaDecoder::ReleaseContext(uint32_t guest_ptr) {
   assert_true(context.is_allocated());
   context.Release();
   context_bitmap_.Release(context_id);
+  xe::spartan::SoundStreamClosed();
 }
 
 bool XmaDecoder::BlockOnContext(uint32_t guest_ptr, bool poll) {
@@ -347,7 +366,7 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
       auto& context = *contexts_[context_id];
       context.Enable();
       if (!cvars::use_dedicated_xma_thread) {
-        context.Work();
+        SpartanTimedWork(context);
       }
       value &= value - 1;
     }

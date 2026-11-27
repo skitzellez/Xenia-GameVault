@@ -35,6 +35,7 @@ class DiscZarchiveEntry;
 
 class DiscZarchiveDevice : public Device {
  public:
+  const char* spartan_medium() const override { return "disc image (zar)"; }
   DiscZarchiveDevice(const std::string_view mount_path,
                      const std::filesystem::path& host_path);
   ~DiscZarchiveDevice() override;

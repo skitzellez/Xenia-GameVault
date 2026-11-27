@@ -23,6 +23,7 @@
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/ring_buffer.h"
+#include "xenia/base/spartan_trace.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/base/threading.h"
 #include "xenia/cpu/thread_state.h"
@@ -187,6 +188,7 @@ void AudioSystem::WorkerThreadMain() {
     if (xe::threading::Wait(client_semaphores_[client_index].get(), false,
                             std::chrono::milliseconds(0)) !=
         xe::threading::WaitResult::kSuccess) {
+      xe::spartan::sound.frames_not_sent.fetch_add(1, std::memory_order_relaxed);
       continue;
     }
 
@@ -217,8 +219,25 @@ void AudioSystem::WorkerThreadMain() {
         ++gv_callbacks_;
         gv_callback_since_ms_ = Clock::QueryHostUptimeMillis();
         uint64_t args[] = {client_callback_arg};
+        // Spartan trackers (PSYCHOsmurf / Spartan Test): how late the game's sound code starts against its due
+        // time, and how long it runs (watch only).
+        namespace sp = xe::spartan;
+        const uint64_t spartan_start = sp::NowUs();
+        if (spartan_start > earliest_pump_us + sp::kSoundFrameUs) {
+          sp::sound.pumps_late.fetch_add(1, std::memory_order_relaxed);
+          sp::AtomicMax(sp::sound.pump_late_max_us, spartan_start - earliest_pump_us);
+        }
+        sp::in_sound_callback = true;
         processor_->Execute(worker_thread_->thread_state(), client_callback, args,
                             xe::countof(args));
+        sp::in_sound_callback = false;
+        const uint64_t spartan_us = sp::NowUs() - spartan_start;
+        sp::sound.callbacks.fetch_add(1, std::memory_order_relaxed);
+        sp::sound.callback_us.fetch_add(spartan_us, std::memory_order_relaxed);
+        sp::AtomicMax(sp::sound.callback_max_us, spartan_us);
+        if (spartan_us > sp::kSoundFrameUs) {
+          sp::sound.callbacks_long.fetch_add(1, std::memory_order_relaxed);
+        }
         gv_callback_since_ms_ = 0;
       }
     }

@@ -47,6 +47,7 @@ class HostPathDevice : public Device {
   const std::filesystem::path& write_layer() const { return write_layer_; }
 
   bool supports_concurrent_io() const override { return true; }
+  const char* spartan_medium() const override { return "folder"; }
 
   bool queues_all_requests() const override { return name_ == "STFS"; }
 

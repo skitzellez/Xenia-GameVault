@@ -60,6 +60,9 @@ class Device {
   // an async handle. FATX and GDFX complete a buffered transfer inline.
   virtual bool queues_all_requests() const { return false; }
 
+  // Spartan Test trackers (PSYCHOsmurf / Spartan Test): what the device reads from, for the file read lines.
+  virtual const char* spartan_medium() const { return "other"; }
+
   virtual void Dump(StringBuffer* string_buffer) = 0;
   virtual Entry* ResolvePath(const std::string_view path) = 0;
 
