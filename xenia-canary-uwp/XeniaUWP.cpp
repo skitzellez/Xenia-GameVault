@@ -319,7 +319,11 @@ void UWP::UpdateImGuiIO() {
     ResetAnalogNavRepeatStates();
   }
 
-  const uint16_t buttons = state.gamepad.buttons;
+  const uint16_t gv_test_buttons = xe::hid::GvPressButtonsNow();
+  if (gv_test_buttons) {
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+  }
+  const uint16_t buttons = uint16_t(state.gamepad.buttons | gv_test_buttons);
 
   io.AddKeyEvent(ImGuiKey_GamepadFaceDown, (buttons & X_INPUT_GAMEPAD_A) != 0);
   io.AddKeyEvent(ImGuiKey_GamepadFaceRight, (buttons & X_INPUT_GAMEPAD_B) != 0);

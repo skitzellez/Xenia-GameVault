@@ -33,6 +33,9 @@ class Window;
 namespace xe {
 namespace hid {
 
+// Game Vault: buttons the test presses (gv_press.txt) hold right now, 0 when none.
+uint16_t GvPressButtonsNow();
+
 class InputSystem {
  public:
   explicit InputSystem(xe::ui::Window* window);

@@ -336,6 +336,13 @@ bool GvPressApply(X_INPUT_STATE* state) {
 }
 }  // namespace
 
+// Game Vault: the test presses for Xenia's own pop-ups (message boxes, "Load completed"): the UI reads them here, so
+// a test gets past them too.
+uint16_t GvPressButtonsNow() {
+  X_INPUT_STATE pressed = {};
+  return GvPressApply(&pressed) ? uint16_t(pressed.gamepad.buttons) : uint16_t(0);
+}
+
 X_RESULT InputSystem::GetState(uint32_t user_index, uint32_t flags,
                                X_INPUT_STATE* out_state, bool ui_active) {
   SCOPE_profile_cpu_f("hid");
