@@ -54,6 +54,23 @@ namespace xe {
 namespace kernel {
 namespace xam {
 
+// Game Vault: a game's synchronous save call (create, open, close, delete) does host disk
+// work. On the guest scheduler that held the game thread's CPU lane: every other game
+// thread on it froze, the sound callback too ("GuestScheduler: CPU 4 has not switched
+// fibers in 2000 watchdog ticks" while Spec Ops' autosave took 3.9 s; PSYCHOsmurf /
+// Spartan Test measured 1.5 s game-wide pauses at each Fall of Cybertron checkpoint).
+// Run it on an I/O worker like a disc read, so the lane keeps running the game.
+template <typename Run>
+static X_RESULT GvRunOffLane(Run& run) {
+  uint32_t extended_error = 0, length = 0;
+  X_RESULT result = X_ERROR_SUCCESS;
+  kernel_state()->RunBlockingIo(
+      [&]() { result = run(extended_error, length); },
+      GuestScheduler::BlockingCallClass::kConcurrent, false);
+  return result;
+}
+
+
 dword_result_t XamContentGetLicenseMask_entry(lpdword_t mask_ptr,
                                               lpvoid_t overlapped_ptr) {
   if (!mask_ptr) {
@@ -80,8 +97,7 @@ dword_result_t XamContentGetLicenseMask_entry(lpdword_t mask_ptr,
   };
 
   if (!overlapped_ptr) {
-    uint32_t extended_error, length;
-    return run(extended_error, length);
+    return GvRunOffLane(run);
   } else {
     kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
     return X_ERROR_IO_PENDING;
@@ -157,8 +173,7 @@ dword_result_t xeXamContentResolve(
   };
 
   if (!overlapped_ptr) {
-    uint32_t extended_error, length;
-    return run(extended_error, length);
+    return GvRunOffLane(run);
   } else {
     kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
     return X_ERROR_IO_PENDING;
@@ -350,6 +365,7 @@ static X_RESULT ContentXuid(uint32_t user_index, uint64_t& xuid) {
 // Spartan trackers (PSYCHOsmurf / Spartan Test): a line for each save, DLC or
 // other package a game opens or closes, so a lost save can be followed step by
 // step (watch only). The game thread that asked; empty off a guest thread.
+
 static std::string SpartanCaller() {
   XThread* thread = XThread::IsInThread(nullptr) ? nullptr : XThread::GetCurrentThread();
   return thread ? thread->name() : std::string();
@@ -589,8 +605,7 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
   };
 
   if (!overlapped_ptr) {
-    uint32_t extended_error, length;
-    return run(extended_error, length);
+    return GvRunOffLane(run);
   } else {
     kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
     return X_ERROR_IO_PENDING;
@@ -660,8 +675,11 @@ DECLARE_XAM_EXPORT1(XamContentFlush, kContent, kStub);
 dword_result_t XamContentClose_entry(lpstring_t root_name,
                                      pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
   // Closes a previously opened root from XamContentCreate*.
-  const X_RESULT result =
-      kernel_state()->content_manager()->CloseContent(root_name.value());
+  X_RESULT result = X_ERROR_SUCCESS;
+  const std::string gv_root = root_name.value();
+  kernel_state()->RunBlockingIo(
+      [&]() { result = kernel_state()->content_manager()->CloseContent(gv_root); },
+      GuestScheduler::BlockingCallClass::kConcurrent, false);
   XELOGI("Spartan saves: closed root '{}:' for '{}': error {:08X}",
          root_name.value(), SpartanCaller(), result);
   return CompleteRequest(overlapped_ptr, result);
@@ -717,8 +735,7 @@ dword_result_t XamContentGetCreator_entry(
   };
 
   if (!overlapped_ptr) {
-    uint32_t extended_error, length;
-    return run(extended_error, length);
+    return GvRunOffLane(run);
   } else {
     kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
     return X_ERROR_IO_PENDING;
