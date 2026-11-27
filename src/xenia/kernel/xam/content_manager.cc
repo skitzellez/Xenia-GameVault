@@ -128,6 +128,18 @@ struct GvLockWait {
 };
 }  // namespace
 
+// Game Vault: names any save disk step that takes 100 ms or more (Kameo: a save's folder
+// work took 1.7 s per step on the Xbox).
+struct GvStep {
+  const char* what;
+  std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+  ~GvStep() {
+    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t0).count();
+    if (ms >= 100) XELOGW("Game Vault: saves: step '{}' took {} ms", what, ms);
+  }
+};
+
 ContentManager::ContentManager(KernelState* kernel_state,
                                const std::filesystem::path& root_path)
     : kernel_state_(kernel_state), root_path_(root_path) {}
@@ -446,6 +458,7 @@ std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
 
 bool ContentManager::ContentExists(const uint64_t xuid,
                                    const XCONTENT_AGGREGATE_DATA& data) {
+  GvStep gv_s{"ContentExists"};
   std::filesystem::path path;
   if (ResolvePackagePath(xuid, data, path)) {
     return false;
@@ -458,6 +471,7 @@ bool ContentManager::ContentExists(const uint64_t xuid,
 
 X_RESULT ContentManager::WriteContentHeaderFile(const uint64_t xuid,
                                                 XCONTENT_AGGREGATE_DATA data) {
+  GvStep gv_s{"WriteHeader"};
   if (data.title_id == -1) {
     data.title_id = kernel_state_->title_id();
   }
@@ -628,10 +642,13 @@ X_RESULT ContentManager::CreateContent(const std::string_view root_name,
     return X_ERROR_ALREADY_EXISTS;
   }
 
-  if (const X_RESULT result = CreatePackage(xuid, data)) {
-    return result;
+  {
+    GvStep gv_s{"Create:CreatePackage"};
+    if (const X_RESULT result = CreatePackage(xuid, data)) {
+      return result;
+    }
   }
-
+  GvStep gv_s2{"Create:mount"};
   auto package = ResolvePackage(root_name, xuid, data);
   if (!package) {
     return X_ERROR_ACCESS_DENIED;
@@ -703,6 +720,7 @@ bool ContentManager::IsSavedGameRoot(const std::string_view root_name) {
 }
 
 X_RESULT ContentManager::CloseContent(const std::string_view root_name) {
+  GvStep gv_s{"CloseContent"};
   GvLockWait gv_lw{"CloseContent"};
   auto global_lock = global_critical_region_.Acquire();
   gv_lw.Done();
@@ -864,6 +882,7 @@ static bool PackageHasData(const std::filesystem::path& p) {
 }
 
 bool ContentManager::MoveSaveAside(const std::filesystem::path& package_path) {
+  GvStep gv_s{"MoveSaveAside"};
   std::error_code ec;
   if (!PackageHasData(package_path)) {
     return false;
@@ -888,6 +907,7 @@ bool ContentManager::MoveSaveAside(const std::filesystem::path& package_path) {
 
 void ContentManager::RestoreSaveIfEmpty(
     const std::filesystem::path& package_path) {
+  GvStep gv_s{"RestoreSaveIfEmpty"};
   auto it = replaced_saves_.find(SaveKey(package_path));
   if (it == replaced_saves_.end()) {
     return;
@@ -919,6 +939,7 @@ void ContentManager::RestoreSaveIfEmpty(
 // and before the new one was written: put the old one back the next time the
 // game looks for it.
 void ContentManager::RecoverLeftSave(const std::filesystem::path& package_path) {
+  GvStep gv_s{"RecoverLeftSave"};
   auto global_lock = global_critical_region_.Acquire();
   std::error_code ec;
   if (replaced_saves_.count(SaveKey(package_path)) ||
@@ -947,10 +968,18 @@ X_RESULT ContentManager::DeleteContent(const uint64_t xuid,
   gv_lw.Done();
 
   std::filesystem::path package_path;
-  if (const X_RESULT result = ResolvePackagePath(xuid, data, package_path)) {
-    return result;
+  {
+    GvStep gv_s{"Delete:resolve"};
+    if (const X_RESULT result = ResolvePackagePath(xuid, data, package_path)) {
+      return result;
+    }
   }
-  if (IsContentOpen(package_path)) {
+  bool gv_open;
+  {
+    GvStep gv_s{"Delete:isopen"};
+    gv_open = IsContentOpen(package_path);
+  }
+  if (gv_open) {
     return X_ERROR_SHARING_VIOLATION;
   }
   if (keep_old && data.content_type == XContentType::kSavedGame &&
