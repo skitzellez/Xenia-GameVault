@@ -694,6 +694,14 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name,
   return X_ERROR_SUCCESS;
 }
 
+bool ContentManager::IsSavedGameRoot(const std::string_view root_name) {
+  auto global_lock = global_critical_region_.Acquire();
+  auto it = open_packages_.find(string_key_insensitive(root_name));
+  return it != open_packages_.end() &&
+         it->second->GetPackageContentData().content_type ==
+             XContentType::kSavedGame;
+}
+
 X_RESULT ContentManager::CloseContent(const std::string_view root_name) {
   GvLockWait gv_lw{"CloseContent"};
   auto global_lock = global_critical_region_.Acquire();

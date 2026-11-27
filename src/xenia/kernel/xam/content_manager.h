@@ -283,6 +283,8 @@ class ContentManager {
                        uint32_t& content_license,
                        const uint32_t disc_number = -1);
   X_RESULT CloseContent(const std::string_view root_name);
+  // Game Vault: whether the open root holds a saved game (not DLC).
+  bool IsSavedGameRoot(const std::string_view root_name);
   X_RESULT GetContentThumbnail(const uint64_t xuid,
                                const XCONTENT_AGGREGATE_DATA& data,
                                std::vector<uint8_t>* buffer);

@@ -97,7 +97,8 @@ dword_result_t XamContentGetLicenseMask_entry(lpdword_t mask_ptr,
   };
 
   if (!overlapped_ptr) {
-    return GvRunOffLane(run);
+    uint32_t extended_error, length;
+    return run(extended_error, length);
   } else {
     kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
     return X_ERROR_IO_PENDING;
@@ -173,7 +174,8 @@ dword_result_t xeXamContentResolve(
   };
 
   if (!overlapped_ptr) {
-    return GvRunOffLane(run);
+    uint32_t extended_error, length;
+    return run(extended_error, length);
   } else {
     kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
     return X_ERROR_IO_PENDING;
@@ -605,7 +607,13 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
   };
 
   if (!overlapped_ptr) {
-    return GvRunOffLane(run);
+    // Game Vault: only saved games move off the lane; DLC opens also load the title's
+    // achievement data, which crashed Forza Motorsport 3 off the game thread.
+    if (content_data.content_type == XContentType::kSavedGame) {
+      return GvRunOffLane(run);
+    }
+    uint32_t extended_error, length;
+    return run(extended_error, length);
   } else {
     kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
     return X_ERROR_IO_PENDING;
@@ -677,9 +685,14 @@ dword_result_t XamContentClose_entry(lpstring_t root_name,
   // Closes a previously opened root from XamContentCreate*.
   X_RESULT result = X_ERROR_SUCCESS;
   const std::string gv_root = root_name.value();
-  kernel_state()->RunBlockingIo(
-      [&]() { result = kernel_state()->content_manager()->CloseContent(gv_root); },
-      GuestScheduler::BlockingCallClass::kConcurrent, false);
+  auto* gv_cm = kernel_state()->content_manager();
+  if (gv_cm->IsSavedGameRoot(gv_root)) {
+    kernel_state()->RunBlockingIo(
+        [&]() { result = gv_cm->CloseContent(gv_root); },
+        GuestScheduler::BlockingCallClass::kConcurrent, false);
+  } else {
+    result = gv_cm->CloseContent(gv_root);
+  }
   XELOGI("Spartan saves: closed root '{}:' for '{}': error {:08X}",
          root_name.value(), SpartanCaller(), result);
   return CompleteRequest(overlapped_ptr, result);
@@ -735,7 +748,8 @@ dword_result_t XamContentGetCreator_entry(
   };
 
   if (!overlapped_ptr) {
-    return GvRunOffLane(run);
+    uint32_t extended_error, length;
+    return run(extended_error, length);
   } else {
     kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
     return X_ERROR_IO_PENDING;
