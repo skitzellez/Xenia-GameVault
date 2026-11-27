@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "xenia/base/filesystem.h"
 #include "third_party/zlib-ng/zlib-ng.h"
 
 namespace UWP {
@@ -23,7 +24,7 @@ class PatchArchiveWorkspace {
   explicit PatchArchiveWorkspace(const std::filesystem::path& parent) {
     static std::atomic<uint64_t> sequence{0};
     const auto root = std::filesystem::absolute(parent).lexically_normal();
-    std::filesystem::create_directories(root);
+    xe::filesystem::CreateFolder(root);
     for (unsigned attempt = 0; attempt < 32; ++attempt) {
       path_ =
           root /

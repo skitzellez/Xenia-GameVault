@@ -18,6 +18,8 @@
 #undef CreateFile
 
 #include "xenia/base/filesystem.h"
+
+#include <vector>
 #include "xenia/base/logging.h"
 #include "xenia/base/platform_win.h"
 #if XE_PLATFORM_WINRT
@@ -52,23 +54,33 @@ std::error_code MakeFoldersFromApp(const std::filesystem::path& path) {
     if (c == L'/') c = L'\\';
   }
   while (p.size() > 3 && p.back() == L'\\') p.pop_back();
-  // the drive root ("D:\\") is never made; folders above that already exist may refuse (access denied)
-  const size_t start = p.size() > 2 && p[1] == L':' ? 3 : 0;
-  for (size_t i = start; i <= p.size(); ++i) {
-    if (i != p.size() && p[i] != L'\\') continue;
-    const std::wstring part = p.substr(0, i);
-    if (part.size() <= 3) continue;
-    if (!CreateDirectoryFromAppW(part.c_str(), nullptr)) {
+  // Game Vault: from the folder up, only to the first one that is there (console 11-27: making a folder took ~2 s,
+  // every time, when the folders above the app's own were tried; making one folder whose parent is there takes
+  // 0.1 ms). Folders above that the app may not look at count as there.
+  std::vector<std::wstring> missing;
+  std::wstring cur = p;
+  while (cur.size() > 3) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (GetFileAttributesExFromAppW(cur.c_str(), GetFileExInfoStandard, &data)) {
+      if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        return std::error_code(int(ERROR_PATH_NOT_FOUND), std::system_category());
+      }
+      break;
+    }
+    const DWORD e = GetLastError();
+    if (e == ERROR_ACCESS_DENIED) break;
+    missing.push_back(cur);
+    const size_t slash = cur.find_last_of(L'\\');
+    if (slash == std::wstring::npos || slash < 2) break;
+    cur.resize(slash);
+  }
+  for (auto it = missing.rbegin(); it != missing.rend(); ++it) {
+    if (!CreateDirectoryFromAppW(it->c_str(), nullptr)) {
       const DWORD e = GetLastError();
-      if (e != ERROR_ALREADY_EXISTS && e != ERROR_ACCESS_DENIED && i == p.size()) {
+      if (e != ERROR_ALREADY_EXISTS) {
         return std::error_code(int(e), std::system_category());
       }
     }
-  }
-  WIN32_FILE_ATTRIBUTE_DATA data{};
-  if (!GetFileAttributesExFromAppW(p.c_str(), GetFileExInfoStandard, &data) ||
-      !(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-    return std::error_code(int(ERROR_PATH_NOT_FOUND), std::system_category());
   }
   return {};
 }

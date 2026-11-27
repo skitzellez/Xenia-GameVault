@@ -1775,7 +1775,7 @@ static bool InstallDiscPackages(Emulator* emulator, std::filesystem::path& start
   }
   if (!to_copy.empty()) {
     std::error_code ec;
-    std::filesystem::create_directories(to_copy.front().dest.parent_path(), ec);
+    ec = xe::filesystem::CreateFolder(to_copy.front().dest.parent_path());
     const auto space = std::filesystem::space(to_copy.front().dest.parent_path(), ec);
     if (!ec && space.available < needed + (uint64_t(256) << 20)) {
       XELOGE("Game Vault: disc data needs {} bytes, {} free", needed, space.available);
@@ -1802,7 +1802,7 @@ static bool InstallDiscPackages(Emulator* emulator, std::filesystem::path& start
       XELOGI("Game Vault: installing {} from the disc, {} bytes", p.entry->name(), p.entry->size());
       // under another folder until it is whole: a package cut short must not count as installed
       const auto part = p.dest.parent_path().parent_path() / (p.dest.filename().string() + ".part");
-      std::filesystem::create_directories(p.dest.parent_path(), ec);
+      ec = xe::filesystem::CreateFolder(p.dest.parent_path());
       vfs::File* in = nullptr;
       bool ok = p.entry->Open(vfs::FileAccess::kFileReadData, &in) == X_STATUS_SUCCESS;
       FILE* out = ok ? xe::filesystem::OpenFile(part, "wb") : nullptr;
@@ -2437,6 +2437,7 @@ void GameVaultXeniaApp::EmulatorThread() {
       };
       step("mkdir", [&](std::error_code& e) { fs::create_directories(base / "a", e); });
       step("mkdir2", [&](std::error_code& e) { fs::create_directory(base / "b", e); });
+      step("mkdirFast", [&](std::error_code& e) { e = xe::filesystem::CreateFolder(base / "d" / "e" / "f"); });
       step("write", [&](std::error_code& e) {
         FILE* f = xe::filesystem::OpenFile(base / "a" / "save.dat", "wb");
         if (!f) { e = std::make_error_code(std::errc::io_error); return; }

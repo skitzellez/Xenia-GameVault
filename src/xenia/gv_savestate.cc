@@ -574,7 +574,7 @@ bool GvSaveState(Emulator* emulator, const std::filesystem::path& path,
   }
 
   std::error_code ec;
-  std::filesystem::create_directories(path.parent_path(), ec);
+  ec = xe::filesystem::CreateFolder(path.parent_path());
   std::filesystem::path part = path;
   part += ".part";
   {

@@ -9,6 +9,7 @@
 
 #include <ranges>
 
+#include "xenia/base/filesystem.h"
 #include "xenia/emulator.h"
 #include "xenia/gv_savestate.h"
 #include "xenia/config.h"
@@ -950,7 +951,7 @@ X_STATUS Emulator::LaunchXboxOriginal(const std::filesystem::path& path,
            cvars::xefu_launcher, xe::strip_pii(xe::path_to_utf8(xefu_path())));
     // Somewhere for the user to copy XeFu to.
     std::error_code create_error;
-    std::filesystem::create_directories(xefu_path(), create_error);
+    create_error = xe::filesystem::CreateFolder(xefu_path());
     ReportMissingXeFuFile(cvars::xefu_launcher);
     return X_STATUS_NOT_SUPPORTED;
   }
@@ -1070,7 +1071,7 @@ uint32_t Emulator::DataMigration(const uint64_t xuid) {
       const auto path = content_root_ / used_xuid / title.name;
 
       std::error_code ec;
-      std::filesystem::create_directories(path, ec);
+      ec = xe::filesystem::CreateFolder(path);
       if (!ec) {
         std::filesystem::rename(previous_path, path / content_type.name, ec);
       }
@@ -1093,7 +1094,7 @@ uint32_t Emulator::DataMigration(const uint64_t xuid) {
       auto copy_headers = [&,
                            func = __func__](const std::filesystem::path& path) {
         std::error_code ec;
-        std::filesystem::create_directories(path, ec);
+        ec = xe::filesystem::CreateFolder(path);
         if (!ec) {
           std::filesystem::copy(
               headers_path, path,

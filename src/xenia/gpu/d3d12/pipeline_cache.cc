@@ -355,7 +355,7 @@ void PipelineCache::InitializeShaderStorage(
   if (std::filesystem::exists(cache_root / "gv_pso_on.txt")) {
     gv_pso_dir_ = cache_root / "gv_pso";
     std::error_code gv_pso_ec;
-    std::filesystem::create_directories(gv_pso_dir_, gv_pso_ec);
+    gv_pso_ec = xe::filesystem::CreateFolder(gv_pso_dir_);
     XELOGI("Game Vault: pipeline timing probe on, {}", xe::path_to_utf8(gv_pso_dir_));
   }
   std::unordered_map<uint64_t, uint32_t> gv_hot_list;

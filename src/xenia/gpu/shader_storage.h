@@ -172,7 +172,7 @@ inline bool EnsureShaderStorageDirectoriesExist(
   std::error_code error_code;
   auto shareable_root = GetShaderStorageShareableRoot(cache_root);
   if (!std::filesystem::exists(shareable_root)) {
-    if (!std::filesystem::create_directories(shareable_root, error_code)) {
+    if ((error_code = xe::filesystem::CreateFolder(shareable_root))) {
       XELOGE(
           "Failed to create shader storage directory, persistent shader "
           "storage will be disabled: {}",

@@ -490,7 +490,7 @@ X_RESULT ContentManager::WriteContentHeaderFile(const uint64_t xuid,
   auto parent_path = header_path.parent_path();
 
   if (!std::filesystem::exists(parent_path)) {
-    if (!std::filesystem::create_directories(parent_path)) {
+    if (xe::filesystem::CreateFolder(parent_path)) {
       return X_STATUS_ACCESS_DENIED;
     }
   }
@@ -624,7 +624,7 @@ X_RESULT ContentManager::CreatePackage(const uint64_t xuid,
     return X_ERROR_ALREADY_EXISTS;
   }
 
-  if (!std::filesystem::create_directories(package_path)) {
+  if (xe::filesystem::CreateFolder(package_path)) {
     return X_ERROR_ACCESS_DENIED;
   }
   return X_ERROR_SUCCESS;
@@ -890,7 +890,7 @@ bool ContentManager::MoveSaveAside(const std::filesystem::path& package_path) {
   const std::filesystem::path backup = SaveBackupPath(package_path);
   std::filesystem::remove_all(backup, ec);
   ec.clear();
-  std::filesystem::create_directories(backup.parent_path(), ec);
+  ec = xe::filesystem::CreateFolder(backup.parent_path());
   ec.clear();
   std::filesystem::rename(package_path, backup, ec);
   if (ec) {

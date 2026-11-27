@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include "xenia/base/filesystem.h"
 #include "xenia/cpu/xex_module.h"
 
 #include <algorithm>
@@ -1521,7 +1522,7 @@ void XexInfoCache::Init(XexModule* xexmod) {
 
   infocache_path.append(xexmod->image_sha_str_);
 
-  std::filesystem::create_directories(infocache_path);
+  xe::filesystem::CreateFolder(infocache_path);
   infocache_path.append("executable_addr_flags.bin");
 
   unsigned num_codebytes = xexmod->high_address_ - xexmod->low_address_;

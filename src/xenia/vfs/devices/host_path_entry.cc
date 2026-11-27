@@ -111,7 +111,7 @@ X_STATUS HostPathEntry::Open(uint32_t desired_access, File** out_file) {
     std::filesystem::path layer = LayerPathOf(device_, path());
     if (!layer.empty() && host_path_ != layer) {
       std::error_code ec;
-      std::filesystem::create_directories(layer.parent_path(), ec);
+      ec = xe::filesystem::CreateFolder(layer.parent_path());
       std::filesystem::copy_file(host_path_, layer,
                                  std::filesystem::copy_options::overwrite_existing,
                                  ec);
@@ -149,12 +149,12 @@ std::unique_ptr<Entry> HostPathEntry::CreateEntryInternal(
       LayerPathOf(device_, xe::utf8::join_guest_paths(path(), name));
   if (!layer.empty()) {
     std::error_code ec;
-    std::filesystem::create_directories(
-        (attributes & kFileAttributeDirectory) ? layer : layer.parent_path(), ec);
+    ec = xe::filesystem::CreateFolder(
+        (attributes & kFileAttributeDirectory) ? layer : layer.parent_path());
     full_path = layer;
   }
   if (attributes & kFileAttributeDirectory) {
-    if (!std::filesystem::create_directories(full_path)) {
+    if (xe::filesystem::CreateFolder(full_path)) {
       return nullptr;
     }
   } else {

@@ -10,6 +10,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include "xenia/base/filesystem.h"
 
 namespace UWP {
 
@@ -25,7 +26,7 @@ class DownloadFile {
             std::chrono::steady_clock::now().time_since_epoch().count()) +
         "-" + std::to_string(sequence++);
     if (!destination_.parent_path().empty()) {
-      std::filesystem::create_directories(destination_.parent_path());
+      xe::filesystem::CreateFolder(destination_.parent_path());
     }
     file_.open(partial_, std::ios::binary | std::ios::trunc);
     if (!file_) {

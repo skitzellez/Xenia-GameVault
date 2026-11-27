@@ -1142,7 +1142,7 @@ winrt::fire_and_forget DownloadConfigForGameAsync(
       co_return;
     }
 
-    std::filesystem::create_directories(dest_folder);
+    xe::filesystem::CreateFolder(dest_folder);
     std::filesystem::path out_path = std::filesystem::path(dest_folder) /
                                      (normalized + std::string(".config.toml"));
 
@@ -1370,11 +1370,11 @@ winrt::fire_and_forget FetchUnityMetadataAsync(std::string title_id) {
           const auto banners_root = metadata_root / "banners";
           const auto backgrounds_root = metadata_root / "backgrounds";
           const auto galleries_root = metadata_root / "galleries";
-          std::filesystem::create_directories(icons_root);
-          std::filesystem::create_directories(covers_root);
-          std::filesystem::create_directories(banners_root);
-          std::filesystem::create_directories(backgrounds_root);
-          std::filesystem::create_directories(galleries_root);
+          xe::filesystem::CreateFolder(icons_root);
+          xe::filesystem::CreateFolder(covers_root);
+          xe::filesystem::CreateFolder(banners_root);
+          xe::filesystem::CreateFolder(backgrounds_root);
+          xe::filesystem::CreateFolder(galleries_root);
 
           if (root.HasKey(L"artwork")) {
             auto artwork = root.GetNamedObject(L"artwork");

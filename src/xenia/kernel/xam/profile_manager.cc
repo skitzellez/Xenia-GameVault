@@ -566,7 +566,7 @@ bool ProfileManager::CreateProfile(const std::string gamertag, bool autologin,
                                    bool default_xuid) {
   const auto xuid = !default_xuid ? GenerateXuid() : 0xB13EBABEBABEBABE;
 
-  if (!std::filesystem::create_directories(GetProfilePath(xuid))) {
+  if (xe::filesystem::CreateFolder(GetProfilePath(xuid))) {
     return false;
   }
 
@@ -587,7 +587,7 @@ bool ProfileManager::CreateProfile(const X_XAMACCOUNTINFO* account_info,
     xuid = GenerateXuid();
   }
 
-  if (!std::filesystem::create_directories(GetProfilePath(xuid))) {
+  if (xe::filesystem::CreateFolder(GetProfilePath(xuid))) {
     return false;
   }
 

@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "xenia/base/filesystem.h"
 #include "xenia/base/platform.h"
 #if XE_PLATFORM_WIN32
 #include <windows.h>
@@ -54,7 +55,7 @@ class TitleUpdateTransaction {
     }
     const auto target = backup_ / source.lexically_relative(root_);
     CheckedBackup(target);
-    std::filesystem::create_directories(target.parent_path());
+    xe::filesystem::CreateFolder(target.parent_path());
     CheckedBackup(target);
     CheckedPath(source);
     auto record = std::make_pair(source, target);
@@ -84,7 +85,7 @@ class TitleUpdateTransaction {
       throw std::runtime_error(
           "Another installed package already uses this filename.");
     }
-    std::filesystem::create_directories(record.destination.parent_path());
+    xe::filesystem::CreateFolder(record.destination.parent_path());
     CheckedSavedPath(record.source, record.cache_root);
     CheckedPath(record.destination);
     if (std::filesystem::exists(record.destination)) {
@@ -127,7 +128,7 @@ class TitleUpdateTransaction {
           throw std::runtime_error(
               "The saved update's original filename is already in use.");
         }
-        std::filesystem::create_directories(source.parent_path());
+        xe::filesystem::CreateFolder(source.parent_path());
         CheckedSavedPath(source, activation.cache_root);
         CheckedPath(destination);
         const auto rename_error = RenamePackage(destination, source);

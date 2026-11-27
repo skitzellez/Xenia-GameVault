@@ -34,7 +34,7 @@ bool HostPathDevice::Initialize() {
   if (!xe::filesystem::PathExistsAny(host_path_)) {   // (Game Vault: also a network folder game)
     if (!read_only_) {
       // Create the path.
-      std::filesystem::create_directories(host_path_);
+      xe::filesystem::CreateFolder(host_path_);
     } else {
       XELOGE("Host path does not exist");
       return false;
