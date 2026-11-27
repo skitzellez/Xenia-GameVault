@@ -66,7 +66,7 @@ DEFINE_int32(
     "the number of threads explicitly (up to the number of logical CPU cores), "
     "0 to disable multithreaded pipeline creation.",
     "D3D12");
-DEFINE_int32(gv_play_pipeline_threads, 2,
+DEFINE_int32(gv_play_pipeline_threads, 0,
              "Game Vault: pipeline creation threads that keep building while the game plays (all of them build "
              "while \"Getting Graphics Ready\" is up). Every 80-120 ms hitch PSYCHOsmurf / Spartan Test's trackers "
              "caught in Spec Ops and Fall of Cybertron had the builders on 5-6 cores and the game's threads waiting "
